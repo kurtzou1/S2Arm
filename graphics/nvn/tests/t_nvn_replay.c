@@ -1684,8 +1684,8 @@ static void t_read_texels_gpu_owned(void) {
 static tex_t mk_tex3d(uint64_t serial, int fmt, uint32_t w, uint32_t h, uint32_t depth, uint32_t levels);   // 定义在本文件后面
 static tex_t mk_tex_tgt(uint64_t serial, int target, int fmt, uint32_t w, uint32_t h, uint32_t depth);
 static void rt_gpu_tex(tex_t *t) { nvn_be_sub_begin(); CHECK(rp_tex_resolve(t, &g_fake_cmd) != NULL); rp_tex_mark_gpu_written(t); nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); }
-static int rt_rows_are(const uint8_t *dst, size_t row, uint32_t layer, const NVNcopyRegion *r, uint64_t wb, uint64_t hb) {   // 每行 wb 字节是 GPU 内容
-    for (uint64_t y = 0; y < hb; y++) for (uint64_t i = 0; i < wb; i++) if (dst[y * row + i] != gpu_byte(layer, 0, r->yoffset, r->xoffset, y, i)) return 0;
+static int rt_rows_are(const uint8_t *dst, size_t row, uint32_t layer, uint32_t level, const NVNcopyRegion *r, uint64_t wb, uint64_t hb) {   // 每行 wb 字节是 GPU 内容
+    for (uint64_t y = 0; y < hb; y++) for (uint64_t i = 0; i < wb; i++) if (dst[y * row + i] != gpu_byte(layer, level, r->yoffset, r->xoffset, y, i)) return 0;
     return 1;
 }
 static void t_read_texels_gpu(void) {
@@ -1700,7 +1700,7 @@ static void t_read_texels_gpu(void) {
     sent_fill(dst, sizeof dst); nvn_be_read_texels(&a, 0, 0, &all, dst, 32, 128);
     CHECK(g_begins == b0 + 1 && g_commits == c0 + 1 && g_last_signal == f0 + 64 && nvn_be_last_fence() == f0 + 64);
     CHECK(g_ntb == 1 && g_tb[0].to_tex == 0 && g_tb[0].layer == 0 && g_tb[0].level == 0 && g_tb[0].w == 8 && g_tb[0].h == 4 && g_tb[0].row == 32 && g_tb[0].img == 128);
-    CHECK(rt_rows_are(dst, 32, 0, &all, 32, 4) && all_sent(dst + 128, sizeof dst - 128));
+    CHECK(rt_rows_are(dst, 32, 0, 0, &all, 32, 4) && all_sent(dst + 128, sizeof dst - 128));
     CHECK(g_rt_locks == l0 + 1 && g_rt_unlocks == g_rt_locks && un_cnt("read_texels") == 0);
     { uint64_t st[4]; nvn_be_read_texels_gpu_stats(st); CHECK(st[0] == st0[0] + 1); }
     // 之后的正常提交：提交值接着往后取（不与旁路段撞）
@@ -1709,23 +1709,23 @@ static void t_read_texels_gpu(void) {
     NVNcopyRegion sub = {.xoffset = 2, .yoffset = 1, .width = 3, .height = 2, .depth = 1}; g_ntb = 0;
     sent_fill(dst, sizeof dst); nvn_be_read_texels(&a, 0, 0, &sub, dst, 16, 32);
     CHECK(g_ntb == 1 && g_tb[0].w == 3 && g_tb[0].h == 2 && g_tb[0].row == 12);
-    CHECK(rt_rows_are(dst, 16, 0, &sub, 12, 2) && all_sent(dst + 12, 4) && all_sent(dst + 28, sizeof dst - 28));
+    CHECK(rt_rows_are(dst, 16, 0, 0, &sub, 12, 2) && all_sent(dst + 12, 4) && all_sent(dst + 28, sizeof dst - 28));
     // ③ 二维数组 4×4 共 3 层：起始层 1、深度 2 → 拷第 1、2 层；片距 80（64 + 16 pad）
     tex_t b = mk_tex_tgt(62, NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGBA8, 4, 4, 3); rt_gpu_tex(&b);
     NVNcopyRegion two = {.width = 4, .height = 4, .depth = 2}; g_ntb = 0;
     sent_fill(dst, sizeof dst); nvn_be_read_texels(&b, 0, 1, &two, dst, 16, 80);
     CHECK(g_ntb == 2 && g_tb[0].layer == 1 && g_tb[1].layer == 2);
-    CHECK(rt_rows_are(dst, 16, 1, &two, 16, 4) && all_sent(dst + 64, 16) && rt_rows_are(dst + 80, 16, 2, &two, 16, 4) && all_sent(dst + 144, sizeof dst - 144));
+    CHECK(rt_rows_are(dst, 16, 1, 0, &two, 16, 4) && all_sent(dst + 64, 16) && rt_rows_are(dst + 80, 16, 2, 0, &two, 16, 4) && all_sent(dst + 144, sizeof dst - 144));
     // ④ 三维 4×4×4：第 1、2 片（copy_tex_buf 的 layer 在三维上是片号）
     tex_t e = mk_tex3d(63, NVN_FORMAT_RGBA8, 4, 4, 4, 1); rt_gpu_tex(&e);
     NVNcopyRegion s12 = {.zoffset = 1, .width = 4, .height = 4, .depth = 2}; g_ntb = 0;
     sent_fill(dst, sizeof dst); nvn_be_read_texels(&e, 0, 0, &s12, dst, 16, 64);
-    CHECK(g_ntb == 2 && g_tb[0].layer == 1 && g_tb[1].layer == 2 && rt_rows_are(dst, 16, 1, &s12, 16, 4) && rt_rows_are(dst + 64, 16, 2, &s12, 16, 4));
+    CHECK(g_ntb == 2 && g_tb[0].layer == 1 && g_tb[1].layer == 2 && rt_rows_are(dst, 16, 1, 0, &s12, 16, 4) && rt_rows_are(dst + 64, 16, 2, 0, &s12, 16, 4));
     // ⑤ BC1 16×8：块列 1..2、块行 0..1 → 一行 16 字节（2 块 × 8）、2 块行
     tex_t d = mk_tex(64, 0x30000, NVN_FORMAT_RGBA_DXT1, 16, 8, 1, 0); rt_gpu_tex(&d);
     NVNcopyRegion bc = {.xoffset = 4, .width = 8, .height = 8, .depth = 1}; g_ntb = 0;
     sent_fill(dst, sizeof dst); nvn_be_read_texels(&d, 0, 0, &bc, dst, 16, 32);
-    CHECK(g_ntb == 1 && g_tb[0].row == 16 && g_tb[0].img == 32 && rt_rows_are(dst, 16, 0, &bc, 16, 2) && all_sent(dst + 32, sizeof dst - 32));
+    CHECK(g_ntb == 1 && g_tb[0].row == 16 && g_tb[0].img == 32 && rt_rows_are(dst, 16, 0, 0, &bc, 16, 2) && all_sent(dst + 32, sizeof dst - 32));
     // ⑥ 读不了的：一段都不开、不动 dst、具名记账、锁平衡
     {   // 格式没有 READBACK（后端会拒 / 拷不出 NVN 字节）：开段前挡住
         const uint32_t saved = g_caps_readback[0]; g_caps_readback[0] = 0;
@@ -1757,7 +1757,37 @@ static void t_read_texels_gpu(void) {
         fake_complete(NVN_GPU_DONE_OK); g_auto_done = 1;
         nvn_be_sub_begin(); nvn_be_sub_commit(); CHECK(g_last_signal == fx + 128); fake_complete(NVN_GPU_DONE_OK);
     }
-    { uint64_t st[4]; nvn_be_read_texels_gpu_stats(st); CHECK(st[0] == st0[0] + 5); }   // 只数读成的：① ② ③ ④ ⑤
+    tex_t one = mk_tex(65, 0x40000, NVN_FORMAT_RGBA8, 8, 0, 2, 0);
+    one.d.target = NVN_TEXTURE_TARGET_1D;
+    nvn_tex_layout(&one.d, &one.L);
+    rt_gpu_tex(&one);
+    tex_t array = mk_tex(66, 0x50000, NVN_FORMAT_RGBA8, 8, 4, 2, 0);
+    array.d.target = NVN_TEXTURE_TARGET_1D_ARRAY;
+    nvn_tex_layout(&array.d, &array.L);
+    rt_gpu_tex(&array);
+    NVNcopyRegion row = {.xoffset = 1, .width = 3, .height = 1, .depth = 1};
+    g_ntb = 0;
+    sent_fill(dst, sizeof dst);
+    nvn_be_read_texels(&one, 1, 0, &row, dst, 16, 32);
+    CHECK(g_ntb == 1 && g_tb[0].level == 1 && g_tb[0].layer == 0 &&
+          rt_rows_are(dst, 16, 0, 1, &row, 12, 1) && all_sent(dst + 12, sizeof dst - 12));
+    row.zoffset = 1;
+    row.depth = 2;
+    g_ntb = 0;
+    sent_fill(dst, sizeof dst);
+    nvn_be_read_texels(&array, 1, 1, &row, dst, 16, 32);
+    printf("ReadTexels 1D array transfers=%d target_rejected=%llu\n", g_ntb,
+           (unsigned long long)un_cnt("read_texels_gpu_target"));
+    CHECK(g_ntb == 2 && g_tb[0].layer == 2 && g_tb[1].layer == 3 &&
+          rt_rows_are(dst, 16, 2, 1, &row, 12, 1) && rt_rows_are(dst + 32, 16, 3, 1, &row, 12, 1) &&
+          all_sent(dst + 12, 20) && all_sent(dst + 44, sizeof dst - 44));
+    const int bb = g_begins;
+    row.yoffset = 1;
+    sent_fill(dst, sizeof dst);
+    nvn_be_read_texels(&array, 1, 1, &row, dst, 16, 32);
+    CHECK(all_sent(dst, sizeof dst) && g_begins == bb && un_cnt("read_texels_bad_region") == 1);
+    { uint64_t st[4]; nvn_be_read_texels_gpu_stats(st); CHECK(st[0] == st0[0] + 7); }   // 只数成功读回
+    nvn_be_tex_release(&one); nvn_be_tex_release(&array);
     nvn_be_tex_release(&a); nvn_be_tex_release(&b); nvn_be_tex_release(&e); nvn_be_tex_release(&d);
     g_buf_cpu_auto = cpu_auto; g_auto_done = 0; g_tb_fill = 0;
 }

@@ -40,13 +40,13 @@ for backend in backends:
         start = time.monotonic()
         with (out / "raw.log").open("wb") as log:
             result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=80)
-        raw = (out / "raw.log").read_text(errors="replace")
+        raw = (out / "raw.log").read_text(encoding="utf-8", errors="replace")
         rejected = mode == "unsupported-only"
         ok = result.returncode == (3 if rejected else 0)
         if rejected:
             ok = ok and "【红】" in raw and "native image atomic binding is unsupported" in raw and "EXPECTED_UNSUPPORTED" in raw
         else:
-            ok = ok and "PASS t_nvn_image_atomic:" in raw and "0 failures" in raw
+            ok = ok and "✓ t_nvn_image_atomic:" in raw and "0 failures" in raw
         entry = {"backend": backend, "mode": mode, "exit": result.returncode,
                  "wall_seconds": time.monotonic() - start, "expected_rejection": rejected,
                  "gpu_correctness_accepted": ok and not rejected, "ok": ok}

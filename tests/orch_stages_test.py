@@ -345,6 +345,7 @@ class StageTest(unittest.TestCase):
         code_bytes = ('build\t' + bid + '\n[code]\nmain 0 orig=00000000 new=1f2003d5\n'
                       '[runtime]\nunchanged-key\n').encode()
         fps_bytes = b'# original frame table\npresent\tdisplay\n'
+        step_bytes = b'# real-time step only\nbuild\t' + bid[:16].encode() + b'\nspeed\t2040\t0.5\t2.0\t2041\n'   # 实时步长表：缺省口径也进包
         table_bytes = b'# original widen table\nmain\t0x100\n'
         verified_bytes = (pid + '\t' + bid + '\toriginal-verdict\t' + verified_platform + '\n').encode()
         index_bytes = b'path\tsha256\noriginal.pchtxt\t0123456789abcdef\n'
@@ -371,7 +372,7 @@ class StageTest(unittest.TestCase):
                 env.pop('S2A_CAPS_OWN', None)
             with self.subTest(kind=kind, present=present, own=own):
                 if present:
-                    rows = {'code': [(patchfile, code_bytes)], 'fps': [(fps, fps_bytes)],
+                    rows = {'code': [(patchfile, code_bytes)], 'fps': [(fps, fps_bytes)], 'step': [(fps, step_bytes)],
                             'widen': [(table, table_bytes), (verified, verified_bytes)],
                             'community': [(index, index_bytes),
                                 (cv, (pid + '\t' + bid + '\tgfx:verified\n').encode())]}[kind]
@@ -397,13 +398,13 @@ class StageTest(unittest.TestCase):
                         self.assertEqual(keyfile.read_bytes(), ('rewrite\t' + plan['key'] + '~d\n').encode())
                         keys.append(plan['key'])
                         self.assertEqual(bool(plan['patch']), present and kind == 'code')
-                        self.assertEqual(bool(plan['fps']), present and kind == 'fps' and own)
+                        self.assertEqual(bool(plan['fps']), present and ((kind == 'fps' and own) or kind == 'step'))
                         self.assertEqual(bool(plan['tables']), present and kind == 'widen')
                         self.assertEqual(bool(plan['community']), present and kind == 'community')
                         if present and kind == 'community':
                             self.assertEqual(plan['selection'], 'gfx:verified,gfx:explicit')
                         self._check_rewrite_forwarding(deps, plan, kind, present and (own or kind != 'fps'), table_bytes,
-                                                       verified_bytes, fps_bytes, verified_platform)
+                                                       verified_bytes, step_bytes if kind == 'step' else fps_bytes, verified_platform)
                         if present and len(keys) == 2:
                             self.assertNotEqual(keys[0], keys[1], kind + ' must invalidate the stage key')
                         if len(keys) == 3:
@@ -441,7 +442,7 @@ class StageTest(unittest.TestCase):
             else:
                 self.assertNotIn('S2A_CODE_PATCH', call)
                 self.assertNotIn('S2A_CODE_BUILD', call)
-            if present and kind == 'fps':
+            if present and kind in ('fps', 'step'):
                 self.assertEqual(Path(call['S2A_FPS_TSV']).read_bytes(), fps_bytes)
             else:
                 self.assertNotIn('S2A_FPS_TSV', call)
@@ -518,6 +519,9 @@ class StageTest(unittest.TestCase):
 
     def test_fps_table_present_absent_key_and_forwarding(self):
         self._optional_input_pair('fps')
+
+    def test_step_only_fps_table_ships_by_default(self):
+        self._optional_input_pair('step')
 
     def test_widen_tables_present_absent_key_and_forwarding(self):
         self._optional_input_pair('widen')

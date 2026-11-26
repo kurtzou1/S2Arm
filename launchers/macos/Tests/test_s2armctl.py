@@ -734,6 +734,40 @@ class DeviceChoiceTests(unittest.TestCase):
         self.assertIn("设备名「乙」，设备号 U-2，同一 Wi-Fi", out)
 
 
+class SnapshotCommandTests(unittest.TestCase):
+    """截图只走 App 离屏自绘：系统截屏（screencapture）会弹屏幕录制授权框、挂着等人点，界面验证因此挂住"""
+
+    def _snap(self, how):
+        calls, out = [], io.StringIO()
+        png = b"\x89PNG fake"
+        def call(m, p, b=None, raw=False, **kw):
+            calls.append((m, p))
+            if p == "/snapshot": return png
+            return {"lastSnapshotPath": how, "windows": [{"sheet": False, "rect": [0, 0, 800, 600]}]}
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "a.png")
+            with mock.patch.object(ctl, "call", side_effect=call), \
+                 mock.patch.object(ctl.subprocess, "run", side_effect=AssertionError("不许调系统截屏")) as run, \
+                 mock.patch.object(sys, "argv", ["s2armctl", "snapshot", target]), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                try:
+                    ctl.main(); code = 0
+                except SystemExit as e:
+                    code = e.code
+            data = Path(target).read_bytes()
+        return code, calls, data, run.call_count, out.getvalue()
+
+    def test_snapshot_uses_app_render_and_never_screencapture(self):
+        # 期望手写：只 GET /snapshot（+ /state 读口径），文件内容就是 App 回的字节，没起任何子进程，退 0
+        code, calls, data, runs, text = self._snap("视图层级（弹出层 0 个已叠上；毛玻璃画不出）")
+        self.assertEqual((code, runs, data), (0, 0, b"\x89PNG fake"), text)
+        self.assertIn(("GET", "/snapshot"), calls)
+
+    def test_snapshot_incomplete_overlay_exits_3(self):
+        code, _, _, runs, text = self._snap("视图层级；截不全：引导页开着，App 自绘没把它叠上")
+        self.assertEqual((code, runs), (3, 0)); self.assertIn("截不全：引导页", text)
+
+
 class DiagCommandTests(unittest.TestCase):
     """#94：只敲 s2armctl diag 原先 IndexError；现在不给路径 = 导出到桌面，认不出的写法打用法退出 2"""
 

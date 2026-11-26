@@ -3,11 +3,9 @@
 
 // 布局预算 = 实际保留的整个窗口 72 GiB（普通档原先沿用 64 GiB、窗口 68 GiB；栈区按真值 2 GiB 后上限不定档也放不下）。
 typedef struct { unsigned alias_gb, version, unbounded; uint64_t heap_size; } s2a_layout_requirements;
-#define S2A_WINDOW_BUDGET (72ull << 30)
-#define S2A_UNBOUNDED_WINDOW_BUDGET (72ull << 30)
-#if defined(__ANDROID__) || defined(__OHOS__)
-_Static_assert(S2A_UNBOUNDED_WINDOW_BUDGET == S2A_WIN_SIZE, "Android 窗口与不定预算必须一致");
-#endif
+#include "../../../../runtime/include/s2a_window.h"
+#define S2A_WINDOW_BUDGET S2A_WIN_SIZE
+#define S2A_UNBOUNDED_WINDOW_BUDGET S2A_WIN_SIZE
 // 固定部分 = TLS/保护页 2 MiB + 栈区 2 GiB + 共享映射余量 96 MiB。
 //   栈区照 Horizon 39 位给 2 GiB（Ryujinx KPageTableBase stackRegion.Size = 0x80000000；同 runtime/src/layout.c VAMM_STACK）：
 //   SDK 建线程在栈区里随机挑地址放线程栈（StackGuardManager::MapAtRandomAddress），原先写死 128 MiB，

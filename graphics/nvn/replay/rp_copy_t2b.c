@@ -15,7 +15,9 @@ void rp_op_copy_t2b(nvn_gpu_cmd c, const p_copy_b2t *o, const void *rec) {
     const tex_t *t = o->tex;
     if (!c) return;   // 本段未建立，提交本身已失败。
     if (!t) { nvn_unimpl("tex", "t2b_no_texture", rec); return; }
-    int target = t->d.target, is3d = target == NVN_TEXTURE_TARGET_3D;
+    nvn_texdesc d = t->d;
+    rp_fold_1d_desc(&d);
+    int target = d.target, is3d = target == NVN_TEXTURE_TARGET_3D;
     if (target != NVN_TEXTURE_TARGET_2D && target != NVN_TEXTURE_TARGET_2D_ARRAY && !is3d &&
         target != NVN_TEXTURE_TARGET_CUBEMAP && target != NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) {
         nvn_unimpl("tex", "t2b_target", rec); return;
@@ -31,12 +33,12 @@ void rp_op_copy_t2b(nvn_gpu_cmd c, const p_copy_b2t *o, const void *rec) {
     }
     uint32_t lv = o->has_view && o->view.set_levels ? o->view.base_level : 0;
     uint32_t levels = t->d.levels ? t->d.levels : 1;
-    if (lv >= levels || lv >= 32 || !t->d.width || !t->d.height) { nvn_unimpl("tex", "t2b_bounds", rec); return; }
-    uint32_t w = t->d.width >> lv, h = t->d.height >> lv;
+    if (lv >= levels || lv >= 32 || !d.width || !d.height) { nvn_unimpl("tex", "t2b_bounds", rec); return; }
+    uint32_t w = d.width >> lv, h = d.height >> lv;
     if (!w) w = 1;
     if (!h) h = 1;
-    uint32_t depth = is3d ? t->d.depth >> lv : target == NVN_TEXTURE_TARGET_2D ? 1 :
-                     target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : t->d.depth;
+    uint32_t depth = is3d ? d.depth >> lv : target == NVN_TEXTURE_TARGET_2D ? 1 :
+                     target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : d.depth;
     if (is3d && !depth) depth = 1;
     uint32_t l0 = !is3d && o->has_view && o->view.set_layers ? o->view.min_layer : 0;
     int32_t nz = o->r.depth ? o->r.depth : 1;

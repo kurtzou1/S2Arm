@@ -6860,6 +6860,10 @@
   "en": "The developer certificate is incomplete (certificate, profile, or password missing). Import it again on the export page."
  },
  {
+  "source": "钥匙串在这个会话里读不了（ssh 等没有图形界面的会话里登录钥匙串是锁的）：请在这台 Mac 的图形会话里运行，或先解锁登录钥匙串。",
+  "en": "The keychain can't be read in this session (the login keychain stays locked in sessions without a graphical login, such as ssh). Run this from a graphical session on this Mac, or unlock the login keychain first."
+ },
+ {
   "source": "没收到证书密码。",
   "en": "No certificate password was received."
  },

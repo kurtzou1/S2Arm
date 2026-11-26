@@ -14,6 +14,7 @@
 #include "installed_seed.h"
 #include "program_cache.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -148,6 +149,90 @@ static int entry_path(const char *dir, const uint8_t identity[32], char *out, si
     return (w > 0 && (size_t)w < n) ? 0 : -1;
 }
 
+// ---- 目录索引（本机跨局缓存目录；随包种子目录不走这里）----
+// 每个身份取程序时要查一次缓存（正式读取、只读头各一处）。没有文件的身份原先每次都 open 一个不存在的路径：出包预编库供的
+//   程序从不写缓存文件，一款大型开放世界游戏每局约 2.7 万个身份全部落空（11-26 真机：回放线程 __openat 占 0.9–1.3%）。
+// 改为：某目录第一次被查询时 readdir 一遍，把「<64 位十六进制身份>.program」登记进内存集合；之后集合里没有的身份直接判
+//   未命中，不再 open。本进程写入成功（改名可见）后登记。缓存目录应用私有、只有本游戏进程写，外部同时写入不在设计内；
+//   外部删除无妨（集合里有、文件没了，open 得 ENOENT 照旧按未命中报）。目录打不开（不存在除外）就不建索引，退回逐次 open。
+static pthread_mutex_t g_idx_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    char dir[PCACHE_PATH];
+    int state;            // 0 = 没建；1 = 已建；-1 = 列不了目录，逐次 open
+    uint8_t (*keys)[32];  // 开放寻址；used[i] 标占用
+    uint8_t *used;
+    size_t n, cap;
+} g_idx;
+
+static size_t idx_slot(const uint8_t id[32], size_t cap) {
+    uint64_t h; memcpy(&h, id, 8);   // 身份是 SHA-256，前 8 字节已经均匀
+    return (size_t)(h & (cap - 1));
+}
+static int idx_insert_locked(const uint8_t id[32]) {
+    if ((g_idx.n + 1) * 2 > g_idx.cap) {
+        size_t cap = g_idx.cap ? g_idx.cap * 2 : 1024;
+        uint8_t (*keys)[32] = calloc(cap, 32); uint8_t *used = calloc(cap, 1);
+        if (!keys || !used) { free(keys); free(used); return -1; }
+        for (size_t i = 0; i < g_idx.cap; i++) if (g_idx.used[i]) {
+            size_t j = idx_slot(g_idx.keys[i], cap);
+            while (used[j]) j = (j + 1) & (cap - 1);
+            memcpy(keys[j], g_idx.keys[i], 32); used[j] = 1;
+        }
+        free(g_idx.keys); free(g_idx.used);
+        g_idx.keys = keys; g_idx.used = used; g_idx.cap = cap;
+    }
+    size_t j = idx_slot(id, g_idx.cap);
+    while (g_idx.used[j]) { if (!memcmp(g_idx.keys[j], id, 32)) return 0; j = (j + 1) & (g_idx.cap - 1); }
+    memcpy(g_idx.keys[j], id, 32); g_idx.used[j] = 1; g_idx.n++;
+    return 0;
+}
+static int idx_has_locked(const uint8_t id[32]) {
+    if (!g_idx.cap) return 0;
+    for (size_t j = idx_slot(id, g_idx.cap); g_idx.used[j]; j = (j + 1) & (g_idx.cap - 1))
+        if (!memcmp(g_idx.keys[j], id, 32)) return 1;
+    return 0;
+}
+static int hexnib(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+static void idx_build_locked(const char *dir) {
+    free(g_idx.keys); free(g_idx.used);
+    memset(&g_idx, 0, sizeof g_idx);
+    if (strlen(dir) >= sizeof g_idx.dir) { g_idx.state = -1; return; }
+    strcpy(g_idx.dir, dir);
+    DIR *d = opendir(dir);
+    if (!d) { g_idx.state = errno == ENOENT ? 1 : -1; return; }   // 目录还没有 = 一个文件都没有；写入时 ensure_dir 建
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *nm = e->d_name;
+        if (strlen(nm) != 64 + 8 || strcmp(nm + 64, ".program")) continue;
+        uint8_t id[32]; int ok = 1;
+        for (int i = 0; i < 32 && ok; i++) {
+            int hi = hexnib(nm[2 * i]), lo = hexnib(nm[2 * i + 1]);
+            if (hi < 0 || lo < 0) ok = 0; else id[i] = (uint8_t)(hi << 4 | lo);
+        }
+        if (ok && idx_insert_locked(id)) { closedir(d); g_idx.state = -1; return; }
+    }
+    closedir(d);
+    g_idx.state = 1;
+}
+// 1 = 索引里有（照常 open）；0 = 确定没有这个文件；-1 = 没有可用索引（照常 open）
+static int idx_lookup(const char *dir, const uint8_t id[32]) {
+    pthread_mutex_lock(&g_idx_mu);
+    if (g_idx.state == 0 || strcmp(g_idx.dir, dir)) idx_build_locked(dir);
+    int r = g_idx.state == 1 ? idx_has_locked(id) : -1;
+    pthread_mutex_unlock(&g_idx_mu);
+    return r;
+}
+// 本机缓存目录里的条目只读打开：索引确定没有就不碰文件系统，按 ENOENT 返回（与真 open 落空走同一条报告路径）
+static int idx_open(const char *dir, const uint8_t id[32], const char *path) {
+    if (idx_lookup(dir, id) == 0) { errno = ENOENT; return -1; }
+    return open(path, O_RDONLY | O_CLOEXEC);
+}
+static void idx_note_stored(const char *dir, const uint8_t id[32]) {
+    pthread_mutex_lock(&g_idx_mu);
+    if (g_idx.state == 1 && !strcmp(g_idx.dir, dir) && idx_insert_locked(id)) g_idx.state = -1;   // 记不下就整体退回逐次 open，不漏报
+    pthread_mutex_unlock(&g_idx_mu);
+}
+
 // installed = 1：随包种子目录里的文件，按已冻结修订的叶子规则受控打开（常规文件，或恰一条指向本游戏 objects 库的规范相对链接，见 installed_seed.h）；
 //   0 = 本机跨局缓存（可写目录），普通 open。
 static int program_cache_load(const char *dir, const uint8_t identity[32],
@@ -160,7 +245,7 @@ static int program_cache_load(const char *dir, const uint8_t identity[32],
     char path[PCACHE_PATH];
     if (entry_path(dir, identity, path, sizeof path)) { setwhy(why, why_size, "缓存路径过长"); return -1; }
 
-    int fd = installed ? s2a_installed_seed_open(path) : open(path, O_RDONLY | O_CLOEXEC);
+    int fd = installed ? s2a_installed_seed_open(path) : idx_open(dir, identity, path);
     if (fd < 0) {
         atomic_fetch_add(&g_misses, 1);
         setwhy(why, why_size, errno == ENOENT ? "未命中" : "打开失败：%s", strerror(errno));
@@ -259,7 +344,7 @@ int s2a_program_cache_probe(const char *dir, const uint8_t identity[32],
     if (!dir || !*dir || !identity || !result_sha || !len) { setwhy(why, why_size, "参数缺失"); return -1; }
     char path[PCACHE_PATH];
     if (entry_path(dir, identity, path, sizeof path)) { setwhy(why, why_size, "缓存路径过长"); return -1; }
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = idx_open(dir, identity, path);
     if (fd < 0) {
         if (errno == ENOENT) { setwhy(why, why_size, "未命中"); return 1; }   // 没有这个身份的文件：与「文件坏」分开返回（调用方分开计数）
         setwhy(why, why_size, "打开失败：%s", strerror(errno)); return -1;
@@ -345,6 +430,7 @@ int s2a_program_cache_store(const char *dir, const uint8_t identity[32],
         setwhy(why, why_size, "rename 失败：%s", strerror(errno));
         return -1;
     }
+    idx_note_stored(dir, identity);   // 改名后目标已可见（目录同步失败也不回滚），索引同步登记
     // 改名已可见后再同步目录项。失败如实报告，但不回滚或删除已发布的目标。
     int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     int sync_error = dirfd < 0 ? errno : 0;

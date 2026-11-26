@@ -4,7 +4,7 @@ import AppKit
 import XCTest
 @testable import NX2AppleUI
 
-/// 控制口 /snapshot 的视图层级截图（没有屏幕录制权限时的退路）要把弹出层叠上去：
+/// 控制口 /snapshot 只走视图层级离屏截图（不弹屏幕录制授权框），要把弹出层叠上去：
 ///   主窗口开着 sheet 时系统把主窗口压暗，只画主窗口就是一张整体发灰的图，看着像界面卡了一层蒙层。
 @MainActor final class SnapshotSheetTests: XCTestCase {
     private func window(_ frame: NSRect, _ color: NSColor) -> NSWindow {

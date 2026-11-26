@@ -26,7 +26,7 @@ void nvn_be_read_texels_gpu_stats(uint64_t out[4]) { out[0] = atomic_load(&g_rt_
 // first：二维数组 / 立方体是起始层（layer0 + zoffset），三维是起始片（zoffset）；nz 层 / 片。wb / hb：一行块字节数 / 块行数。
 static void rt_gpu(const tex_t *t, unsigned level, uint32_t first, uint32_t nz, const NVNcopyRegion *r, uint64_t wb, uint64_t hb,
                    int bw, int bh, uint32_t lw, uint32_t lh, uint8_t *dst, size_t row, size_t img) {
-    const int target = t->d.target;
+    const int target = rp_fold_1d_target(t->d.target);
     if (target != NVN_TEXTURE_TARGET_2D && target != NVN_TEXTURE_TARGET_2D_ARRAY && target != NVN_TEXTURE_TARGET_3D &&
         target != NVN_TEXTURE_TARGET_CUBEMAP && target != NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) { nvn_unimpl("be", "read_texels_gpu_target", t); return; }
     if (!(nvn_gpu_format_caps((uint32_t)t->d.format) & NVN_GPU_FMT_READBACK)) { nvn_unimpl("be", "read_texels_gpu_format", t); return; }

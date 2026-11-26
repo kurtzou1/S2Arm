@@ -51,7 +51,7 @@ static struct {
 static int bc_view(const tex_t *t, const view_t *v, int has_v, uint32_t *bw, uint32_t *bh);
 static void level_size(const tex_t *t, const view_t *v, int has_v, uint32_t *w, uint32_t *h) {
     uint32_t l = has_v && v->set_levels ? v->base_level : 0;
-    *w = t->d.width >> l; *h = t->d.height >> l;
+    *w = t->d.width >> l; *h = rp_tex_height(t) >> l;
     if (!*w) *w = 1;
     if (!*h) *h = 1;
     uint32_t bw, bh; if (bc_view(t, v, has_v, &bw, &bh)) { *w = (*w + bw - 1) / bw; *h = (*h + bh - 1) / bh; }
@@ -186,7 +186,7 @@ static nvn_gpu_view shadow_attach(nvn_gpu_cmd c, int i, const tex_t *t, uint32_t
     if (!base) return NULL;
     g_shu[i].base = base; g_shu[i].level = P.rt.cview[i].set_levels ? P.rt.cview[i].base_level : 0; g_shu[i].layer = P.rt.cview[i].set_layers ? P.rt.cview[i].min_layer : 0;
     g_shu[i].w = w; g_shu[i].h = h; g_shu[i].bytes = bytes;
-    { uint32_t l = g_shu[i].level; g_shu[i].bw = t->d.width >> l; g_shu[i].bh = t->d.height >> l;   // 基底那一级的像素尺寸（不按块取整：拷贝区域到级的边上）
+    { uint32_t l = g_shu[i].level; g_shu[i].bw = t->d.width >> l; g_shu[i].bh = rp_tex_height(t) >> l;   // 基底那一级的像素尺寸（不按块取整：拷贝区域到级的边上）
       if (!g_shu[i].bw) g_shu[i].bw = 1;
       if (!g_shu[i].bh) g_shu[i].bh = 1; }
     if (!cleared && !shadow_copy(c, i, 0)) { memset(&g_shu[i], 0, sizeof g_shu[i]); return NULL; }
@@ -205,13 +205,14 @@ static const view_t *att_view(const tex_t *t, int has_v, const view_t *v, view_t
     return tmp;
 }
 // 分层通道（顶点 / 几何阶段写层号）里附件从挂接层起能给几层，同 iOS nvn_mtl.m 开分层通道时 renderTargetArrayLength 的取法：
-//   3D = 该级的深度切片数 − 起始切片；2D 阵列 / 多重采样阵列 / 立方体阵列 = 层数 − 起始层；立方体 = 6 面 − 起始面；其余 1。
+//   3D = 该级的深度切片数 − 起始切片；阵列 = 层数 − 起始层；立方体 = 6 面 − 起始面；其余 1。
 //   视图显式设了层数的不超过它（NVN 视图的层范围就是这张目标可写的层）。
 static uint32_t att_layers_avail(const tex_t *t, int has_v, const view_t *v) {
     const uint32_t lv = has_v && v->set_levels ? v->base_level : 0, from = has_v && v->set_layers ? v->min_layer : 0;
     uint32_t all;
     switch (t->d.target) {
     case NVN_TEXTURE_TARGET_3D: all = (uint32_t)t->d.depth >> lv; break;
+    case NVN_TEXTURE_TARGET_1D_ARRAY: all = rp_tex_layer_count(t); break;
     case NVN_TEXTURE_TARGET_2D_ARRAY: case NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY: case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY: all = (uint32_t)t->d.depth; break;
     case NVN_TEXTURE_TARGET_CUBEMAP: all = 6; break;
     default: return 1;

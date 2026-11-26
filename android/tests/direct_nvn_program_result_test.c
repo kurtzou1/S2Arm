@@ -261,7 +261,7 @@ int main(void) {
             char b[240]; why[0] = 0;
             snprintf(b, sizeof b, "{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":1,\"uboSlot\":%d,\"uboOffset\":%d,\"constSampler\":%d}", ub_ok[k].ubo, ub_ok[k].off, ub_ok[k].sampler);
             int rc = parse_v2(b, &p, why, sizeof why);
-            char what[200]; snprintf(what, sizeof what, "v2 UBO %d +%d with constant sampler %d parses (why=%s)", ub_ok[k].ubo, ub_ok[k].off, ub_ok[k].sampler, why);
+            char what[320]; snprintf(what, sizeof what, "v2 UBO %d +%d with constant sampler %d parses (why=%s)", ub_ok[k].ubo, ub_ok[k].off, ub_ok[k].sampler, why);
             CHECK(rc == 0 && p.binding_count == 1, what);
             if (rc == 0 && p.binding_count == 1) {
                 const struct fd_binding *ub = &p.bindings[0];
@@ -449,7 +449,7 @@ int main(void) {
             { ",\"c0Reads\":[],\"c0ReadsStatic\":7", "", -1, 0, 0, "invalid static c0 read metadata must be rejected" },
         };
         for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
-            char json[1024]; char msg[192];
+            char json[1024]; char msg[512];   // 断言说明要装下 why（最多 191 字节）
             int n = snprintf(json, sizeof json,
                 "{\"schema\":\"s2a-direct-program-v1\",\"content\":{"
                 "\"stages\":[{\"stage\":\"vs\",\"spirv\":\"%s\"%s},{\"stage\":\"fs\",\"spirv\":\"%s\"%s}],"
@@ -473,7 +473,7 @@ int main(void) {
             { ",\"c0Reads\":[]", 1, 0, "legacy result without static proof is conservative when off" },
         };
         for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
-            char json[1024], msg[192];
+            char json[1024], msg[512];
             int n = snprintf(json, sizeof json, "{\"schema\":\"s2a-direct-program-v1\",\"content\":{\"stages\":[{\"stage\":\"vs\",\"spirv\":\"%s\"%s},{\"stage\":\"fs\",\"spirv\":\"%s\"}],\"bindings\":[]}}", k_spirv, cases[i].fields, k_spirv);
             memset(&p, 0, sizeof p); why[0] = 0;
             int rc = nvn_vk_program_parse_graphics((const uint8_t *)json, (size_t)n, &p, why, sizeof why);

@@ -172,12 +172,14 @@ static int rec_well_formed(const struct nvk_prog_rec *r) {
         if ((r->c1_ok & (1u << st)) && (!r->c1[st] || r->c1_len[st] < NVK_PROG_REC_C1_MIN || r->c1_len[st] > NVK_PROG_REC_C1_MAX)) return 0;
     return 1;
 }
+static void ix_clear_locked(void);   // 身份索引（见 find_locked 上方）
 static void stats_reset(void) { memset(&g.st, 0, sizeof g.st); }
 static void reset_locked(void) {
     g.reset_seq++;
     free(g.v); g.v = NULL;
     free(g.plan); g.plan = NULL;
     g.n = g.cap = 0;
+    ix_clear_locked();
     g.plan_n = g.plan_i = 0;
     g.limit = 0;   // 下一局（或下一个 load）按当时的 flag 重读上限
     g.dirty = 0; g.have_facts = 0; g.max_rank = 0;
@@ -335,7 +337,50 @@ static int slot_cmp(const void *pa, const void *pb) {
     if (a->last_use_rank != b->last_use_rank) return a->last_use_rank < b->last_use_rank ? 1 : -1;
     return memcmp(a->rec.identity, b->rec.identity, 32);
 }
+// 身份 → 下标索引（g.mu 下读写）。find_locked 原先线性扫 g.v，而每取一次程序 note、contains 各查一遍：
+//   11-26 一款大型开放世界游戏室外一局约 3 万个身份，回放线程上 nvk_prog_warm_note 自身 2.7%、contains 0.4%。
+//   开放寻址，表项 = 下标 + 1（0 = 空），表长保持 ≥ 2 × 条目数；删除用回移，不留墓碑。
+//   g_ix_ok 为 0（建表时内存不足）时 find_locked 退回线性扫，结果不变；下一次增删时再试着重建。
+static uint32_t *g_ix, g_ix_n; static int g_ix_ok;
+static uint32_t ix_home(const uint8_t id[32]) { uint32_t h; memcpy(&h, id, 4); return h & (g_ix_n - 1); }   // 身份是 SHA-256，前 4 字节已经均匀
+static void ix_clear_locked(void) { free(g_ix); g_ix = NULL; g_ix_n = 0; g_ix_ok = 0; }
+static void ix_rebuild_locked(void) {
+    uint32_t want = 64;
+    while (want < 2u * g.n + 2u) want *= 2;
+    uint32_t *t = (uint32_t *)calloc(want, sizeof *t);
+    free(g_ix); g_ix = t; g_ix_n = t ? want : 0; g_ix_ok = t != NULL;
+    if (!t) return;
+    for (uint32_t i = 0; i < g.n; i++) {
+        uint32_t j = ix_home(g.v[i].rec.identity);
+        while (g_ix[j]) j = (j + 1) & (g_ix_n - 1);
+        g_ix[j] = i + 1;
+    }
+}
+static void ix_add_locked(uint32_t idx) {   // g.v[idx] 已写好、g.n 已含它
+    if (!g_ix_ok || 2u * g.n + 2u > g_ix_n) { ix_rebuild_locked(); return; }
+    uint32_t j = ix_home(g.v[idx].rec.identity);
+    while (g_ix[j]) j = (j + 1) & (g_ix_n - 1);
+    g_ix[j] = idx + 1;
+}
+static void ix_del_locked(uint32_t idx) {   // g.v[idx] 还是要删的那个身份
+    if (!g_ix_ok) return;
+    const uint32_t m = g_ix_n - 1;
+    uint32_t i = ix_home(g.v[idx].rec.identity);
+    while (g_ix[i] && g_ix[i] != idx + 1) i = (i + 1) & m;
+    if (!g_ix[i]) { g_ix_ok = 0; return; }   // 表与数组对不上：不猜，退回线性扫，下次增删时重建
+    g_ix[i] = 0;
+    for (uint32_t j = (i + 1) & m; g_ix[j]; j = (j + 1) & m) {   // 回移：j 的家位不在 (i, j] 之内的，挪到空位 i
+        const uint32_t k = ix_home(g.v[g_ix[j] - 1].rec.identity);
+        if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) continue;
+        g_ix[i] = g_ix[j]; g_ix[j] = 0; i = j;
+    }
+}
 static int find_locked(const uint8_t identity[32], uint32_t *at) {
+    if (g_ix_ok) {
+        for (uint32_t j = ix_home(identity); g_ix[j]; j = (j + 1) & (g_ix_n - 1))
+            if (!memcmp(g.v[g_ix[j] - 1].rec.identity, identity, 32)) { if (at) *at = g_ix[j] - 1; return 1; }
+        return 0;
+    }
     for (uint32_t i = 0; i < g.n; i++)
         if (!memcmp(g.v[i].rec.identity, identity, 32)) { if (at) *at = i; return 1; }
     return 0;
@@ -562,6 +607,7 @@ int nvk_prog_warm_load(void) {
     free(refs);
     free(disk);
     free(g.v); g.v = merged; g.n = n; g.cap = cap;
+    ix_rebuild_locked();
     free(g.plan); g.plan = plan; g.plan_n = plan_n; g.plan_i = 0;
     g.limit = limit; g.max_rank = max_rank;
     g.st.loaded = loaded;
@@ -656,7 +702,9 @@ void nvk_prog_warm_note(const struct nvk_prog_rec *rec_in) {
                 (g.v[i].rec.uses == g.v[cold].rec.uses && g.v[i].last_use_rank < g.v[cold].last_use_rank))
                 cold = i;
         }
+        ix_del_locked(cold);
         g.v[cold] = (struct slot){ .rec = *rec, .last_use_rank = rank };
+        ix_add_locked(cold);
         g.v[cold].rec.uses = rec->uses ? rec->uses : 1;
         g.st.recorded++;
         g.dirty = 1;
@@ -667,6 +715,7 @@ void nvk_prog_warm_note(const struct nvk_prog_rec *rec_in) {
     g.v[g.n] = (struct slot){ .rec = *rec, .last_use_rank = rank };
     if (!g.v[g.n].rec.uses) g.v[g.n].rec.uses = 1;
     g.n++;
+    ix_add_locked(g.n - 1);
     g.st.recorded++;
     g.dirty = 1;
     pthread_mutex_unlock(&g.mu);

@@ -3,6 +3,8 @@
 #define _GNU_SOURCE
 #include "../../../native/s2a_savecommit.h"
 #include <dirent.h>
+#include <grp.h>
+#include <sys/prctl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -277,4 +279,15 @@ static int test_search_only_ancestor(const char *root)
     CHECK(chmod(gate, 0700) == 0);
     return 0;
 }
-int main(int argc,char**argv) {char root[4096];if(argc<2){fprintf(stderr,"usage: test ABSOLUTE_FIXTURE_PARENT [fake-exchange]\n");return 2;}if(snprintf(root,sizeof root,"%s/native-fixture-XXXXXX",argv[1])>=(int)sizeof root)return 2;if(!mkdtemp(root)){perror("mkdtemp");return 2;}fake_exchange=argc>2&&!strcmp(argv[2],"fake-exchange");int search_rc=test_search_only_ancestor(root);if(search_rc){cleanup(root);return search_rc;}test_clone(root);test_copy_errors(root);test_exchange(root);test_token_sync(root);test_token_fallback(root);test_token_stale_file(root);test_token_stale_nonregular(root);test_token_stale_failure(root);test_metadata(root);test_readonly_rollback(root);test_supported_concurrent(root);CHECK(observed_reflink_calls==0);CHECK(forced_clones==0);CHECK(probe_count==86);CHECK(probe_bad==0);cleanup(root);printf("real FICLONE calls=%d last errno=%d (host observation only)\n",observed_reflink_calls,observed_reflink_errno);printf("native host: %d checks, %d failures; negative-control=%d\n",checks,failures,fake_exchange);return failures?1:0;}
+/* root 跑（只有 root 的 Linux 容器 / WSL 门禁机）：DAC 用例在 root 下验不了（root 无视读权限）。夹具改建在 /tmp（构建目录
+ * 可能在 0700 的 /root 下，降权后进不去），交给 nobody 后整进程永久降权，再照常跑全部用例——与普通用户宿主同一套断言。
+ * setuid 后进程变成不可转储，/proc/self/fd 归 root、nobody 读不了，所以重新置可转储。 */
+static int drop_root(const char *root)
+{
+    const uid_t nobody = 65534;
+    if (chown(root, nobody, nobody) != 0 || setgroups(0, NULL) != 0 || setgid(nobody) != 0 || setuid(nobody) != 0) return -1;
+    if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0 || geteuid() == 0) return -1;
+    printf("root host: fixture moved to %s, dropped to uid=%ld for DAC checks\n", root, (long)geteuid());
+    return 0;
+}
+int main(int argc,char**argv) {char root[4096];if(argc<2){fprintf(stderr,"usage: test ABSOLUTE_FIXTURE_PARENT [fake-exchange]\n");return 2;}const int as_root=geteuid()==0;if(snprintf(root,sizeof root,"%s/native-fixture-XXXXXX",as_root?"/tmp":argv[1])>=(int)sizeof root)return 2;if(!mkdtemp(root)){perror("mkdtemp");return 2;}if(as_root&&drop_root(root)){fprintf(stderr,"ENV_NOT_READY: root host could not drop to nobody (errno=%d); DAC regression untested\n",errno);cleanup(root);return 75;}fake_exchange=argc>2&&!strcmp(argv[2],"fake-exchange");int search_rc=test_search_only_ancestor(root);if(search_rc){cleanup(root);return search_rc;}test_clone(root);test_copy_errors(root);test_exchange(root);test_token_sync(root);test_token_fallback(root);test_token_stale_file(root);test_token_stale_nonregular(root);test_token_stale_failure(root);test_metadata(root);test_readonly_rollback(root);test_supported_concurrent(root);CHECK(observed_reflink_calls==0);CHECK(forced_clones==0);CHECK(probe_count==86);CHECK(probe_bad==0);cleanup(root);printf("real FICLONE calls=%d last errno=%d (host observation only)\n",observed_reflink_calls,observed_reflink_errno);printf("native host: %d checks, %d failures; negative-control=%d\n",checks,failures,fake_exchange);return failures?1:0;}

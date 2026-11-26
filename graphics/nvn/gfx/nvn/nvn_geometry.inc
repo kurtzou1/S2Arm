@@ -761,6 +761,15 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
         if (![g_mtk_drawn containsObject:p]) mtk_first_drawn(p, &mk, ts, ms, fs, merged); }
     return p;
 }
+// Bind task / mesh shader arguments before draw()'s g_enc != en retry check: encode_args can end the render pass
+// (e.g. cbuf_pad_alloc GPU copy via blit(), tex_upgrade, or unaligned tbuf copy), leaving g_blit (a compute encoder
+// on Metal 4) open. Encoding drawMeshThreadgroups* without retrying sent a render selector to that compute encoder.
+static void mtk_bind(id en) {
+    NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
+    enc_r_table(en, g_vt, MTLRenderStageMesh);
+    if (ts) { enc_r_table(en, g_ot, MTLRenderStageObject); g_args_object = 1; encode_args(en, ts, 3, 0); g_args_object = 0; }
+    if (g_enc == en) encode_args(en, ms, 4, 1);
+}
 static void mtk_encode(id en_) {
     id en = en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     if (g_mtk.emu) {   // #770: the host ran the stages (mtk_emu_run): an indexed draw of their vertex records, as many indices as the mesh stage wrote
@@ -771,9 +780,8 @@ static void mtk_encode(id en_) {
     if (fault_enc_on()) fault_enc_mark(en, [NSString stringWithFormat:@"task / mesh draw: task %s mesh %s, %s", ts ? ts->key : "-", ms->key, g_mtk.ind ? "indirect" : [NSString stringWithFormat:@"%llu workgroups", (unsigned long long)g_mtk.count].UTF8String]);
     uint64_t first = g_mtk.ind ? g_mtk.ind + 16 : 0;   // indirect: the converted arguments carry it at word 4 (ixc_arrays)
     if (!first) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first = b.gpuAddress + o; }
-    enc_r_table(en, g_vt, MTLRenderStageMesh);
-    if (ts) { enc_r_table(en, g_ot, MTLRenderStageObject); g_args_object = 1; encode_args(en, ts, 3, 0); g_args_object = 0; enc_o_args(first, MESH_FIRST_SLOT); }
-    encode_args(en, ms, 4, 1); enc_r_vbuf(en, MESH_FIRST_SLOT, first);
+    if (ts) enc_o_args(first, MESH_FIRST_SLOT);
+    enc_r_vbuf(en, MESH_FIRST_SLOT, first);
     // Payload relay (S2A.Dsh MeshStage.Relay: a payload past Metal's 16 KB): one buffer, head {mesh slice start (words), task workgroups, slices per task workgroup}, then one payload per
     //   task workgroup, then one mesh stage-memory slice per (task workgroup, mesh workgroup < the task's thread count, which the task clamps its grid to). Bound at the relay slot of the
     //   object table and of the mesh stage (vertex stream 11's slot, through enc_r_vbuf)

@@ -344,6 +344,13 @@ def community_selection(env, pid, bid):
     return dirs, selection, on
 
 
+def step_only_table(path):
+    """帧率表只有 build / speed 行（至少一行 speed）：游戏按实测帧时推进的款（键页槽由 runtime/src/fps.c 每次出图写），不放开帧率、不改指令"""
+    rows = [line.split('#', 1)[0].split() for line in path.read_text(encoding='utf-8', errors='replace').splitlines()]
+    rows = [r for r in rows if r]
+    return any(r[0] == 'speed' for r in rows) and all(r[0] in ('build', 'speed') for r in rows)
+
+
 def rewrite_plan(game, current, deps):
     env = deps.env
     main, npdm = current / 'exefs/main', current / 'exefs/main.npdm'
@@ -361,7 +368,8 @@ def rewrite_plan(game, current, deps):
                      and line.split('\t')[1].lower() == bid and line.split('\t')[3].lower() == 'apple'), '')   # F7 #1574：苹果路线只取 apple 行
     fps = REPO / f'runtime/fps/{bid[:16]}.tsv'
     # 我方帧率表（c 行改指令）只在内部对照口径 S2A_CAPS_OWN=1 进包，同 stage_rewrite.sh FT（11-18，#1607：60 帧关着游戏也被解锁）
-    fps = fps if env.get('S2A_CAPS_OWN') == '1' and fps.is_file() else None
+    #   只有 build / speed 行的表（实时步长表）不提高帧率、不改指令，只让宿主每次出图把实测帧时写进槽：缺省口径也进包，同 stage_rewrite.sh
+    fps = fps if fps.is_file() and (env.get('S2A_CAPS_OWN') == '1' or step_only_table(fps)) else None
     fix = REPO / f'runtime/fix/{bid[:16]}.tsv'   # 游戏缺陷修补表（改写器 fix_rows）：仓库源表，改写器直接读，不进产物根
     dirs, selection, on = community_selection(env, pid, bid)
     if env.get('S2A_COMMUNITY_SELECT'):
@@ -1304,12 +1312,19 @@ class Stages:
         return sorted(found, key=lambda p: os.fsencode(str(p)))
 
     @staticmethod
-    def _source_identity(paths):
-        rows = []
-        for p in paths:
-            st = p.stat()
-            rows.append(f'{st.st_size} {st.st_mtime_ns} {st.st_ctime_ns} {st.st_ino}')
-        return '\n'.join(rows)
+    def _source_content(path, block=64 * 1024):
+        """原件的内容身份：大小 + 首尾各 64 KiB 的 SHA-256（≤128 KiB 读全文）；同 pack/resource_input_key.py 的首尾抽样口径。
+        不含路径 / 修改时间 / ctime / inode：同一份原件换盘、换路径、换机器键不变；NSP / XCI 头部列着各内容的哈希，换了内容头部就变"""
+        size = path.stat().st_size
+        h = hashlib.sha256()
+        with path.open('rb') as stream:
+            if size <= 2 * block:
+                h.update(stream.read())
+            else:
+                h.update(stream.read(block))
+                stream.seek(size - block)
+                h.update(stream.read(block))
+        return f'{size} {h.hexdigest()}'
 
     def _source_rows(self, tool, work, env):
         cache = Path(env.get('S2A_SRC_IDS', Path(env.get('S2A_ICONS', self._run_root() / 's2arm/icons')) / '.ids.tsv'))
@@ -1376,9 +1391,8 @@ class Stages:
 
     @staticmethod
     def _aoc_base(current, rows, tool):
-        paths = [Path(row[0]) for row in rows]
-        raw = '\n'.join('\t'.join(row) for row in rows) + '\n'
-        raw += Stages._source_identity(paths) + '\n'
+        # 原件按内容进键（程序号 + 内容身份，按内容排序），不带路径：两台出包机原件放在不同目录，同一份原件命中同一份追加内容缓存
+        raw = ''.join(f'{pid}\t{ident}\n' for pid, ident in sorted((row[3], Stages._source_content(Path(row[0]))) for row in rows))
         dll = Path(str(tool) + '.dll') if tool.suffix.lower() != '.exe' else tool.with_suffix('.dll')
         for binary in (dll, tool):
             if binary.is_file():

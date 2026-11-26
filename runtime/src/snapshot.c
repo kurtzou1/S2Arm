@@ -687,7 +687,8 @@ int s2a_snap_save_changed(const char *dir) {
 int s2a_snap_exists(const char *dir) { char v[16]; if (dir && *dir && s2a_snap_recover(dir)) LOG("即时存档：上次换上没走完，旧快照已从 %s.old 恢复", dir); return dir && *dir && !man_get(dir, "完整", v, sizeof v) && !strcmp(v, "1"); }
 static void *snap_req_main(void *a) { snap_take_((const char *)a, 0); free(a); return NULL; }
 int s2a_snap_request_save(const char *dir) {
-    if (!s2a_snap_logging() || !dir || !*dir) return -1;
+    int g = s2a_snap_save_gate(); if (g) return g;   // -3 = 这一局请求日志超限、已放弃即时存档（snapsw.c），界面给专门提示
+    if (!dir || !*dir) return -1;
     int z = 0; if (!atomic_compare_exchange_strong(&g_snap_busy, &z, 1)) return -2;
     char *d = strdup(s2a_snap_path(dir)); pthread_t th;
     if (!d || pthread_create(&th, NULL, snap_req_main, d)) { free(d); atomic_store(&g_snap_busy, 0); return -1; }

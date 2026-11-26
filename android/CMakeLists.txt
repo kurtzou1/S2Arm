@@ -335,9 +335,25 @@ else()
     add_test(NAME android_core_link_audit
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_audit.py")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # 链接器用 lld（安卓真机链 NativeAOT 用的就是 NDK 的 lld）：先找 PATH，再找 NDK 29；都没有才退回宿主 ld。
+        # 宿主 GNU ld 2.42（Ubuntu 24.04）对 -z start-stop-gc 在 x86-64 上 BFD 断言崩溃（elfxx-x86.c:546），验不到用例本身。
+        find_program(S2A_STARTUP_LLD NAMES ld.lld)
+        if(NOT S2A_STARTUP_LLD)
+            find_program(S2A_STARTUP_LLD NAMES ld.lld NO_DEFAULT_PATH PATHS
+                "$ENV{ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+                "$ENV{ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+                "$ENV{ANDROID_HOME}/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+                "$ENV{ANDROID_SDK_ROOT}/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+                "$ENV{HOME}/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin")
+        endif()
+        if(S2A_STARTUP_LLD)
+            set(_s2a_startup_linker "${S2A_STARTUP_LLD}")
+        else()
+            set(_s2a_startup_linker "${CMAKE_LINKER}")
+        endif()
         add_test(NAME android_nativeaot_startup_roots
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core-link/test_startup_roots.py"
-                --cc "${CMAKE_C_COMPILER}" --linker "${CMAKE_LINKER}"
+                --cc "${CMAKE_C_COMPILER}" --linker "${_s2a_startup_linker}"
                 --nm "${CMAKE_NM}" --readelf "${CMAKE_READELF}" --ar "${CMAKE_AR}")
     endif()
     # #528 第 15 项：会话标记（原生优雅收尾走完才删 end）单独成一项。run_lifecycle.py 整组挂在 threaded_host_suites.sh 末尾，
@@ -608,6 +624,11 @@ else()
     target_compile_options(direct_program_cache_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_program_cache_test PRIVATE pthread)
     add_test(NAME android_direct_program_cache COMMAND direct_program_cache_test)
+    # jv 字符串收尾改 memchr（11-26）：与改动前的逐字节扫描逐项对拍
+    add_executable(direct_jv_test tests/direct_jv_test.c native/direct/jv.c)
+    target_include_directories(direct_jv_test PRIVATE native)
+    target_compile_options(direct_jv_test PRIVATE -O2 -Wall -Wextra -Werror)
+    add_test(NAME android_direct_jv COMMAND direct_jv_test)
     # F5.3：安装 revision 的只读离线库消费（命中/缺失/改名/截断/链接/只读 revision）。
     add_executable(direct_offline_library_test tests/direct_offline_library_test.c
         native/direct/offline_library.c native/direct/program_cache.c native/direct/sha256.c)

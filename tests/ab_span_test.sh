@@ -66,3 +66,4 @@ mkrs(); g = subprocess.run([sys.executable, os.path.join(R, 'tools/frame_gate.py
 ck('⑩ frame_gate 重启局 → MARK 后 32 秒 1899 帧', 'MARK 后 32 秒 1899 帧' in g, g.strip()[:120])
 print('ab_span 单测全过' if not bad else 'ab_span 单测有不通'); sys.exit(1 if bad else 0)
 PY
+# 11-26 门禁搬到另一台协调机后的派活验证：本行只改键、不改行为

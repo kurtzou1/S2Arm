@@ -42,6 +42,7 @@ SYSTEM_EXTERNALS = {
     "sigemptyset", "sigprocmask", "dladdr",
     "_exit",      # native.h 的 quiet fatal 路径：libc 进程退出，不是 core 端点
     "strcspn",   # 11-05 b273f2ef6 svc_mem.c 解析布局提示行（去掉行尾换行）
+    "strncmp",   # svc_mem.c 解析地址需求行前缀：clang 按常量长度内联掉、Linux GCC 留成 libc 调用（11-26 Linux 门禁机首跑才见）
     "strnlen",   # native.h s2a_utf8_trim（#806 符号化日志）：svc_mem.c Break 路径经 s2a_guest_where 引入
     "fprintf", "__fprintf_chk",   # 11-17 svc_mem.c heap_need_note：记下这款真要过的普通堆（wire/<程序号>/heap_need，D-NGH9）
     # 工具链 / 运行库内部（GCC / clang / Mach-O 各自形态）

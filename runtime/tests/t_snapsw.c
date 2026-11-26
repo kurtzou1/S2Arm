@@ -4,6 +4,7 @@
 static int g_pref = -1;   // ios/settings.m s2a_ios_snap_pref_off 的替身：-1 没存过、0 存为开、1 存为关
 int s2a_ios_snap_pref_off(void) { return g_pref == 1; }
 #define S2A_SNAP_OFF_ADDRESS 1   // native.h（snapsw.c 不含它）
+#define S2A_SNAP_OFF_LOGCAP 2
 #include <stdio.h>
 #include <string.h>
 static int g_fail, g_ok;
@@ -48,6 +49,14 @@ int main(void) {
     g_pref = -1; reset(NULL, NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS); eq("⑪ 本局因地址关、有快照：照样给", 1, s2a_snap_restore_offered(1)); eq("⑪ 本局因地址关、没快照：不给", 0, s2a_snap_restore_offered(0));
     g_pref = 1; reset(NULL, NULL); eq("⑪ 玩家设置关、有快照：不给", 0, s2a_snap_restore_offered(1));
     g_pref = -1; reset("0", NULL); eq("⑪ 启动环境关、有快照：不给", 0, s2a_snap_restore_offered(1));
+    // ⑫ 玩家点「存下这一刻」（s2a_snap_save_gate，s2a_snap_request_save 照回）：开着 0；本局请求日志超限放弃后 -3（界面专门提示，不报「稍后再试」）；
+    //   因地址关 / 玩家关 -1；超限后已有快照照样给「回到这一刻」，依据写超限
+    g_pref = -1; reset(NULL, NULL); eq("⑫ 开着：能存 0", 0, s2a_snap_save_gate());
+    s2a_snap_disable(S2A_SNAP_OFF_LOGCAP); eq("⑫ 日志超限：-3", -3, s2a_snap_save_gate()); eq("⑫ 日志超限：不记日志", 0, s2a_snap_logging());
+    eq("⑫ 日志超限、有快照：照样给回到这一刻", 1, s2a_snap_restore_offered(1)); eq("⑫ 日志超限：依据写超限", 1, !strcmp(s2a_snap_source(), "本局请求日志超过上限"));
+    eq("⑫ 日志超限不按地址重开", 0, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS)); eq("⑫ 仍 -3", -3, s2a_snap_save_gate());
+    g_pref = -1; reset(NULL, NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS); eq("⑫ 因地址关：-1", -1, s2a_snap_save_gate());
+    g_pref = -1; reset("0", NULL); eq("⑫ 玩家关：-1", -1, s2a_snap_save_gate());
     if (g_fail) printf("✗ t_snapsw：%d 项不符（共 %d 项）\n", g_fail, g_ok + g_fail); else printf("✓ t_snapsw：0 处不符（共 %d 项）\n", g_ok);
     return g_fail ? 1 : 0;
 }

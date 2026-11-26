@@ -847,5 +847,37 @@ class GlslcGate(unittest.TestCase):
     def test_host_given(self): self.assertIsNone(self.go('x', host='h'))
 
 
+
+class PythonPins(unittest.TestCase):
+    """出包自检核第三方包锁定版本（11-26 换新的 Windows 出包机：只核 Python ≥ 3.12，缺 lz4 照样全绿）。期望按 launchers/macos/requirements-runtime.txt 手写：
+    capstone 5.0.7、lz4 4.4.5、numpy 2.4.2、Pillow 12.3.0、zstandard 0.25.0"""
+    WANT = {'capstone': '5.0.7', 'lz4': '4.4.5', 'numpy': '2.4.2', 'pillow': '12.3.0', 'zstandard': '0.25.0'}
+
+    def fake(self, have):
+        from importlib import metadata
+        def version(name):
+            v = have.get(name.lower())
+            if v is None:
+                raise metadata.PackageNotFoundError(name)
+            return v
+        return patch('importlib.metadata.version', side_effect=version)
+
+    def test_all_match(self):
+        with self.fake(dict(self.WANT)):
+            self.assertEqual(oneclick_win.python_pins(), [])
+
+    def test_missing_lz4_is_red(self):
+        have = dict(self.WANT); del have['lz4']
+        with self.fake(have):
+            self.assertEqual(oneclick_win.python_pins(), ['lz4 缺'])
+            row = next(r for r in oneclick_win.env_items('mac', None) if r[0] == 'python')
+        self.assertFalse(row[1], row[2])
+        self.assertIn('lz4 缺', row[2])
+
+    def test_version_mismatch_is_red(self):
+        have = dict(self.WANT, numpy='2.5.1', capstone='5.0.9')
+        with self.fake(have):
+            self.assertEqual(oneclick_win.python_pins(), ['capstone 现有 5.0.9，要 5.0.7', 'numpy 现有 2.5.1，要 2.4.2'])
+
 if __name__ == '__main__':
     unittest.main()

@@ -1099,7 +1099,9 @@ public final class GameInstallTest {
         for (java.nio.file.Path p = packFile; p.startsWith(new File(gameRoot, "revisions/" + r2).toPath()); p = p.getParent())
             packClean &= !Files.isSymbolicLink(p);
         check(packClean, "no symbolic link in any offline pack path component");
-        check(!new File(gameRoot, "revisions/" + r2 + "/romfs/readme.txt").canWrite(), "stored objects are read-only");
+        // 看权限位，不用 canWrite()：root 跑时 canWrite() 对只读文件也是 true
+        check(java.nio.file.Files.getPosixFilePermissions(new File(gameRoot, "revisions/" + r2 + "/romfs/readme.txt").toPath()).stream()
+            .noneMatch(p -> p.name().endsWith("_WRITE")), "stored objects are read-only");
         String[] both = {r1, r2};
         Arrays.sort(both);
         check(Arrays.equals(revisions(gameRoot), both), "upgrade keeps the previous revision: " + Arrays.toString(revisions(gameRoot)));

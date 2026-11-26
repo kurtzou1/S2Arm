@@ -499,6 +499,10 @@ static int nvn_snap_restore_body(const char *dir) {
     double tg[9]; int ng = 0; tg[ng++] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
 #define SNAP_TG() (tg[ng < 9 ? ng++ : 8] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9, snap_restore_layer(ng))
     g_snap_newtex_log = 600; snap_restore_layer(1);
+    // 先建 Metal 设备，再定着色器库路径：s2a_gl_first_use 读映射表、起预热，预热和随后的着色器构建都用 g_dev。普通起局由游戏第一次建 NVN 设备时 mtl_init，
+    //   恢复局在游戏代码跑之前就到这里——原先 g_dev 还是空的，[nil newLibraryWithData:] 回空且不给错误，开局全部着色器构建失败（「no reflection json」），
+    //   画面缺东西 / 错乱（玩家诊断三款、Mac 复现一款：恢复局 100% 失败，普通局 0）。帧回放（nvn_frame_rec.inc）一直是先 mtl_init
+    mtl_init();
     if (s2a_gl_first_use) s2a_gl_first_use(); else MLOG("【红】 即时存档恢复：宿主没有着色器路径初始化入口");
     { snprintf(p, sizeof p, "%s/gfx_live.bin", dir); FILE *f = fopen(p, "rb"); ok = f && snap_fread(&lv, sizeof lv, 1, f, "mtl.live") && lv.magic == 0x31534E4Eu; if (f) fclose(f); }
     if (!ok) { MLOG("【红】 即时存档恢复：图形计数器读不了"); return -1; }

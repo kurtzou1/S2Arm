@@ -626,11 +626,13 @@
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Save this moment";
 "vpad.snap.offAddress" = "This device doesn't have enough memory address range to hold both this game and a snapshot, so snapshots are off for this game on this device. This has nothing to do with storage space; the game plays as usual.";
+"vpad.snap.offLogCap" = "This game keeps sending the same requests over and over, so the snapshot record grew too large. Snapshots are off for the rest of this session; the game keeps running normally.";
 "vpad.snap.offAddressNums" = " (game needs %@ GB, snapshot needs %@ GB, this device can give %@ GB)";
 "vpad.snap.restore" = "Go back to the saved moment";
 "vpad.snap.saving" = "Saving this moment…";
 "vpad.snap.saved" = "Moment saved";
 "vpad.snap.notSaved" = "Couldn’t save this time. Try again in a moment";
+"vpad.snap.notSavedLogCap" = "This session’s record got too long, so saving a moment is off for now (the game keeps running; your saved moment is still there)";
 "vpad.snap.busy" = "Still saving the last one";
 "vpad.snap.restoreFailed" = "Couldn’t go back: %@";
 "vpad.snap.useLibrary.title" = "Can’t go back from inside the game";

@@ -626,11 +626,13 @@
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "存下这一刻";
 "vpad.snap.offAddress" = "这台设备的内存地址不够同时放下这款游戏和快照，所以在这台设备上不能存快照。这和存储空间无关，游戏照常玩。";
+"vpad.snap.offLogCap" = "这款游戏一直在重复发同样的请求，即时存档的记录涨得太大，这一局剩下的时间先关掉即时存档，游戏照常玩。";
 "vpad.snap.offAddressNums" = "（游戏要 %@ GB，快照要 %@ GB，这台设备能给 %@ GB）";
 "vpad.snap.restore" = "回到上次存下的这一刻";
 "vpad.snap.saving" = "正在存下这一刻…";
 "vpad.snap.saved" = "已存下这一刻";
 "vpad.snap.notSaved" = "这次没存成，稍后再试一次";
+"vpad.snap.notSavedLogCap" = "这一局记录太长，暂时不能即时存档（游戏照常玩，已存下的那一刻还能回）";
 "vpad.snap.busy" = "还在存上一次，稍等";
 "vpad.snap.restoreFailed" = "这次回不去：%@";
 "vpad.snap.useLibrary.title" = "游戏里回不到这一刻";

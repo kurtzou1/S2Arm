@@ -361,8 +361,13 @@ class Secrets:
             f = self.folder / "password.dpapi"
             return _dpapi(f.read_bytes(), False).decode("utf-8") if f.is_file() else None
         r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"], capture_output=True, text=True)
-        if r.returncode:
+        if r.returncode == 44:   # errSecItemNotFound：真没有这一项 → 调用方报「要重新导入」
             return None
+        if r.returncode == 36:   # errSecInteractionNotAllowed：项可能在，只是这个会话读不了（ssh 等非图形会话里登录钥匙串是锁的），重新导入也没用
+            raise Failure("钥匙串在这个会话里读不了（ssh 等没有图形界面的会话里登录钥匙串是锁的）：请在这台 Mac 的图形会话里运行，或先解锁登录钥匙串。",
+                          code="devcert_keychain")
+        if r.returncode:
+            raise Failure(f"读钥匙串里的证书密码失败（security 退出 {r.returncode}）：{(r.stderr or '').strip()[-200:]}", code="devcert_keychain")  # 非玩家句
         try:
             return base64.b64decode(r.stdout.strip(), validate=True).decode("utf-8")
         except ValueError:

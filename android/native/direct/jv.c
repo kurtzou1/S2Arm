@@ -1,6 +1,7 @@
 // 跨度式 JSON 读取器（见 jv.h）。原实现内嵌在 nvn_vk_program_result.c，#1434 原样抽出共用。
 #include "jv.h"
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 const char *s2a_jv_ws(const char *p, const char *end) {
@@ -8,26 +9,41 @@ const char *s2a_jv_ws(const char *p, const char *end) {
     return p;
 }
 
+// 字符串内容从 p 起，返回收尾引号的位置（没有返回 NULL）。逐字节语义：反斜杠吃掉下一个字节。
+// 等价改写：memchr 直接跳到下一个引号，它前面紧挨着的反斜杠连成一串，串长为奇数 = 这个引号被转义、接着往后找，
+//   偶数 = 收尾。连串往回数到字符串开头为止（开头的引号不算内容）。
+// 合成的程序 JSON 把整段 SPIR-V 以 base64 放在字符串里，obj_find / arr_item 每查一次都要把兄弟值整段扫过；
+//   原逐字节扫是一款大型开放世界游戏室外回放线程第一大项（s2a_jv_scan 7.5–9.1%，11-26），memchr 按字长成块比。
+static const char *jv_str_end(const char *p, const char *end) {
+    const char *s = p;
+    while (p < end) {
+        const char *q = memchr(p, '"', (size_t)(end - p));
+        if (!q) return NULL;
+        size_t bs = 0;
+        while (q - bs > s && q[-1 - (ptrdiff_t)bs] == '\\') bs++;
+        if (!(bs & 1)) return q;
+        p = q + 1;
+    }
+    return NULL;
+}
+
 int s2a_jv_scan(const char *p, const char *end, const char **out_end) {
     p = s2a_jv_ws(p, end);
     if (p >= end) return -1;
     if (*p == '"') {
-        p++;
-        while (p < end) {
-            if (*p == '\\') { p += 2; continue; }
-            if (*p == '"') { *out_end = p + 1; return 0; }
-            p++;
-        }
-        return -1;
+        const char *q = jv_str_end(p + 1, end);
+        if (!q) return -1;
+        *out_end = q + 1;
+        return 0;
     }
     if (*p == '{' || *p == '[') {
         char open = *p, close = open == '{' ? '}' : ']';
         int depth = 0;
         while (p < end) {
             if (*p == '"') {
-                p++;
-                while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
-                if (p < end) p++;
+                const char *q = jv_str_end(p + 1, end);
+                if (!q) return -1;   // 字符串没收尾，整个容器也收不了尾（原逐字节扫到 end 后同样返回 -1）
+                p = q + 1;
                 continue;
             }
             if (*p == open) depth++;

@@ -251,6 +251,55 @@ def own_table(p):
     return p.name == "fps.tsv" and any(l.split("#", 1)[0].split()[:1] == ["c"] for l in p.read_text(encoding="utf-8", errors="replace").splitlines())
 
 
+def step_table(p):
+    """实时步长表：帧率表只有 build / speed 行（至少一行 speed）——不放开帧率、不改指令，只让宿主每次出图把实测帧时写进键页槽，
+    缺省口径也随包（同 pack/orch/stages.py step_only_table、pack/stage_rewrite.sh FT）"""
+    rows = [l.split("#", 1)[0].split() for l in Path(p).read_text(encoding="utf-8", errors="replace").splitlines()]
+    rows = [r for r in rows if r]
+    return any(r[0] == "speed" for r in rows) and all(r[0] in ("build", "speed") for r in rows)
+
+
+def game_tables(c, bid):
+    """引擎里这款（主程序构建号 bid）的逐款表 → (游戏缺陷修补表 runtime/fix/<前 16 位>.tsv | None, 实时步长表 runtime/fps/<前 16 位>.tsv | None)。
+    修补表交改写器改进程序，步长表随包作 fps.tsv；两者常成对（修补表让游戏读步长表写的槽，#2248），出包时由 pack/stage_rewrite.sh 按同一规则取"""
+    name = (bid or "")[:16].lower() + ".tsv"
+    if len(name) != 20:
+        return None, None
+    fix, fps = Path(c.engine) / "runtime/fix" / name, Path(c.engine) / "runtime/fps" / name
+    return (fix if fix.is_file() else None), (fps if fps.is_file() and step_table(fps) else None)
+
+
+def tables_id(c, bid):
+    """这款逐款表的内容指纹（记进 iPhone 记录 / Mac 清单的 tablesId）；引擎里这款没有表 = ''。
+    改写器指纹（rewriter_id）只看改写器源码、补丁记号只看补丁库，引擎新加 / 改了这款的修补表或步长表，两个记号都不变，「更新这款」原先直接跳过——
+    老包拿不到修复，只能重新出包（#2248 一款动作冒险游戏的帧比例修复）。没记过的款按 '' 算：只有引擎里有表的款重做一次，别的款不动"""
+    fix, fps = game_tables(c, bid)
+    if fix is None and fps is None:
+        return ""
+    h = hashlib.sha256()
+    for tag, p in (("fix", fix), ("fps", fps)):
+        h.update(tag.encode() + b"\0" + (p.read_bytes() if p else b"-") + b"\0")
+    return h.hexdigest()[:12]
+
+
+def game_bid(c, gid):
+    """这款实际运行的主程序构建号（pack/jobs/cheats.py main_build：解包目录 → Mac 运行版本 → 存下的原始程序 → iPhone 记录）；取不到 = ''"""
+    import cheats
+    try:
+        return cheats.main_build(c, {"id": gid})
+    except (OSError, Failure):
+        return ""
+
+
+def step_changes(c, base, bid):
+    """随包步长表跟引擎走：引擎有这款的步长表 → 换成它；没有而 base 里留着旧的步长表 → 删。带 c 行等别的帧率表不碰（own_table 那条规矩管）"""
+    _, fps = game_tables(c, bid)
+    old = Path(base) / "fps.tsv"
+    if fps is not None:
+        return {} if old.is_file() and old.read_bytes() == fps.read_bytes() else {"fps.tsv": fps}
+    return {"fps.tsv": None} if old.is_file() and step_table(old) else {}
+
+
 def rewrite_env(c, kit, exefs, target):   # exefs None：不带随包代码补丁（补丁按主程序构建号认，只改 exefs 模块）
     env = dict(c.env(), S2A_TARGET=target, S2A_REWRITE_SPIN=os.environ.get("S2A_REWRITE_SPIN", "1"))
     for k in ("S2A_FPS_TSV", "S2A_CPATCH_TSV", "S2A_CODE_PATCH", "S2A_CODE_BUILD", "S2A_FIX_TSV"):
@@ -359,7 +408,8 @@ def pending_ios(c, games, rid, ignore_rewriter=False):
     for g in games:
         side = layout.game_info(c, g).get("ios") or {}
         key = ios_key(c, g, rid)   # 补丁库随启动器内置（pack/jobs/patches.py version_key 读本地快照），不会取不到（11-14 维护者：不设这种兜底）
-        if not _current(side.get("rewriterId"), side.get("sgradeKey"), rid, key, ignore_rewriter):
+        if not _current(side.get("rewriterId"), side.get("sgradeKey"), rid, key, ignore_rewriter) \
+                or side.get("tablesId", "") != tables_id(c, game_bid(c, g)):   # 逐款表变了不算「改写器单独变了」：后台照样补
             out.append(g)
     return out
 
@@ -382,6 +432,11 @@ def sgrade_rewrite(c, game, base, exefs, target, work):
         if p.is_file() and not p.name.endswith(skip) and not p.name.startswith(("cpatch", "cheat-src.")) and p.suffix != ".log" \
                 and not (own_table(p) and not own_table_ok(c.env())):   # 旧包带的我方帧率表不再照拷：不打改指令，出表也不因它拒社区帧率补丁
             shutil.copyfile(p, root / p.name)
+    for name, src in step_changes(c, root, (Path(exefs) / "main").read_bytes()[0x40:0x48].hex()).items():   # 随包步长表跟引擎走（见 step_changes）
+        if src:
+            shutil.copyfile(src, root / name)
+        else:
+            (root / name).unlink()
     dirs = patches.fetch(c, game, str(exefs), "ios" if target == "ios" else "mac")
     try:
         cheats.fetch(c, game)
@@ -410,7 +465,8 @@ def sgrade_rewrite(c, game, base, exefs, target, work):
         if p.returncode:
             raise Failure("社区补丁认领缺口出错：" + ((p.stderr.strip().splitlines() or [""])[-1])[:200])  # 非玩家句
         break
-    tables = [root / t for t in SGRADE_TABLES if (root / t).is_file()] + sorted(root.glob("cheat-src.*"))
+    tables = [root / t for t in SGRADE_TABLES if (root / t).is_file()] + sorted(root.glob("cheat-src.*")) \
+        + ([root / "fps.tsv"] if (root / "fps.tsv").is_file() and step_table(root / "fps.tsv") else [])
     return root, modules_of(exefs), tables
 
 
@@ -458,6 +514,8 @@ def table_changes(base, tables):
     """随包表：旧的补丁表与金手指原文这次没出的删掉，出了的换新"""
     base = Path(base)
     ch = {old.name: None for old in list(base.glob("cheat-src.*")) + [base / t for t in SGRADE_TABLES] if old.is_file() and not old.name.endswith((".rw", ".rwold"))}
+    if (base / "fps.tsv").is_file() and step_table(base / "fps.tsv"):   # 旧的随包步长表：这次没出（引擎里撤了）就删
+        ch["fps.tsv"] = None
     ch.update({t.name: t for t in tables})
     return ch
 
@@ -473,10 +531,6 @@ def output_changes(out, kit, modules):
             elif dst.is_file():
                 ch[dst.name] = None
     return ch
-
-
-def apply_outputs(out, kit, modules):
-    swap(kit, output_changes(out, kit, modules))
 
 
 def apply_sgrade(out, base, modules, tables):
@@ -568,7 +622,7 @@ def check_and_update(c, gid, kit, target, rid, ignore_rewriter=False):
     info = layout.game_info(c, gid)
     side = info.get("ios") or {}
     key = ios_key(c, gid, rid)
-    if _current(side.get("rewriterId"), side.get("sgradeKey"), rid, key, ignore_rewriter):
+    if _current(side.get("rewriterId"), side.get("sgradeKey"), rid, key, ignore_rewriter) and side.get("tablesId", "") == tables_id(c, game_bid(c, gid)):
         return "skip"
     game = next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), None)
     if game is None or not (kit / "main.patched.bin").is_file():
@@ -579,23 +633,27 @@ def check_and_update(c, gid, kit, target, rid, ignore_rewriter=False):
         if exefs is None:
             return "unavailable"
         bid = (Path(exefs) / "main").read_bytes()[0x40:0x48].hex().upper()
+        tid = tables_id(c, bid)
         if key is not None:   # S 级优化补到老游戏：按出包同一套带社区补丁改写，全部模块与补丁表换进 kit
             out, mods, tables = sgrade_rewrite(c, game, kit, exefs, target, work)
             names = apply_sgrade(out, kit, mods, tables)
             import patches
             patches.remember(c, gid.upper(), patches.record(c, gid, "ios", out))   # 哪些打上 / 没打上（结果页列，11-14）
             c.emit("message", f"{gid}：S 级优化已按当前补丁库补进程序（{', '.join(names) or '这款没有匹配的社区补丁'}；资源不用重推）")  # 非玩家句
-            layout.update_info(c, gid, ios={**{k: v for k, v in side.items() if k != "sgradeMissing"}, "rewriterId": rid, "sgradeKey": sgrade_key(c, gid, rid, bid), "mainBid": bid})
+            layout.update_info(c, gid, ios={**{k: v for k, v in side.items() if k != "sgradeMissing"}, "rewriterId": rid, "sgradeKey": sgrade_key(c, gid, rid, bid), "mainBid": bid, "tablesId": tid})
             return "updated"
         out = work / "out"; out.mkdir()
         big = static_big(kit)
         hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, kit, exefs, target), exefs, out, kit / "widen_sites.tsv", sainit=big)
+        steps = {}
+        if side.get("tablesId", "") != tid:   # 逐款表变了：修补表可能改任一模块，全部模块换成按本引擎表改写的产物；随包步长表跟着换
+            hit, steps = modules_of(exefs), step_changes(c, kit, bid)
         table = addr_table(c, kit, exefs) if big and "sdk" in hit else None
-        apply_outputs(out, kit, hit)
+        swap(kit, {**output_changes(out, kit, hit), **steps})   # 程序与随包步长表同一次换（同 apply_sgrade）
         if table is not None:
             write_table(kit / "addr_need.tsv", table)
-    layout.update_info(c, gid, ios=dict(side, rewriterId=rid, mainBid=bid))
-    return "updated" if hit else "unaffected"
+    layout.update_info(c, gid, ios=dict(side, rewriterId=rid, mainBid=bid, tablesId=tid))
+    return "updated" if hit or steps else "unaffected"
 
 
 def refresh_ios(c, games, ignore_rewriter=False):
@@ -700,8 +758,10 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
         rid = rewriter_id(c)
         bid = (runtime / "exefs/main").read_bytes()[0x40:0x48].hex().upper()
         key = None if sgrade_off(c, gid) else sgrade_key(c, gid, rid, bid)
-        if _current(manifest.get("rewriterId"), manifest.get("sgradeKey"), rid, key, ignore_rewriter):
+        tid = tables_id(c, bid)   # 逐款表（见 tables_id）：变了也要重做，不受 ignore_rewriter 管
+        if _current(manifest.get("rewriterId"), manifest.get("sgradeKey"), rid, key, ignore_rewriter) and manifest.get("tablesId", "") == tid:
             return False
+        steps = {}
         game = next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), None)
         names = None
         import contextlib
@@ -714,12 +774,15 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
                 out = Path(tmp)
                 big = static_big(runtime)
                 hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, runtime, runtime / "exefs", "apple"), runtime / "exefs", out, runtime / "widen_sites.tsv", sainit=big)
+                if manifest.get("tablesId", "") != tid:   # 逐款表变了：全部模块换新、随包步长表跟着换（同 check_and_update）
+                    hit, steps = modules_of(runtime / "exefs"), step_changes(c, runtime, bid)
                 table = addr_table(c, runtime, runtime / "exefs") if big and "sdk" in hit else None
             if hold is not None:
                 if not held.enter_context(hold()):
                     return False
                 manifest = read(runtime / "manifest.json", {})   # 锁外算的这段时间里别的任务（起局）可能已经换过：按换进时的清单记，记号已对上就不再换
-                if not isinstance(manifest.get("files"), dict) or _current(manifest.get("rewriterId"), manifest.get("sgradeKey"), rid, key, ignore_rewriter):
+                if not isinstance(manifest.get("files"), dict) or (_current(manifest.get("rewriterId"), manifest.get("sgradeKey"), rid, key, ignore_rewriter)
+                                                                   and manifest.get("tablesId", "") == tid):
                     return False
             if sg:
                 names = apply_sgrade(out, runtime, hit, tables)
@@ -728,7 +791,7 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
             else:
                 if hit:
                     c.emit("message", "正在按新版更新这款游戏的程序（资源不动）")
-                apply_outputs(out, runtime, hit)
+                swap(runtime, {**output_changes(out, runtime, hit), **steps})   # 程序与随包步长表同一次换
             files = dict(manifest["files"])
             if not sg and table is not None:   # 地址表（随分配器闸一起换，见 SAINIT）：清单同步记大小
                 write_table(runtime / "addr_need.tsv", table)
@@ -738,6 +801,11 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
                     files.pop(k)
                 for n in names:
                     files[n] = [(runtime / n).stat().st_size, ""]
+            if steps or names is not None:   # 随包步长表（apply_sgrade 的表里也可能有它）：清单按换后的实况记
+                if (runtime / "fps.tsv").is_file():
+                    files["fps.tsv"] = [(runtime / "fps.tsv").stat().st_size, ""]
+                else:
+                    files.pop("fps.tsv", None)
             for m in hit:
                 for ext in OUTPUTS:
                     name, p = f"{m}.{ext}", runtime / f"{m}.{ext}"
@@ -745,8 +813,8 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
                         files[name] = [p.stat().st_size, ""]   # 同 build.snapshot：只记大小（v0.2.3 起校验只核大小）
                     else:
                         files.pop(name, None)
-            atomic(runtime / "manifest.json", dict(manifest, files=files, rewriterId=rid, **({"sgradeKey": key} if names is not None else {})))
-            return bool(hit) or names is not None
+            atomic(runtime / "manifest.json", dict(manifest, files=files, rewriterId=rid, tablesId=tid, **({"sgradeKey": key} if names is not None else {})))
+            return bool(hit) or names is not None or bool(steps)
     except (Failure, OSError, subprocess.SubprocessError, ValueError) as e:
         import patches
         if not sgrade_off(c, gid):

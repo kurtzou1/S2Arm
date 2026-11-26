@@ -118,8 +118,44 @@ static void test_failed_registration_no_copy(void) {
     CHECK(g_ncopy == 0 && nvn_unimpl_count("buf", "t2b_write_registration") == 1);
     CHECK(g_pmem[64] == 0x11); finish();
 }
+static void test_1d(void) {
+    for (int array = 0; array <= 1; array++) {
+        fresh();
+        tex_t t = mk_tex(816, 0, NVN_FORMAT_RGBA8, 8, array ? 4 : 0, 2, 0);
+        t.d.target = array ? NVN_TEXTURE_TARGET_1D_ARRAY : NVN_TEXTURE_TARGET_1D;
+        nvn_tex_layout(&t.d, &t.L);
+        stream s = {0};
+        p_copy_b2t *p = put_t2b(&s, &t, (uint64_t)(uintptr_t)g_pmem + 64);
+        p->has_view = 1;
+        p->view = (view_t){.set_levels = 1, .base_level = 1, .nlevels = 1,
+                           .set_layers = 1, .min_layer = array, .nlayers = array ? 3 : 1};
+        p->r = (NVNcopyRegion){1, 0, array, 3, 1, array ? 2 : 1};
+        p->row_stride = 16;
+        p->image_stride = 32;
+        end(&s);
+        submit1(&s);
+        printf("T2B 1D array=%d transfers=%d target_rejected=%llu\n", array, g_ncopy,
+               (unsigned long long)nvn_unimpl_count("tex", "t2b_target"));
+        CHECK(g_ncopy == (array ? 2 : 1) && nvn_unimpl_count("tex", "t2b_target") == 0);
+        CHECK(g_copy[0].level == 1 && g_copy[0].layer == (array ? 2u : 0u) &&
+              g_copy[0].r.height == 1 && g_copy[0].row == 16 && g_copy[0].img == 32);
+        if (array) CHECK(g_copy[1].layer == 3 && g_copy[1].off == 96);
+        fake_complete(NVN_GPU_DONE_FAILED);
+
+        stream invalid = {0};
+        p = put_t2b(&invalid, &t, (uint64_t)(uintptr_t)g_pmem + 64);
+        p->r = (NVNcopyRegion){0, 1, 0, 3, 1, 1};
+        g_ncopy = 0;
+        end(&invalid);
+        submit1(&invalid);
+        CHECK(g_ncopy == 0 && nvn_unimpl_count("tex", "t2b_bounds") == 1);
+        fake_complete(NVN_GPU_DONE_OK);
+        finish();
+    }
+}
 int main(void) {
     test_layered_complete(); test_failed_segment(); test_reject(); test_registration_rollback(); test_3d_and_bc(); test_failed_registration_no_copy();
+    test_1d();
     printf("%s t_nvn_copy_t2b：%d 项断言，%d 项失败\n", g_fail ? "✗" : "✓", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

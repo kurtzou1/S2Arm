@@ -258,7 +258,7 @@ void nvn_be_xv_window_tex(uint64_t serial) { (void)serial; }   // 跨提交有�
 // 对齐 iOS（nvn_mtl.m 的 nvn_be_read_texels）：
 // ① 游戏内存里就是内容（随包 / WriteTexels 或刷新写过 / 脏页追踪发现被 CPU 写过）：就地反交织，按调用方给的区域 / 行距 / 片距逐行拷进 dst；
 //    不碰 GPU、不建宿主贴图，任何线程都能调。
-// ② 内容归 GPU（渲染 / 拷贝 / 计算写过）：rt_gpu 从宿主贴图读回（片 1：二维 / 二维数组 / 立方体 / 三维，NVN_GPU_FMT_READBACK 的格式）。
+// ② 内容归 GPU（渲染 / 拷贝 / 计算写过）：rt_gpu 从宿主贴图读回（一维 / 二维及其数组 / 立方体 / 三维，NVN_GPU_FMT_READBACK 的格式）。
 // 别的（线性 / 稀疏 / 多重采样 / 缓冲贴图、没人写过的、读回不了的格式）照旧具名记账、不动 dst，不返回假结果。
 int nvn_ft_written(const tex_t *t) __attribute__((weak));   // hle_nvn.c：脏页追踪（档案开关在它里面判），命中时它自己记 nvn_be_tex_cpu_written；没有它的构建当「没写过」
 static int tex_content_in_guest_memory(const tex_t *t) {
@@ -280,9 +280,8 @@ void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const N
     // 也不写互相覆盖的输出（iOS 不查）。这些检查都是纯的，排在可能改归属的 nvn_ft_written 之前
     uint32_t levels = t->d.levels ? t->d.levels : 1, layers = t->L.layers ? t->L.layers : 1;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
-    int one_d = t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY;   // 一维只有一行；一维数组的 height 是层数（nvn_tex.c shape）
     if (level >= levels || level >= 32 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset < 0 || r->width <= 0 || r->height <= 0 || r->depth < 0) { nvn_unimpl("be", "read_texels_bad_region", t); return; }
-    uint32_t lw = t->d.width >> level, lh = one_d ? 1 : t->d.height >> level, ld = is3d ? t->d.depth >> level : 1;
+    uint32_t lw = t->d.width >> level, lh = rp_tex_height(t) >> level, ld = is3d ? t->d.depth >> level : 1;
     if (!lw) lw = 1;
     if (!lh) lh = 1;
     if (!ld) ld = 1;

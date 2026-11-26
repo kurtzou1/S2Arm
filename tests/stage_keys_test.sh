@@ -33,6 +33,10 @@ miss() {   # miss <仓库> <阶段> → 闭包里有、声明表里没有的文�
   LC_ALL=C comm -23 <(cd "$r" && python3 tools/stage_inputs.py --table "pack/stage_inputs/$st.tsv" ${!e} $(LC_ALL=C awk -F'\t' '$1 == "入" { print $2 }' "$r/pack/stage_inputs/$st.tsv") | LC_ALL=C sort) <(awk -F'\t' '!/^#/ && NF >= 2 { print $2 }' "$r/pack/stage_inputs/$st.tsv" | LC_ALL=C sort)
 }
 key() { bash -c 'source "$1/pack/stage_keyfiles.sh"; stage_files_key "$2" "$1"' _ "$1" "$2"; }
+# keyl <locale> <仓库> <阶段>：指定 locale 算键。locale 只挂在内层 bash 上，不写成 $(LC_ALL=… key …)——
+#   11-26 Mac 门禁机：Homebrew bash 5.3.15 起点 C locale 时，子 shell 里给函数 / 内建临时设 UTF-8 locale 会段错误（rc=139），
+#   原写法崩了也照样拿到已打印的键、退出码被吞
+keyl() { LC_ALL=$1 bash -c 'source "$1/pack/stage_keyfiles.sh"; stage_files_key "$2" "$1"' _ "$2" "$3"; }
 # ①
 for st in direct extract direct_seed direct_cpso; do
   m=$(miss "$H" $st); k=$(key "$H" $st 2> $T/err)
@@ -77,7 +81,7 @@ done
 cp "$H/pack/stage_keyfiles.sh" "$T/locale/pack/"
 git -C "$T/locale" add .
 git -C "$T/locale" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
-fixture_key=$(LC_ALL=C key "$T/locale" shader_pack)
+fixture_key=$(keyl C "$T/locale" shader_pack)
 REAL_AWK=$(command -v awk); export REAL_AWK
 cat > "$T/awk-bin/awk" <<'AWK'
 #!/bin/sh
@@ -89,9 +93,9 @@ AWK
 chmod +x "$T/awk-bin/awk"
 export LOCALE_TRACE="$T/awk-locale.log"
 for st in shader_pack direct_lib extract; do
-  kc=$(LC_ALL=C key "$T/locale" "$st")
-  ku=$(LC_ALL=en_US.UTF-8 key "$T/locale" "$st")
-  ck "④ ${st}：C / UTF-8 阶段键逐字一致" '[ ${#kc} = 16 ] && [ "$kc" = "$ku" ]'
+  kc=$(keyl C "$T/locale" "$st"); kcr=$?
+  ku=$(keyl en_US.UTF-8 "$T/locale" "$st"); kur=$?
+  ck "④ ${st}：C / UTF-8 阶段键逐字一致、都退 0（rc=${kcr}/${kur}）" '[ $kcr = 0 ] && [ $kur = 0 ] && [ ${#kc} = 16 ] && [ "$kc" = "$ku" ]'
   : > "$LOCALE_TRACE"
   observed=$(PATH="$T/awk-bin:$PATH" LC_ALL=en_US.UTF-8 bash -c 'source "$1/pack/stage_keyfiles.sh"; stage_files_key "$2" "$1"; printf "%s\n" "$LC_ALL"' _ "$T/locale" "$st")
   ck "④ ${st}：中文筛选局部使用 C（真实 awk），调用者仍为 UTF-8" '[ "$(cat "$LOCALE_TRACE")" = C ] && [ "$(head -1 <<< "$observed")" = "$fixture_key" ] && [ "$(tail -1 <<< "$observed")" = en_US.UTF-8 ]'
@@ -99,7 +103,7 @@ done
 printf 'changed\n' >> "$T/locale/outside.txt"
 git -C "$T/locale" -c user.name=test -c user.email=test@example.invalid commit -qam outside
 for st in shader_pack direct_lib extract; do
-  kc=$(LC_ALL=C key "$T/locale" "$st"); ku=$(LC_ALL=en_US.UTF-8 key "$T/locale" "$st")
-  ck "④ ${st}：外部文件变化后两种 locale 均保持原键" '[ "$kc" = "$ku" ] && [ "$kc" = "$fixture_key" ]'
+  kc=$(keyl C "$T/locale" "$st"); kcr=$?; ku=$(keyl en_US.UTF-8 "$T/locale" "$st"); kur=$?
+  ck "④ ${st}：外部文件变化后两种 locale 均保持原键、都退 0（rc=${kcr}/${kur}）" '[ $kcr = 0 ] && [ $kur = 0 ] && [ "$kc" = "$ku" ] && [ "$kc" = "$fixture_key" ]'
 done
 [ $bad = 0 ] && echo "stage_keys 单测全过" || { echo "stage_keys 单测有不通"; exit 1; }

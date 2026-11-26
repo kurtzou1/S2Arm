@@ -277,20 +277,23 @@ void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
             LOG("玩家手柄体感：首个样本（%s）：加速度 (%.2f, %.2f, %.2f) g、角速度 (%.1f, %.1f, %.1f) 度/秒",
                 owner.vendorName.UTF8String ?: "?", acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]);
     };
-    if (atomic_load(&g_motion_wanted)) motion_activate(c, YES);
+    motion_activate(c, YES);   // 分到槽就开，一直开到手柄离开槽（见下 s2a_ios_slot_feedback_motion_wanted）
 }
-// 游戏要不要六轴（controller.m s2a_pad_set_motion_enabled）：按需开关各槽手柄的传感器
-void s2a_ios_slot_feedback_motion_wanted(int want) {
-    want = !!want;
-    if (atomic_exchange(&g_motion_wanted, want) == want) return;
+// 游戏要不要六轴（controller.m s2a_pad_set_motion_enabled）：只记下来，不再开关手柄传感器（#2142，11-26）。
+//   原先按游戏开关各槽手柄的传感器：蓝牙第三方 Pro 模式手柄（盖世小鸡启明星 NS，iPhone 0.6.10，D-85DT）开了之后多数局只回一个全 0 样本就再没数据，
+//   局中断开重连后再开也一样；同一台 iPhone、同类手柄在另一个移植（NX2Apple，引擎 seedds/nxnative dm/host/motion_apple.h）上体感正常——
+//   它在手柄分到玩家时就开传感器、离开才关，回前台再补开一次。这里照它：传感器跟手柄在槽的时间走，游戏要不要只决定样本用不用
+//   （controller.m 按 g_phone_motion_wanted / g_motion_requested 取样）
+void s2a_ios_slot_feedback_motion_wanted(int want) { atomic_store(&g_motion_wanted, !!want); }
+// 前后台（controller.m 同 g_slots_active）与震动开关关掉时：后台不收、不震；关掉时马上停。
+//   回前台补开各槽手柄的传感器：iOS 在 App 进后台时会关掉要手动开的手柄传感器、回来也不再开（nxnative dm_motion_rearm 注释，iPad 实测），不补就整局没体感到重连
+void s2a_ios_slot_feedback_active(int active) {
+    int was = atomic_exchange(&g_active, !!active);
+    if (!active) { s2a_ios_slot_feedback_stop(); return; }
+    if (was) return;
     GCController *owners[SLOT_PADS];
     pthread_mutex_lock(&g_mu); for (int s = 0; s < SLOT_PADS; s++) owners[s] = g_owner[s]; pthread_mutex_unlock(&g_mu);
-    for (int s = 0; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], want);
-}
-// 前后台（controller.m 同 g_slots_active）与震动开关关掉时：后台不收、不震；关掉时马上停
-void s2a_ios_slot_feedback_active(int active) {
-    atomic_store(&g_active, !!active);
-    if (!active) s2a_ios_slot_feedback_stop();
+    for (int s = 0; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], YES);
 }
 void s2a_ios_slot_feedback_stop(void) {
     dispatch_async(queue(), ^{ for (S2ASlotRumbler *r in g_rumblers.objectEnumerator) rumbler_stop(r); });

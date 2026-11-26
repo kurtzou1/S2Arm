@@ -445,9 +445,9 @@ import S2ArmAppleAdapter
             "batch": m.batchState.map { s -> [String: Any] in ["running": m.batchRunning, "summary": s["summary"] ?? [:], "next": s["next"] ?? NSNull(),
                                                                    "items": ((s["batch"] as? [String: Any])?["items"]) ?? [], "paused": ((s["batch"] as? [String: Any])?["paused"]) ?? NSNull()] } ?? NSNull(),
             "cachedAt": Date().timeIntervalSince1970,
-            "screenCaptureAllowed": Self.screenCaptureAllowed, "lastSnapshotPath": lastSnapshotPath,
+            "lastSnapshotPath": lastSnapshotPath,
             "overlays": [(m.showEnvironment, "环境检查页"), (m.exportFor != nil, "出包页")].filter { $0.0 }.map { $0.1 },
-            // 窗口在屏幕上的位置（左上角原点，单位点），给客户端用系统 screencapture -R 截真画面
+            // 窗口在屏幕上的位置（左上角原点，单位点）
             "windows": NSApp.windows.filter(\.isVisible).map { w -> [String: Any] in
                 let top = (NSScreen.screens.first?.frame.maxY ?? 0) - w.frame.maxY
                 // 排查「整窗发灰却看不到面板」用：挂着的 sheet（含不可见、透明、零尺寸的）逐个列出，外观是深色还是浅色
@@ -474,23 +474,10 @@ import S2ArmAppleAdapter
         }
     }
 
-    static var screenCaptureAllowed: Bool {
-        typealias P = @convention(c) () -> Bool
-        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGPreflightScreenCaptureAccess") else { return false }
-        return unsafeBitCast(sym, to: P.self)()
-    }
-
-    /// 主窗口 + 盖在上面的弹出层：窗口服务器按窗口号合成（截自己的窗口不要屏幕录制权限）；出不了图再退回只画主窗口视图层级。
+    /// 主窗口 + 盖在上面的弹出层，只走离屏渲染（画视图层级）：系统截屏 / 窗口服务器合成会弹屏幕录制授权框、挂着等人点。
     func snapshot() -> Data? {
         let vis = NSApp.windows.filter { $0.isVisible && $0.contentView != nil }
         guard let main = vis.first(where: { $0.sheetParent == nil && $0.frame.width > 200 }) else { return nil }
-        let ids = ([main] + vis.filter { $0 !== main && ($0.sheetParent === main || $0.parent === main) }).reversed().map { NSNumber(value: CGWindowID($0.windowNumber)) }
-        typealias Fn = @convention(c) (CGRect, CFArray, UInt32, UInt32) -> Unmanaged<CGImage>?
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImageFromArray"),
-           let img = unsafeBitCast(sym, to: Fn.self)(.null, ids as CFArray, 1, 0)?.takeRetainedValue(), img.width > 1 {
-            lastSnapshotPath = "window-server"
-            return NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
-        }
         guard let v = main.contentView?.superview ?? main.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return nil }
         v.cacheDisplay(in: v.bounds, to: rep)
         // 主窗口开着弹出层（设置、登录面板等 sheet）时，系统会把主窗口压暗：只画主窗口就是一张整体发灰、按钮发暗的图，看着像界面卡了一层蒙层。

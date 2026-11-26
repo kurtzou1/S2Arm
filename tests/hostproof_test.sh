@@ -7,6 +7,7 @@
 #   ③ 钩子打待证行但自身红（退 1）→ 门禁照红（退 1）：待证不掩盖红
 #   ④ 宿主行不当成该步的结论末行（🟢 行末尾仍是钩子自己的最后一句）
 #   ⑤ 负控：LANG=en_US.UTF-8 下跑 ② 的已证场景——BSD awk 在 UTF-8 下 $1 == "待宿主证" 对「已证宿主项」判真（strcoll 塌缩），旧代码这条红、修后绿
+#   ⑥ 外层无 LANG（C locale 起点，入车预检 env -i 就是这样）跑 ⑤ 同一调用：退 0、末行门禁 绿
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 mk() { rm -rf "$T/r"; mkdir -p "$T/r/tools" "$T/r/hp"; cp "$H/tools/gate.sh" "$H/tools/gate_plan.sh" "$T/r/tools/"; printf '%s\n' "$1" > "$T/r/hp/gate.sh"
@@ -22,6 +23,13 @@ ck "② 已证：退 0、机读行原样、末行门禁 绿" '[ $r = 0 ] && grep
 mk 'printf "待宿主证\t安卓宿主\tapk\n"; exit 1'; o=$(run); r=$?
 ck "③ 待证 + 自身红 → 门禁红（rc=${r}）" '[ $r = 1 ] && [[ "$(tail -1 <<< "$o")" == "门禁 红："* ]]'
 # ⑤ 负控：钉 UTF-8 locale——BSD awk 在 en_US.UTF-8 下 $1 == "待宿主证" 对「已证宿主项」判真（strcoll 塌缩），旧代码这条红
-mk 'printf "已证宿主项\t安卓宿主\tapk\n"'; o=$(LANG=en_US.UTF-8 LC_ALL= run); r=$?
+# UTF-8 跑法：临时 locale 只挂在外部命令（bash tools/gate.sh）上，不挂在函数 / 内建上——
+#   11-26 Mac 门禁机：Homebrew bash 5.3.15 起点是 C locale 时，子 shell 里给函数 / 内建临时设 UTF-8 的 LANG / LC_ALL 会段错误（rc=139），
+#   原写法 o=$(LANG=en_US.UTF-8 LC_ALL= run) 在入车预检（env -i 不带 LANG）里因此红；门禁输出本身是绿的
+run_utf8() { (cd "$T/r" && LANG=en_US.UTF-8 LC_ALL= S2A_GATE_CPU_IDLE_MIN=0 GATE_HOST=local GATE_TIER=full bash tools/gate.sh 2>&1); }
+mk 'printf "已证宿主项\t安卓宿主\tapk\n"'; o=$(run_utf8); r=$?
 ck "⑤ UTF-8 下已证不误计待证（旧代码红）" '[ $r = 0 ] && [[ "$(tail -1 <<< "$o")" == "门禁 绿："* ]]'
+# ⑥ 外层无 LANG（入车预检 env -i 不带 LANG，起点 C locale）：在干净子 shell 里跑 ⑤ 同一调用，退出码与末行同 ⑤
+o=$(env -i HOME="$HOME" PATH="$PATH" T="$T" bash -c "$(declare -f run run_utf8); o=\$(run_utf8); r=\$?; printf '%s\n' \"\$o\"; exit \$r"); r=$?
+ck "⑥ 外层无 LANG 时同 ⑤（rc=${r}）" '[ $r = 0 ] && [[ "$(tail -1 <<< "$o")" == "门禁 绿："* ]]'
 [ $bad = 0 ] && echo "hostproof 单测全过"; exit $bad

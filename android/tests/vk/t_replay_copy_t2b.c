@@ -103,15 +103,53 @@ static void run_bc1(void) {
     CHECK(!memcmp(g_guest + 32, block, sizeof block) && g_guest[31] == 0x11 && g_guest[40] == 0x11, "BC1 raw block mismatch / overwritten neighbour");
     nvn_gpu_buf_release(g_dst, NULL, NULL); nvn_gpu_tex_release(g_src);
 }
+static void run_1d_array(void) {
+    tex_t t = {.serial = 13, .d = {.target = NVN_TEXTURE_TARGET_1D_ARRAY, .format = NVN_FORMAT_R32F,
+                                  .width = 8, .height = 4, .depth = 1, .levels = 2}};
+    nvn_tex_layout(&t.d, &t.L);
+    nvn_gpu_tex_desc td = {.d = t.d, .usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD};
+    rp_fold_1d_desc(&td.d);
+    nvn_gpu_err e = {0};
+    nvn_gpu_rc rc = nvn_gpu_tex_create(&td, &g_src, &e);
+    if (!OK(rc)) { CHECK(0, "1D_ARRAY image: %d %s", rc.code, e.why); return; }
+    memset(g_guest, 0x11, sizeof g_guest);
+    g_dst = make_buf(sizeof g_guest, NVN_GPU_MEM_SHARED, g_guest);
+    const float src[2][4] = {{11, 12, 13, 14}, {21, 22, 23, 24}};
+    const NVNcopyRegion row = {0, 0, 0, 4, 1, 1};
+    nvn_gpu_cmd c = begin_cmd();
+    for (unsigned z = 0; z < 2; z++) nvn_gpu_tex_upload(c, g_src, 1, 2 + z, &row, src[z], 16, 16);
+    const p_copy_b2t copy = {.tex = &t, .src = (uint64_t)(uintptr_t)(g_guest + 16),
+                            .has_view = 1, .view = {.set_levels = 1, .base_level = 1, .nlevels = 1,
+                                                    .set_layers = 1, .min_layer = 1, .nlayers = 3},
+                            .r = {1, 0, 1, 3, 1, 2}, .row_stride = 16, .image_stride = 32};
+    const int prior = g_write_n;
+    rp_op_copy_t2b(c, &copy, &copy);
+    CHECK(g_write_n == prior + 1 && g_unimpl == 0 && g_guest[16] == 0x11,
+          "1D_ARRAY T2B registration=%d unsupported=%d", g_write_n - prior, g_unimpl);
+    rc = nvn_gpu_cmd_commit(c, 4, copy_done, NULL, &e);
+    CHECK(OK(rc), "1D_ARRAY T2B commit: %s", e.why);
+    if (OK(rc)) {
+        rc = nvn_gpu_fence_wait(4, 5000000000ull, &e);
+        CHECK(OK(rc), "1D_ARRAY T2B wait: %s", e.why);
+    }
+    uint8_t expected[sizeof g_guest];
+    memset(expected, 0x11, sizeof expected);
+    memcpy(expected + 16, &src[0][1], 12);
+    memcpy(expected + 48, &src[1][1], 12);
+    CHECK(!memcmp(g_guest, expected, sizeof expected), "1D_ARRAY T2B mip/layers/padding differ");
+    printf("replay T2B 1D_ARRAY: mip=1 layers=2 bytes=24 failures=%d\n", g_fail);
+    nvn_gpu_buf_release(g_dst, NULL, NULL);
+    nvn_gpu_tex_release(g_src);
+}
 int main(void) {
     char why[256] = {0};
     if (s2a_vk_device_create(&g_dev, why, sizeof why)) { printf("device failed: %s\n", why); return 2; }
     printf("device: %s (%s)\n", g_dev.properties.deviceName, g_dev.driver_name);
     memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "nvn-replay-t2b-test";
     if (!open_backend()) return 1;
-    run_rgba(); run_3d(); run_bc1(); nvn_gpu_err e = {0};
+    run_rgba(); run_3d(); run_bc1(); run_1d_array(); nvn_gpu_err e = {0};
     CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "close: %d %s", e.rc.code, e.why);
     s2a_vk_device_destroy(&g_dev, 1);
-    printf("%s replay T2B: 64 RGBA bytes and 8 BC1 bytes, failures=%d\n", g_fail ? "FAIL" : "PASS", g_fail);
+    printf("%s replay T2B: RGBA, BC1 and R32F, failures=%d\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

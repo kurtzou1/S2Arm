@@ -208,6 +208,12 @@ def main():
              'hit from the library, compiler not called'),
             ('no-vs-only', '(!ckey && stages != 0x1u && stages != 0x3u && stages != 0x7u)', '(!ckey && stages != 0x3u && stages != 0x7u)',
              'libpack VS-only: hit from the library, compiler not called'),
+            # 库件结果备忘（11-26）：关掉备忘 = 同一组阶段键每次重读库件、重合成，必须红在「没重读库」那条
+            ('memo-off', 'const int memo_ok = stages != 0x7u;', 'const int memo_ok = 0;',
+             'libpack memo: the same stage keys are served from the memo'),
+            # 备忘命中不计数：读数里看不出备忘在不在起作用
+            ('memo-not-counted', 'atomic_fetch_add_explicit(&g_n_lp_memo_hit, 1, memory_order_relaxed);', '(void)0;',
+             'libpack memo: tally counts exactly one more memo hit'),
         ):
             assert code.count(old) == 1, (name, 'mutation anchor')
             path = out / ('gs-libpack-mutant-' + name + '.c')
@@ -225,7 +231,7 @@ def main():
                     for path_kind in ('cold', 'warm') for fmt in (39, 40)}
         assert result.returncode == 1 and len(failures) == 4 and {
             line.split(',')[0] for line in failures} == expected, (result.stdout, result.stderr)
-        print('PASS: 5 libpack graphics negative controls, including cold and warm integer admission')
+        print('PASS: 7 libpack graphics negative controls, including cold and warm integer admission')
         return 0
 
     if sys.argv[1:] == ['--lp-gate-mutants']:

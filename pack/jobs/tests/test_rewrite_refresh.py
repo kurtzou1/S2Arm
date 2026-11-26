@@ -106,7 +106,7 @@ class RewriteRefreshTests(unittest.TestCase):
         self.assertEqual((k / "main.patched.bin").read_bytes(), b"new-main", "命中的模块换成新产物")
         self.assertEqual((k / "main.fixups.tsv").read_bytes(), b"fx")
         self.assertEqual((k / "sdk.patched.bin").read_bytes(), b"old-sdk", "没命中的模块一个字节不动")
-        self.assertEqual(self.info["0100A"]["ios"], {"shellId": "s1", "pack": "p1", "rewriterId": "rid-new", "mainBid": ""}, "记下改写器指纹，原有字段保留")
+        self.assertEqual(self.info["0100A"]["ios"], {"shellId": "s1", "pack": "p1", "rewriterId": "rid-new", "mainBid": "", "tablesId": ""}, "记下改写器指纹，原有字段保留")
 
     def test_pacga_module_counts_as_affected(self):
         # 11-17：改写器把 pacga 换成确定性实现；只带 pacga 的模块（统计行 pacga > 0、x18_spdyn 没有）也要换新产物
@@ -604,6 +604,95 @@ class OriginalExefsFormatTests(unittest.TestCase):
         self.assertEqual(seen, [str(reader)])
 
 
+class GameTablesRefreshTests(unittest.TestCase):
+    """引擎里这款的逐款表（runtime/fix 修补表、runtime/fps 只有 speed 行的实时步长表）新加 / 改了：改写器指纹与补丁记号都不变，
+    「更新这款」原先整款跳过，老包拿不到修复（#2248 一款动作冒险游戏的帧比例：修补表改进程序、步长表随包让宿主写槽，两者缺一修复不生效）。
+    期望按规则手写：表变了 → 全部模块按本引擎表重改写、随包 fps.tsv 换成引擎那份、记下 tablesId；再核一次跳过"""
+    BID = "e0f3ccfaf50065ae"
+    STEP = "build e0f3ccfaf50065ae\nspeed 2040 0.5 2.0 2041\n"
+
+    kit, fake_sgrade, run_refresh = RewriteRefreshTests.kit, RewriteRefreshTests.fake_sgrade, RewriteRefreshTests.run_refresh   # 借夹具、不继承用例
+
+    def setUp(self):
+        RewriteRefreshTests.setUp(self)
+        (self.exefs / "main").write_bytes(bytes(0x40) + bytes.fromhex(self.BID) + bytes(8))
+        self.eng = Path(self.c.engine)
+        (self.eng / "runtime/fix").mkdir(parents=True); (self.eng / "runtime/fps").mkdir(parents=True)
+
+    def tables(self, fix="c\tmain\t6e6cc4\tveneer\n", fps=None):
+        for d, body in (("fix", fix), ("fps", fps if fps is not None else self.STEP)):
+            f = self.eng / "runtime" / d / (self.BID + ".tsv")
+            f.unlink(missing_ok=True)
+            if body:
+                f.write_text(body)
+
+    def test_tables_id_tracks_fix_and_step_tables_only(self):
+        self.assertEqual(rr.tables_id(self.c, self.BID), "", "没有表：记号空（别的款不因本改动重做）")
+        self.tables(fix="", fps="build x\nc main 0x100 word 1 2\nspeed 2040 0.5 2 2041\n")
+        self.assertEqual(rr.tables_id(self.c, self.BID), "", "带 c 行的我方帧率表不随包（own_table 规矩），不算")
+        self.tables()
+        a = rr.tables_id(self.c, self.BID.upper())
+        self.assertTrue(a)
+        self.tables(fix="c\tmain\t6e6cc4\tveneer2\n")
+        self.assertNotEqual(rr.tables_id(self.c, self.BID), a, "修补表内容变了记号就变")
+        self.assertEqual(rr.tables_id(self.c, ""), "")
+
+    def test_step_changes(self):
+        base = self.tmp / "base"; base.mkdir()
+        self.tables()
+        self.assertEqual(rr.step_changes(self.c, base, self.BID), {"fps.tsv": self.eng / "runtime/fps" / (self.BID + ".tsv")})
+        (base / "fps.tsv").write_text(self.STEP)
+        self.assertEqual(rr.step_changes(self.c, base, self.BID), {}, "内容相同不换")
+        self.tables(fps="")
+        self.assertEqual(rr.step_changes(self.c, base, self.BID), {"fps.tsv": None}, "引擎撤了步长表：随包旧表删")
+        (base / "fps.tsv").write_text("build x\nc main 0x100 word 1 2\n")
+        self.assertEqual(rr.step_changes(self.c, base, self.BID), {}, "带 c 行的帧率表不碰")
+        (base / "fps.tsv").write_text(self.STEP)
+        self.assertEqual(rr.table_changes(base, []), {"fps.tsv": None}, "S 级换表：旧步长表这次没出就删")
+
+    def test_ios_old_kit_gets_fix_on_update(self):
+        self.tables()
+        self.info["0100A"] = {"ios": {"rewriterId": "rid-new"}}   # 改写器没变、出包时没有表（老包）
+        with patch.object(rr, "game_bid", return_value=self.BID):
+            updated, kits = self.run_refresh(["0100A"], hits=[])
+            k = kits["0100A"]
+            self.assertEqual(updated, ["0100A"])
+            self.assertEqual([(k / f"{m}.patched.bin").read_bytes() for m in ("main", "sdk", "subsdk0")], [b"new-main", b"new-sdk", b"new-subsdk0"],
+                             "统计行没命中也全部换：修补表改的模块按本引擎表重出")
+            self.assertEqual((k / "fps.tsv").read_text(), self.STEP, "随包步长表补进 kit")
+            self.assertEqual(self.info["0100A"]["ios"]["tablesId"], rr.tables_id(self.c, self.BID))
+            with patch.object(rr, "check_and_update", side_effect=AssertionError("表没变不该再核")):
+                self.assertEqual(self.run_refresh(["0100A"], hits=[])[0], [])
+
+    def test_ios_withdrawn_step_table_is_removed(self):
+        self.tables(fps="")
+        self.info["0100A"] = {"ios": {"rewriterId": "rid-new", "tablesId": "old"}}
+        k = self.kit("0100A"); (k / "fps.tsv").write_text(self.STEP)
+        with patch.object(rr, "game_bid", return_value=self.BID):
+            updated, kits = self.run_refresh(["0100A"], hits=[])
+        self.assertEqual(updated, ["0100A"])
+        self.assertFalse((kits["0100A"] / "fps.tsv").exists())
+
+    def test_mac_runtime_gets_fix_and_manifest(self):
+        import json
+        self.tables()
+        rt = self.tmp / "mac"; (rt / "exefs").mkdir(parents=True)
+        (rt / "exefs/main").write_bytes((self.exefs / "main").read_bytes()); (rt / "exefs/sdk").write_bytes(b"x")
+        for m in ("main", "sdk"):
+            (rt / f"{m}.patched.bin").write_bytes(b"old")
+        (rt / "manifest.json").write_text(json.dumps({"schema": 1, "files": {"main.patched.bin": [3, ""], "sdk.patched.bin": [3, ""]}, "rewriterId": "rid-new"}))
+        binary = fake_rewriter(self.tmp, [])
+        with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "rewriter_bin", return_value=binary), \
+             patch.object(rr, "rewrite_env", return_value=dict(os.environ)), patch.object(rr, "sgrade_off", return_value=True):
+            self.assertTrue(rr.refresh_mac(self.c, "0100A", rt))
+            m = json.loads((rt / "manifest.json").read_text())
+            self.assertEqual([(rt / f"{x}.patched.bin").read_bytes() for x in ("main", "sdk")], [b"new-main", b"new-sdk"])
+            self.assertEqual((rt / "fps.tsv").read_text(), self.STEP)
+            self.assertEqual(m["files"]["fps.tsv"], [len(self.STEP), ""], "清单记随包步长表：起局前按清单核")
+            self.assertEqual(m["tablesId"], rr.tables_id(self.c, self.BID))
+            self.assertFalse(rr.refresh_mac(self.c, "0100A", rt), "表没变不再做")
+
+
 class NoBackgroundRewriteTests(unittest.TestCase):
     """11-17 维护者定：改写器指纹变了不再在后台重改写全部游戏（准备更新 iPhone、打开启动器补 S 级都走 ignore_rewriter），
     只在玩家对这一款出包 / 推送 / 装机 / 起局时前台做；补丁记号里改写器之后的部分（补丁库版本、金手指等）变了照旧补。
@@ -617,7 +706,7 @@ class NoBackgroundRewriteTests(unittest.TestCase):
             calls.append((g, rid)); return "unaffected"
         with patch.object(rr, "rewriter_id", lambda cc: "NEWRID"), patch.object(rr, "ios_key", lambda cc, g, rid: now_key(rid)), \
                 patch.object(rr, "kept_todo", lambda *a: False), patch.object(rr, "check_and_update", check), \
-                patch.object(rr, "_refresh_bf_ios", lambda cc, games: []), \
+                patch.object(rr, "_refresh_bf_ios", lambda cc, games: []), patch.object(rr, "game_bid", lambda cc, g: ""), \
                 patch.object(rr.layout, "game_info", lambda cc, g: saved), patch.object(rr.layout, "ios_kit", lambda cc, g: Path("/kit")), \
                 patch("core.trace", lambda *a, **k: None, create=True), patch("programs.save_recipe", lambda *a: None, create=True):
             rr.refresh_ios(c, [self.G], ignore_rewriter=ignore)
@@ -649,7 +738,7 @@ class NoBackgroundRewriteTests(unittest.TestCase):
             (rt / "exefs/main").write_bytes(bytes(0x48))
             import json as _json
             (rt / "manifest.json").write_text(_json.dumps({"files": {}, "rewriterId": "OLDRID"}))
-            c = types.SimpleNamespace(emit=lambda *a, **k: None, catalog=lambda: {"games": []}, private=t)
+            c = types.SimpleNamespace(emit=lambda *a, **k: None, catalog=lambda: {"games": []}, private=t, engine=t)   # 引擎里没有这款的逐款表
             ran = []
             def boom(*a, **k):
                 ran.append(1); raise Failure("前台才该跑到这里")

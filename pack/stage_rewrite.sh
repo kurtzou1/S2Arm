@@ -42,7 +42,8 @@ VT="${S2A_WIDEN_DIR:-$R/graphics/widen/tables}/verified.tsv"; VR=$([ -f "$VT" ] 
 # 帧率表（10-26，体系提升方案 D）：仓库 runtime/fps/<main 构建号前 16 位>.tsv 有就拷进产物根作 fps.tsv（runtime/src/fps.c 装载后读），按「文件名 + 内容」进键；没有 = 原生帧率
 #   11-18：我方帧率表（改指令 c 行打进游戏代码，如去掉游戏自己的 30 帧下限）只在内部对照口径 S2A_CAPS_OWN=1 才进包。11-13 撤我方 60 帧后运行时只把槽写成关值，
 #   但 c 行照样打进程序：玩家 60 帧关着游戏也能跑到 60，按 30 帧口径写死的时钟（布料 / 头发）快一倍（#1607 过场加速）。不进包 = 程序与原版一致、社区帧率补丁照常收
-FT="$R/runtime/fps/${BID:0:16}.tsv"; { [ -f "${FT}" ] && [ "${S2A_CAPS_OWN:-}" = 1 ]; } || FT=
+#   只有 build / speed 行的表（实时步长表，至少一行 speed）不放开帧率、不改指令，只让宿主每次出图把实测帧时写进键页槽：缺省口径也进包（同 pack/orch/stages.py step_only_table）
+FT="$R/runtime/fps/${BID:0:16}.tsv"; { [ -f "${FT}" ] && { [ "${S2A_CAPS_OWN:-}" = 1 ] || awk '{ sub(/#.*/, "") } NF { if ($1 == "speed") s = 1; else if ($1 != "build") b = 1 } END { exit !(s && !b) }' "${FT}"; }; } || FT=
 # 游戏缺陷修补表（11-16，runtime/fix/README.md）：仓库 runtime/fix/<main 构建号前 16 位>.tsv 有就交改写器（S2A_FIX_TSV，fix_rows），按内容进键；不进产物根
 XT="$R/runtime/fix/${BID:0:16}.tsv"; [ -f "${XT}" ] || XT=
 # 社区画面补丁（pack/cpatch.py）：匹配上的补丁编成「双路 + 槽」进包，开关在运行时。

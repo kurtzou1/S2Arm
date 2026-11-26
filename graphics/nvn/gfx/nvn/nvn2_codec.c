@@ -52,6 +52,10 @@
 // 弱链接[nvntest,host,ios]：s2a_av1_open（services/dav1d 提供；NVN 单测不链服务层编解码库；宿主 / iOS 的 S2A_DAV1D 显式设 auto 且探测到本机有 AV1 硬解时不链 dav1d（tools/av1hw.sh），那时 host / ios 链接也要放行未定义）
 // 弱链接[nvntest,host,ios]：s2a_av1_decode（同上）
 // 弱链接[nvntest,host,ios]：s2a_av1_close（同上）
+// 弱链接[nvntest,host,ios]：s2a_av1_open_mt（同上；帧并行接口）
+// 弱链接[nvntest,host,ios]：s2a_av1_send（同上）
+// 弱链接[nvntest,host,ios]：s2a_av1_flush（同上）
+// 弱链接[nvntest,host,ios]：s2a_av1_reset（同上）
 void *s2a_vp9_open(int threads) __attribute__((weak));
 int s2a_vp9_decode(void *h, const uint8_t *data, uint32_t len, uint8_t **planes, int32_t *strides, int32_t *info) __attribute__((weak));
 void s2a_vp9_close(void *h) __attribute__((weak));
@@ -71,6 +75,12 @@ int s2a_av1_decode(void *h, const uint8_t *data, uint32_t len, uint8_t **planes,
 //   每交出一帧新解码的画面报一次，同一口径；片源不超过 30 帧且这段主要在放视频时出图封顶 30。弱链接：单测不链 hle_nvn.c
 void s2a_video_frame_pts(int64_t pts_ns) __attribute__((weak));   // 同上，带这一帧的片源时间戳（片源帧率按时间戳判，不被出图节拍反拖）
 void s2a_av1_close(void *h) __attribute__((weak));
+// 帧并行接口（services/dav1d/s2a_av1.c）：送包与出帧分开，帧带送进时的时间戳出来；流结束调 flush 取完还在解的帧
+typedef int (*s2a_av1_out_fn)(void *ctx, uint8_t **planes, int32_t *strides, int32_t *info, int64_t ts);
+void *s2a_av1_open_mt(int threads, int frame_delay) __attribute__((weak));
+int s2a_av1_send(void *h, const uint8_t *data, uint32_t len, int64_t ts, s2a_av1_out_fn out, void *ctx) __attribute__((weak));
+int s2a_av1_flush(void *h, s2a_av1_out_fn out, void *ctx) __attribute__((weak));
+void s2a_av1_reset(void *h) __attribute__((weak));   // 换代（游戏 Flush）时丢掉 dav1d 里还在解的帧
 
 // SDK 的「环空 / 还没有帧」结果
 #define CV_NOT_READY 0x1c286fu
@@ -668,6 +678,12 @@ typedef struct cvdec {
     struct cv_ahead { uint8_t *p; size_t cap, size; uint16_t fw, fh; int64_t pts; int eos, gen, has; } ah[32]; int ah_h, ah_n, ah_cap, ah_epoch; size_t ah_frame; pthread_t eth;
     uint64_t ah_peak, ah_low;   // 队列最深 / 出帧线程取到时队列已空（解码跟不上）的次数
     uint64_t props_wait_n, props_wait_ns;   // 游戏取帧属性时那一格还没帧、等了的次数 / 合计
+    int av1_mt, av1_gen;   // dav1d 走帧并行接口（s2a_av1_send / s2a_av1_flush）；av1_gen：dav1d 里的帧属于哪一代
+    // 追帧：游戏开头那几秒画得慢（还在加载，24–44 帧/秒），每次重绘只取一格、不按时间戳跳帧，影片就一路落后（声音照真实时间放、跑到前面；实测落后 4 s 后一直保持）。
+    //   出帧线程按「锚点 + 片源时间差」算每帧该交的时刻，队列里下一帧也已经到时就把过时的这一帧丢掉。锚点 = 游戏 Start 那一刻（游戏的声音时间轴从这里起；
+    //   不从首帧交出算：解码起步 + 游戏前几帧慢，首帧本身就晚），S2A_VIDEO_OFFSET_MS 再加减（正 = 画面提前）。单次等待超过 1 s（游戏暂停、不来取）把锚点往后挪，不算落后
+    uint64_t cu_t0, cu_drop, start_ns; int64_t cu_p0, cu_off_ns; int cu_gen, cu_on;
+    uint64_t av1_drain_n;   // 帧并行时没包可解、把在解的帧取完的次数（多 = 解码跟得上，并行用不上）
 } cvdec;
 #define CV_AHEAD_MAX 32
 #define CV_AHEAD_BYTES (96u << 20)
@@ -781,10 +797,30 @@ static void *cv_emitter(void *arg) {
         while (!d->quit && !d->ah_n) pthread_cond_wait(&d->cv, &d->mu);
         if (d->quit) break;
         struct cv_ahead *a = &d->ah[d->ah_h]; int ep = d->ah_epoch;
+        if (d->cu_on && a->gen == d->gen && a->has && !a->eos && d->ah_n >= 2 && d->cu_t0 && d->cu_gen == a->gen) {
+            const struct cv_ahead *nx = &d->ah[(d->ah_h + 1) % CV_AHEAD_MAX];
+            int64_t now = (int64_t)now_ns(), due_next = (int64_t)d->cu_t0 + (nx->pts - d->cu_p0);
+            if (nx->gen == a->gen && nx->has && !nx->eos && nx->pts > a->pts && now >= due_next) {   // 下一帧都到时了：这一帧过时，丢
+                d->ah_h = (d->ah_h + 1) % CV_AHEAD_MAX; d->ah_n--; d->cu_drop++;
+                pthread_cond_broadcast(&d->cv);
+                continue;
+            }
+        }
         if (a->gen == d->gen) {
+            uint64_t ws = now_ns();
             pthread_mutex_unlock(&d->mu);
-            cv_emit_now(d, a->has ? wr_ahead : NULL, a, a->fw, a->fh, a->pts, a->eos, a->gen);
+            int ok = cv_emit_now(d, a->has ? wr_ahead : NULL, a, a->fw, a->fh, a->pts, a->eos, a->gen);
             pthread_mutex_lock(&d->mu);
+            if (ok && a->has && !a->eos) {
+                uint64_t t = now_ns();
+                if (!d->cu_t0 || d->cu_gen != a->gen || a->pts < d->cu_p0) {   // 新片 / 换代 / 时间戳倒回：重新锚定
+                    int first = !d->cu_t0 && d->start_ns && a->pts < 200000000ll;   // 片头第一帧：按 Start 锚（这一帧的片源时间算在 Start 之后）
+                    uint64_t base = first ? d->start_ns : t;
+                    if (first) LOG("视频解码：片头首帧（片源 %.3f s）交出比游戏 Start 晚 %.0f ms，追帧按 Start 锚定%s", a->pts / 1e9, (t - d->start_ns) / 1e6, d->cu_off_ns ? "（另加 S2A_VIDEO_OFFSET_MS）" : "");
+                    d->cu_t0 = (uint64_t)((int64_t)base - d->cu_off_ns); d->cu_p0 = first ? 0 : a->pts; d->cu_gen = a->gen;
+                }
+                else if (t - ws > 1000000000ull) d->cu_t0 += t - ws;   // 这一帧等了 1 s 以上（暂停、游戏不来取）：不算落后
+            }
         }
         if (ep == d->ah_epoch && d->ah_n) { d->ah_h = (d->ah_h + 1) % CV_AHEAD_MAX; d->ah_n--; }   // 即时存档恢复清过队列（ah_epoch 变了）：不再出队
         pthread_cond_broadcast(&d->cv);
@@ -823,11 +859,16 @@ static int vp9_system_enabled(void) {
 #endif
 static _Atomic unsigned long long g_vp9_vt_frames;
 unsigned long long nvn2_vp9_vt_frames(void) { return atomic_load(&g_vp9_vt_frames); }
+// dav1d 最大帧延迟：缺省 0 = 按线程数让几帧同时解（6 线程 3 帧）。1 = 退回一帧接一帧（帧并行之前的做法）；2–8 = 指定
+static int av1_frame_delay(void) { const char *e = getenv("S2A_AV1_FRAME_DELAY"); int v = e && *e ? atoi(e) : 0; return v >= 0 && v <= 8 ? v : 0; }
 static void cv_soft_open(cvdec *d, const char *why) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (!s2a_av1_open) die("Switch 2 视频：%s；宿主没链 dav1d 垫片（services/dav1d；本机构建有 AV1 硬解时不链，S2A_DAV1D），解不了 AV1（%dx%d）", why, d->w, d->h);
-    if (!(d->av1 = s2a_av1_open(n >= 8 ? 6 : (int)n))) die("Switch 2 视频：dav1d 建不出 AV1 解码器（%dx%d）", d->w, d->h);
-    if (!d->av1_soft++) LOG("Switch 2 视频：AV1 %dx%d 走 dav1d 软件解码（%s）", d->w, d->h, why);
+    int th = n >= 8 ? 6 : (int)n, fd = av1_frame_delay();
+    d->av1_mt = s2a_av1_open_mt && fd != 1;
+    if (!(d->av1 = d->av1_mt ? s2a_av1_open_mt(th, fd) : s2a_av1_open(th))) die("Switch 2 视频：dav1d 建不出 AV1 解码器（%dx%d）", d->w, d->h);
+    if (!d->av1_soft++) LOG("Switch 2 视频：AV1 %dx%d 走 dav1d 软件解码（%s；%d 线程，%s）", d->w, d->h, why, th,
+                            d->av1_mt ? (fd ? "帧并行、最大帧延迟按 S2A_AV1_FRAME_DELAY" : "帧并行、最大帧延迟按线程数") : "一帧接一帧（S2A_AV1_FRAME_DELAY=1）");
 }
 static void dec_time(cvdec *d, uint64_t t0) { uint64_t t = now_ns() - t0; d->dec_n++; d->dec_ns += t; if (t > d->dec_max) d->dec_max = t; }
 // 按 d->vtfmt 建 VideoToolbox 解码会话（AV1 / H.264 共用）：输出 BGRA（RGBA 图像）或 NV12（看图像池）；0 = 建好
@@ -1033,6 +1074,14 @@ static int cv_vp9_vt_decode(cvdec *d, const cv_in *in, int64_t pts, int gen) {
 }
 #endif // TARGET_OS_OSX
 
+// dav1d 解出的一帧交给游戏（单帧接口与帧并行接口共用）；返回 0 = 解码器要退 / 换代，后面的帧不交了
+typedef struct { cvdec *d; int gen; } av1_out_ctx;
+static int av1_out(void *ctx, uint8_t **pl, int32_t *st, int32_t *info, int64_t ts) {
+    av1_out_ctx *c = ctx; cvdec *d = c->d;
+    cv_pic pic = { { pl[0], pl[1], pl[2] }, { st[0], st[1], st[2] }, info[0], info[1], info[5], info[4] == 1 || (info[4] < 0 && d->h >= 720), info[2],
+                   info[3] == 1 || info[3] == 2, info[3] == 1, info[3] == 0 };
+    return cv_emit(d, wr_pic, &pic, (uint16_t)info[0], (uint16_t)info[1], ts, 0, c->gen);
+}
 static void cv_decode(cvdec *d, const cv_in *in, int gen) {
     // SDK 按微秒发（sdk+0x336260），按 微秒 × 1000 报
     int64_t pts = in->pts_ns / 1000 * 1000;
@@ -1086,16 +1135,30 @@ static void cv_decode(cvdec *d, const cv_in *in, int gen) {
             } else if (st) CV_RED(vtdec, "Switch 2 视频：AV1 VideoToolbox 解码失败（%d，首个 %zu 字节）：这一包没有画面", (int)st, in->n);
             if (!cv_vt_emit(d, pts, gen)) return;
         }
-        if (d->av1) {
+        if (d->av1 && d->av1_mt) {
+            // 帧并行：出来的帧可能是前几包的，时间戳跟着帧走；流结束时把还在解的帧取完再出带结束标记的那一帧。
+            //   换代（游戏 Flush / 跳转）后先清掉 dav1d 里上一代还在解的帧，不然头几次送包会把旧片段的帧当这一代交出去
+            if (d->av1_gen != gen) { if (s2a_av1_reset) s2a_av1_reset(d->av1); d->av1_gen = gen; }
+            av1_out_ctx c = { d, gen }; uint64_t t0 = now_ns();
+            int r = s2a_av1_send(d->av1, in->p, (uint32_t)in->n, pts, av1_out, &c);
+            dec_time(d, t0);
+            if (r == -2) return;
+            if (r < 0) CV_RED(av1err, "Switch 2 视频：AV1 dav1d 解码失败（首个 %zu 字节）：这一包没有画面", in->n);
+        } else if (d->av1) {
             uint8_t *pl[3]; int32_t st[3], info[6]; uint64_t t0 = now_ns();
             int r = s2a_av1_decode(d->av1, in->p, (uint32_t)in->n, pl, st, info);
             dec_time(d, t0);
             if (r == 0) {
-                cv_pic pic = { { pl[0], pl[1], pl[2] }, { st[0], st[1], st[2] }, info[0], info[1], info[5], info[4] == 1 || (info[4] < 0 && d->h >= 720), info[2],
-                               info[3] == 1 || info[3] == 2, info[3] == 1, info[3] == 0 };
-                if (!cv_emit(d, wr_pic, &pic, (uint16_t)info[0], (uint16_t)info[1], pts, 0, gen)) return;
+                av1_out_ctx c = { d, gen };
+                if (!av1_out(&c, pl, st, info, pts)) return;
             } else if (r < 0) CV_RED(av1err, "Switch 2 视频：AV1 dav1d 解码失败（首个 %zu 字节）：这一包没有画面", in->n);
         }
+    }
+    // 帧并行的 dav1d 把还在解的帧取完：流结束时（结束包可能不带数据，所以放在这里），以及游戏暂时没有下一包可解时——
+    //   游戏若送一包等一帧（或片子很短、不带结束标记），帧不能压在 dav1d 里；只在有包排着（解码落后）时才几帧同时解
+    if (d->av1 && d->av1_mt) {
+        pthread_mutex_lock(&d->mu); int idle = !d->qn; pthread_mutex_unlock(&d->mu);
+        if (in->eos || idle) { av1_out_ctx c = { d, gen }; d->av1_drain_n++; if (s2a_av1_flush(d->av1, av1_out, &c) == -2) return; }
     }
     // 流结束：再出一帧带标记（图是上一帧）
     if (in->eos) cv_emit(d, NULL, NULL, (uint16_t)d->w, (uint16_t)d->h, pts, 1, gen);
@@ -1135,6 +1198,8 @@ static Result cv_init(void *t, int codec, uint32_t w, uint32_t h) {
     }
     cvdec *d = calloc(1, sizeof *d); if (!d) die("Switch 2 视频：内存不足");
     d->guest = t; d->codec = codec; d->w = (int)w; d->h = (int)h; d->last = -1;
+    { const char *e = getenv("S2A_VIDEO_CATCHUP"); d->cu_on = !(e && !strcmp(e, "0")); }   // 追帧缺省开；S2A_VIDEO_CATCHUP=0 关（游戏取几帧放几帧）
+    { const char *e = getenv("S2A_VIDEO_OFFSET_MS"); if (e && *e) d->cu_off_ns = (int64_t)atoll(e) * 1000000ll; }
 #if TARGET_OS_OSX
     d->vp9_system = codec == CV_VP9 && vp9_system_enabled();
     if (d->vp9_system) LOG("Switch 2 视频：VP9 走系统解码（VideoToolbox；%s，失败回退 libvpx）", getenv("S2A_VP9_SYSTEM") && !strcmp(getenv("S2A_VP9_SYSTEM"), "1") ? "S2A_VP9_SYSTEM=1" : "宿主没链真 libvpx，默认系统");
@@ -1176,6 +1241,8 @@ static void cv_teardown(cvdec *d, int guest_event) {
         destroy((uint8_t *)t + 8);   // 托管句柄随之关掉
     }
     s2a_event_release(d->ready_ev);
+    if (d->cu_on) LOG("视频解码：追帧（游戏取帧跟不上片源时间）丢 %llu 帧", (unsigned long long)d->cu_drop);
+    if (d->av1_mt) LOG("视频解码：dav1d 帧并行，没包可解时取完在解帧 %llu 次（解 %llu 包）", (unsigned long long)d->av1_drain_n, (unsigned long long)d->dec_n);
     LOG("视频解码：先解队列 %d 格（%.1f MB）、最深 %llu 帧，出帧线程取到空队列 %llu 次；游戏取帧属性时那格还没帧 %llu 次、合计等 %.1f ms", d->ah_cap, d->ah_cap * (double)d->ah_frame / 1048576.0, (unsigned long long)d->ah_peak,
         (unsigned long long)d->ah_low, (unsigned long long)d->props_wait_n, d->props_wait_ns / 1e6);
     LOG("Switch 2 视频：%s 解码器结束，出帧 %llu；解码 %llu 包，每包平均 %.2f ms、最长 %.2f ms；写进图像每帧平均 %.2f ms（%s）", cv_name[d->codec], (unsigned long long)d->frames, (unsigned long long)d->dec_n,
@@ -1204,7 +1271,7 @@ static Result cv_register(void *t, uint32_t i, const cv_pool *pool, uint32_t img
     CV_TR(d, "Register 缓冲 %u ← 图像 %u（%s），环里 %d", i, pool->first + img, kind == IMG_NV12 ? "NV12" : kind == IMG_RGBA ? "RGBA" : kind == IMG_HDR ? "HDR" : "不认识", rn);
     return RES_OK;
 }
-static Result cv_start(void *t) { cvdec *d = cv_of(t); pthread_mutex_lock(&d->mu); d->started = 1; pthread_cond_broadcast(&d->cv); cv_ready_signal(d); int rn = d->rn; pthread_mutex_unlock(&d->mu); CV_TR(d, "Start，环里 %d", rn); return RES_OK; }
+static Result cv_start(void *t) { cvdec *d = cv_of(t); pthread_mutex_lock(&d->mu); if (!d->started) d->start_ns = now_ns(); d->started = 1; pthread_cond_broadcast(&d->cv); cv_ready_signal(d); int rn = d->rn; pthread_mutex_unlock(&d->mu); CV_TR(d, "Start，环里 %d", rn); return RES_OK; }
 // 排队的包丢掉、解码器重来；等帧的缓冲继续等
 static Result cv_flush(void *t, int stop) {
     cvdec *d = cv_of(t);

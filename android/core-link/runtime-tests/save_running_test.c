@@ -38,6 +38,9 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
 }
 int s2a_android_session_log_start(const char *dir, uint64_t id) { assert(dir && id == session); return 0; }
 int s2a_android_docs_bind(const char *dir) { assert(dir); return 0; }
+// runtime.c 安卓分支后来新调的两个出口（合成端点，同上）：没有停帧救场标记；NPDM 不是 Switch 2
+int s2a_android_stall_off_apply(const char *docs) { assert(docs); return 0; }
+int s2a_npdm_ounce(const char *npdm) { assert(npdm); return 0; }
 int s2a_capprobe_ensure(void) { return -1; } // 夹具无能力探针，按不支持处理
 int s2a_android_dguard_launch(uint64_t id, const char *dir, unsigned abi) {
     (void)id; (void)dir; (void)abi; assert(!"fixture is generic only"); return -1;

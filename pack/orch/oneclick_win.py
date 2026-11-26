@@ -187,13 +187,37 @@ def prebuilt(rel, ident=None):
     return p if p.is_file() else None
 
 
+PINS = R / 'launchers/macos/requirements-runtime.txt'   # 出包运行时的第三方包锁定清单：玩家 Mac（bundle_runtime.py）与 Windows（bundle_runtime_win.py）包都按它带
+
+
+def python_pins():
+    """锁定清单里每个包：没装 → 「名 缺」，装了版本不同 → 「名 现有 x，要 y」→ 不符的列表（空 = 全符）。
+    11-26 换新的 Windows 出包机：自检只核 Python ≥ 3.12，没装 lz4 照样全绿，出包到宽屏扫描才 ModuleNotFoundError；另一台出包机装的 capstone / numpy 也比清单新、玩家包是清单版本"""
+    from importlib import metadata
+    bad = []
+    for line in PINS.read_text(encoding='utf-8').splitlines():
+        line = line.split('#', 1)[0].strip()
+        if '==' not in line:
+            continue
+        name, want = (x.strip() for x in line.split('==', 1))
+        try:
+            have = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            bad.append(f'{name} 缺'); continue
+        if have != want:
+            bad.append(f'{name} 现有 {have}，要 {want}')
+    return bad
+
+
 def env_items(target, shell):
     """环境自检：(项, 好?, 说明, 状态, 官方下载页)。只读不改、不下载；缺件写清去哪拿。
     状态：ok / missing / mismatch（有、但版本或身份不符，给了 found 为真的）；官方下载页（第 5 项）只给玩家要自己装、不能随包带的件（许可不许再分发），现无（Metal 由 winenv 核，下载页在 winenv.OFFICIAL）"""
     out = []
     def add(name, ok, why, found=False, url=None): out.append((name, bool(ok), why, 'ok' if ok else 'mismatch' if found else 'missing', url))
     pre = os.environ.get('S2A_PREBUILT_TOOLS')   # 启动器随发版预编（launchers/windows/bundle_prepare_win.py）：编译器 / 构建工具 / .NET SDK 各项改核对应预编件在不在
-    add('python', sys.version_info >= (3, 12), f'{sys.version.split()[0]}（要 ≥ 3.12）', found=True)
+    bad = python_pins()
+    add('python', sys.version_info >= (3, 12) and not bad,
+        f'{sys.version.split()[0]}（要 ≥ 3.12）' + (f'；第三方包与锁定清单不符：{"、".join(bad)}（按 launchers/macos/requirements-runtime.txt 装同一版本，玩家 Mac / Windows 包都按它带）' if bad else ''), found=True)
     if pre:
         sys.path.insert(0, str(R / 'translator')); import dsh_batch
         try: gd = prebuilt('gamedec/' + ('gamedec.exe' if WIN else 'gamedec'), gamedec_id())

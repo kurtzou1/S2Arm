@@ -2238,6 +2238,25 @@ static int gs_libpack_test(int diagnose_refusals, int numeric) {
         CHECK(gs_loads[NVN_GPU_SH_VS] == 1 && gs_loads[NVN_GPU_SH_FS] == 0 && gs_loads[NVN_GPU_SH_GS] == 0, "libpack VS-only: only the vertex stage loads");
         CHECK(compiler_calls == 0, "libpack VS-only: hit from the library, compiler not called (calls=%d)", compiler_calls);
         CHECK(gs_blob_bytes[NVN_GPU_SH_VS] == sizeof spv0 && gs_blob_bytes[NVN_GPU_SH_FS] == 0, "libpack VS-only: the vertex stage is the library's");
+        // 库件结果备忘（nvk_shader.c lp_memo_*）：程序表清空后同一组阶段键再取（真机上是换了状态的新身份），
+        //   不再读库件、不再合成——库自己的命中计数不动，结果仍是库里那份，编译器仍不调
+        {
+            extern void nvk_shader_test_tally_line(char *out, size_t n);
+            char tl[640]; nvk_shader_test_tally_line(tl, sizeof tl);
+            const char *mh = strstr(tl, "库件备忘 命中 "); unsigned long long memo0 = mh ? strtoull(mh + strlen("库件备忘 命中 "), NULL, 10) : ~0ull;
+            CHECK(mh != NULL, "libpack memo: tally prints the memo counter: %s", tl);
+            const uint64_t lib_hits = s2a_libpack_hits();
+            rp_shader_reset(); compiler_calls = 0; memset(gs_loads, 0, sizeof gs_loads); memset(gs_blob_bytes, 0, sizeof gs_blob_bytes);
+            const struct rp_prog *p2 = NULL;
+            CHECK(rp_shader_resolve(&q, &p2) == 0 && p2, "libpack memo: program resolves again after the program table is cleared");
+            CHECK(s2a_libpack_hits() == lib_hits, "libpack memo: the same stage keys are served from the memo, library not re-read (hits %llu -> %llu)",
+                  (unsigned long long)lib_hits, (unsigned long long)s2a_libpack_hits());
+            CHECK(compiler_calls == 0 && gs_loads[NVN_GPU_SH_VS] == 1 && gs_blob_bytes[NVN_GPU_SH_VS] == sizeof spv0,
+                  "libpack memo: memo result is the library's vertex stage, compiler not called (calls=%d)", compiler_calls);
+            nvk_shader_test_tally_line(tl, sizeof tl);
+            mh = strstr(tl, "库件备忘 命中 ");
+            CHECK(mh && strtoull(mh + strlen("库件备忘 命中 "), NULL, 10) == memo0 + 1, "libpack memo: tally counts exactly one more memo hit: %s", tl);
+        }
         rp_S.bser[1] = fs_serial; rp_S.bser[2] = gs_serial;
     }
     {
@@ -2763,9 +2782,16 @@ static int lp_gate_test(void) {
     // 探测只读：库自己的命中 / 没有 / 坏三个计数只来自真正的取程序（命中 8 = 基准 1 + 没用到的槽非对齐 2 + 用到的槽对齐 1 + 别的阶段 1 + 同阶段别的槽 1
     //   + 两段交叉 1 + 带按地址访问内存的能力但绑定全对齐 1；没有 3 = 库里没有 VS 键的那两份 + 顶点键库里没有但顶点段全对齐的那份；被挡下的一份都没查过库，
     //   库里没有 VS 键又非对齐的那份、带按地址访问内存的能力又非对齐的那份也被挡在查库之前）。
-    CHECK(s2a_libpack_hits() == 8 && s2a_libpack_misses() == 3 && s2a_libpack_rejects() == 0,
-          "gate probe leaves the library counters alone (hits=%llu misses=%llu rejects=%llu)",
-          (unsigned long long)s2a_libpack_hits(), (unsigned long long)s2a_libpack_misses(), (unsigned long long)s2a_libpack_rejects());
+    //   命中 8 里同一组阶段键的重取由库件结果备忘接住（nvk_shader.c lp_memo_*），不再读库：库自己的命中 + 备忘命中 = 8。
+    {
+        extern void nvk_shader_test_tally_line(char *out, size_t n);
+        char tl[640]; nvk_shader_test_tally_line(tl, sizeof tl);
+        const char *mh = strstr(tl, "库件备忘 命中 ");
+        const unsigned long long memo = mh ? strtoull(mh + strlen("库件备忘 命中 "), NULL, 10) : 0;
+        CHECK(mh && s2a_libpack_hits() + memo == 8 && s2a_libpack_misses() == 3 && s2a_libpack_rejects() == 0,
+              "gate probe leaves the library counters alone (hits=%llu + memo=%llu, misses=%llu rejects=%llu)",
+              (unsigned long long)s2a_libpack_hits(), memo, (unsigned long long)s2a_libpack_misses(), (unsigned long long)s2a_libpack_rejects());
+    }
     // 基准状态再来一份新程序（放行、库里有 → 命中）：只有「新程序 放行」加一，现场编不动；同一份已发布的程序再解析一遍，读数不动。
     {
         struct rp_shader_req q = {0}; q.prim = 4; const struct rp_prog *p = NULL;

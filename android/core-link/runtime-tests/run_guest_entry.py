@@ -4,7 +4,8 @@ import argparse,json,pathlib,subprocess
 p=argparse.ArgumentParser();p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--cc',default='cc');a=p.parse_args()
 root=pathlib.Path(__file__).resolve().parents[3];out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
 exe=out/'guest-entry'
-command=[a.cc,'-D__ANDROID__','-std=gnu11','-Wall','-Wextra','-Werror','-I'+str(root/'runtime/include'),'-I'+str(root/'runtime/src'),str(root/'runtime/src/guest_main.c'),str(pathlib.Path(__file__).with_name('guest_entry_test.c')),'-o',str(exe)]
+# -D_GNU_SOURCE：模拟安卓时 native.h 走 bionic 那支，无条件调 pthread_setname_np；宿主 glibc 只在 _GNU_SOURCE 下才声明它（Linux 门禁上缺它 -Werror 红）
+command=[a.cc,'-D__ANDROID__','-D_GNU_SOURCE','-std=gnu11','-Wall','-Wextra','-Werror','-I'+str(root/'runtime/include'),'-I'+str(root/'runtime/src'),str(root/'runtime/src/guest_main.c'),str(pathlib.Path(__file__).with_name('guest_entry_test.c')),'-o',str(exe)]
 subprocess.run(command,check=True)
 results=[]
 for case in ['ready','init-fail','ready-fail']:

@@ -2204,7 +2204,9 @@ static void snap_mac_done(int ok, const char *dir) { (void)dir; dispatch_async(d
     if (s2a_snap_dir_for(NULL, d, sizeof d)) return;
     g_snap_mac = self; s2a_snap_on_done(snap_mac_done);
     int rc = s2a_snap_request_save(d);
-    [self snapNote:rc == 0 ? (s2a_ui_zh() ? @"正在存下这一刻…" : @"Saving this moment…") : rc == -2 ? (s2a_ui_zh() ? @"还在存上一次，稍等" : @"Still saving the last one") : (s2a_ui_zh() ? @"这次没存成，稍后再试一次" : @"Couldn’t save this time")];
+    [self snapNote:rc == 0 ? (s2a_ui_zh() ? @"正在存下这一刻…" : @"Saving this moment…") : rc == -2 ? (s2a_ui_zh() ? @"还在存上一次，稍等" : @"Still saving the last one")
+                 : rc == -3 ? (s2a_ui_zh() ? @"这一局记录太长，暂时不能即时存档（游戏照常玩，已存下的那一刻还能回）" : @"This session’s record got too long, so saving a moment is off for now (the game keeps running; your saved moment is still there)")   // 请求日志超限（snapsw.c s2a_snap_save_gate）
+                 : (s2a_ui_zh() ? @"这次没存成，稍后再试一次" : @"Couldn’t save this time")];
 }
 static void snap_mac_restart(int result, const char *detail, void *ctx) {
     (void)ctx; if (!result) return; NSString *why = detail ? @(detail) : @"";

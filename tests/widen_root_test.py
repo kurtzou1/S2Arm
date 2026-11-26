@@ -274,8 +274,9 @@ class WidenRootTests(unittest.TestCase):
                    S2A_PACK_LOCKS=str(self.base / 'locks'), S2A_WIDEN_DIR=str(self.table.parent),
                    S2A_WIDEN_AUTO_RUN='0', S2A_SIGN='adhoc', S2A_DUAL='0',
                    S2A_DISK_GC='0',
-                   S2A_RUN_ROOT=str(self.base / 'run'), S2A_ALL_CAPS='0',
-                   S2A_DEVELOPER_DIR=os.environ.get('S2A_DEVELOPER_DIR', '/Applications/Xcode.app/Contents/Developer'))
+                   S2A_RUN_ROOT=str(self.base / 'run'), S2A_ALL_CAPS='0')
+        # Xcode 不在这里给缺省：外面设了 S2A_DEVELOPER_DIR 随 os.environ 带进去；没设交给 tools/toolchain.sh 统一解析（装着的最新 Xcode → xcode-select），
+        #   原先写死 /Applications/Xcode.app，只装了带版本号 Xcode 的机器（如 Xcode-27.1.app）入车预检必红「目录不在」
         for name in ['S2A_BUNDLE_ID', 'S2A_DISPLAY_NAME', 'S2A_DISPLAY_SUFFIX', 'S2A_SAVE_IDENTITY', 'IOS_VAMM_LAYOUT', 'CFLAGS']:
             env.pop(name, None)
         if app_only:

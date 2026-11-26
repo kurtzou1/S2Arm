@@ -620,11 +620,13 @@
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Guardar este momento";
 "vpad.snap.offAddress" = "Este dispositivo no tiene suficiente rango de direcciones de memoria para este juego y una instantánea a la vez, así que las instantáneas están desactivadas para este juego aquí. No tiene nada que ver con el almacenamiento; el juego funciona como siempre.";
+"vpad.snap.offLogCap" = "Este juego envía las mismas solicitudes una y otra vez y el registro de la instantánea creció demasiado. Las instantáneas quedan desactivadas el resto de esta sesión; el juego sigue normalmente.";
 "vpad.snap.offAddressNums" = " (el juego necesita %@ GB, la instantánea %@ GB, este dispositivo puede dar %@ GB)";
 "vpad.snap.restore" = "Volver al momento guardado";
 "vpad.snap.saving" = "Guardando este momento…";
 "vpad.snap.saved" = "Momento guardado";
 "vpad.snap.notSaved" = "No se pudo guardar esta vez. Inténtalo de nuevo en un momento";
+"vpad.snap.notSavedLogCap" = "El registro de esta sesión es demasiado largo: por ahora no se puede guardar un momento (el juego sigue; el momento ya guardado sigue disponible)";
 "vpad.snap.busy" = "Aún se está guardando el anterior";
 "vpad.snap.restoreFailed" = "No se pudo volver: %@";
 "vpad.snap.useLibrary.title" = "No se puede volver desde el juego";

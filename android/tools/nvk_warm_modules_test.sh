@@ -15,6 +15,11 @@ cc="${CC:-cc}"
   -I "$repo/graphics/nvn/replay" -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" -I "$repo/graphics/nvn/gfx/tex" \
   -o "$tmp/t_prog" "$android/tests/nvn_vk_prog_warm_test.c" "$android/native/nvn/nvn_vk_prog_warm.c" "$android/native/direct/sha256.c"
 "$tmp/t_prog"
+# 程序清单的身份索引（find_locked / ix_*，11-26）：与参照模型逐步对拍 2 万次 note、600 万次 contains
+"$cc" -std=gnu11 -O1 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE \
+  -I "$android/native" -I "$android/native/nvn" -I "$android/native/direct" -I "$repo/graphics/nvn/replay" \
+  -o "$tmp/t_prog_ix" "$android/tests/nvn_prog_warm_index_test.c" "$android/native/nvn/nvn_vk_prog_warm.c" "$android/native/direct/sha256.c"
+"$tmp/t_prog_ix"
 # 负对照（程序清单按闭包分文件、先比闭包，offline-shader-miss 修法）：各撤一处，t_prog 必须红在对应断言（编译失败不算红）
 python3 - "$android/native/nvn/nvn_vk_prog_warm.c" "$tmp" <<'PY'
 import pathlib, subprocess, sys
@@ -291,7 +296,7 @@ print('PASS: nowindow installer leaves accepted; external, cyclic, absolute, buc
 
 prog_cache, pipe_warm = repo/'android/native/direct/program_cache.c', repo/'android/native/nvn/nvn_vk_pipe_warm.c'
 cases = [   # (名字, 被改文件, 改动, 必须出现在红因里的片段)
-    ('program-plain-open', prog_cache, [('int fd = installed ? s2a_installed_seed_open(path) : open(path, O_RDONLY | O_CLOEXEC);', 'int fd = installed ? open(path, O_RDONLY | O_CLOEXEC) : open(path, O_RDONLY | O_CLOEXEC);')],
+    ('program-plain-open', prog_cache, [('int fd = installed ? s2a_installed_seed_open(path) : idx_open(dir, identity, path);', 'int fd = installed ? open(path, O_RDONLY | O_CLOEXEC) : idx_open(dir, identity, path);')],
      'program result: expected rejected'),     # 程序结果改回普通 open：库外 / 绝对链接照收
     ('pipe-plain-read', pipe_warm, [('int rc = pw_read_file(seed_path, 1, &buf, &bytes, &se);', 'int rc = pw_read_file(seed_path, 0, &buf, &bytes, &se);')],
      'installer leaves'),                       # 管线读退回普通 open：碰到安装器相对链接的 ELOOP，补件整份读不到

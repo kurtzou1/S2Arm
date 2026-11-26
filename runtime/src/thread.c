@@ -295,16 +295,31 @@ __attribute__((weak)) int s2a_snap_logging(void) { return 0; }
 void s2a_snap_hctx(int seq) { t_snap_ctx = seq; thr_t *t = thread_current_or_null(); if (t) t->cs_seq = seq; }   // C# 请求开始时设本线程的请求序号（结束设 -2）
 // 请求日志收住用的四个导出：安卓快照恒关不调，安卓那份由 snapsw.c 给空实现（两边都定义会重复）
 #if defined(__APPLE__)
+// 恢复局接着记：快照里的句柄日志整份当开头，只接一次（读进快照日志后第一次用到时接）。
+//   服务层重建请求表（SnapLog.cs RebuildTable，在重放收尾里、早于 snapshot.c snap_live_after_restore）就要问「第 N 条建的句柄还活着吗」、
+//   删掉的请求要连它的句柄日志一起删：原先这时还没接，问的是空日志，一律答「没活着的」——已关会话上建过活句柄的请求被收掉
+//   （一款生活模拟游戏：关掉的字体服务会话上取字体共享内存那条），删的也没删在要接的日志里；再存一次再恢复，那个句柄格就空着（玩家诊断六份）。
+//   恢复期间不记日志（s2a_snap_live_set(saving && !restoring)），早接、晚接接到的是同一份
+static snap_hlog_t *g_rhlog; static int g_nrhlog;   // 快照里读进来的句柄日志（s2a_snap_hlog_load）
+static int g_hlog_taken = 1;   // 0 = 读进了快照日志、还没接
+static void hlog_take_restored(void) {   // 持 G
+    if (g_hlog_taken) return;
+    g_hlog_taken = 1;
+    if (g_nrhlog > g_caphlog) { g_caphlog = g_nrhlog + 4096; g_hlog = realloc(g_hlog, sizeof *g_hlog * (size_t)g_caphlog); }
+    if (g_nrhlog) memcpy(g_hlog, g_rhlog, sizeof *g_hlog * (size_t)g_nrhlog);
+    g_nhlog = g_nrhlog; int last = -1; for (int i = 0; i < g_nrhlog; i++) { if (g_rhlog[i].ctx > last) last = g_rhlog[i].ctx; if (g_rhlog[i].uid > g_huid) g_huid = g_rhlog[i].uid; }
+    if (last >= 0) atomic_store(&g_snap_lastseq, last);
+}
 // 请求日志要删第 seq 条之前问：它建的句柄还有活着的吗（活着的要靠重放这条建，不能删）
 int s2a_snap_seq_live(int seq) {
-    glock(); int live = 0;
+    glock(); hlog_take_restored(); int live = 0;
     for (int i = 0; i < g_nhlog && !live; i++) if (g_hlog[i].op == 0 && g_hlog[i].cs && g_hlog[i].ctx == seq) {
         live = 1; for (int j = i + 1; j < g_nhlog; j++) if (g_hlog[j].op == 1 && g_hlog[j].h == g_hlog[i].h) { live = 0; break; } }
     pthread_mutex_unlock(&G); return live;
 }
 // 请求日志删掉了第 seq 条：它建的句柄（都已关）建 / 关两条一起删
 void s2a_snap_hlog_forget(int seq) {
-    glock();
+    glock(); hlog_take_restored();
     for (int i = 0; i < g_nhlog; ) {
         if (g_hlog[i].op == 0 && g_hlog[i].cs && g_hlog[i].ctx == seq && !g_hlog[i].pin) {
             uint32_t h = g_hlog[i].h; hlog_del(i);
@@ -316,14 +331,14 @@ void s2a_snap_hlog_forget(int seq) {
 // 一条要留在请求日志里的请求在消息里递了句柄 h（复制 / 移交）：钉住建 h 的那条（之后 h 关了也不成对删，重放这条时要靠它把 h 建出来）。
 //   回建 h 的请求序号（是游戏系统调用 / 服务层请求外建的回 -1），*uid = 那条的编号（解钉用）；日志里没有建 h 的那条回 -1、*uid = 0
 int s2a_snap_handle_use(uint32_t h, uint32_t *uid) {
-    glock(); int c = hlog_last_create(h), seq = -1; *uid = 0;
+    glock(); hlog_take_restored(); int c = hlog_last_create(h), seq = -1; *uid = 0;
     if (c >= 0) { if (g_hlog[c].pin < UINT16_MAX) g_hlog[c].pin++; *uid = g_hlog[c].uid; if (g_hlog[c].cs && g_hlog[c].ctx >= 0) seq = g_hlog[c].ctx; }
     pthread_mutex_unlock(&G); return seq;
 }
 // 递 h 的那条请求从日志删了（或当时失败）：解钉；钉数归零、h 已关、又不靠请求重放建的，建 / 关两条成对删（同 hlog_add）
 void s2a_snap_handle_unuse(uint32_t uid) {
     if (!uid) return;
-    glock();
+    glock(); hlog_take_restored();
     for (int i = 0; i < g_nhlog; i++) if (g_hlog[i].op == 0 && g_hlog[i].uid == uid) {
         if (g_hlog[i].pin) g_hlog[i].pin--;
         if (!g_hlog[i].pin && (!g_hlog[i].cs || g_hlog[i].ctx < 0))
@@ -2587,7 +2602,6 @@ int s2a_snap_kernel_save(FILE *f) {
 }
 // ---------- 即时存档恢复（阶段 2）：句柄表 / 事件 / 传输内存 / 游戏自建共享内存 / 线程 ----------
 static int sr(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n ? 0 : -1; }
-static snap_hlog_t *g_rhlog; static int g_nrhlog;
 static int snap_last_create_cs(uint32_t h);
 static struct { uint32_t idx, kind; uint16_t gen; int signaled; uint64_t aobj; } *g_skip;
 static struct { uint32_t idx, kind; uint16_t gen; void *obj; uint64_t cookie; int placed; } *g_defer; static int g_ndefer, g_capdefer;
@@ -2736,19 +2750,12 @@ static int snap_last_create_cs(uint32_t h) { for (int i = g_nrhlog - 1; i >= 0; 
 // 即时存档：进程内重建开新一局时（开着快照才调），句柄代数与句柄日志归全新进程的初值——新一局的日志从开局记起、重放出的句柄值与冷启动相同
 //   （进程内「回到快照」：上一局用到第 300 代，重放建的句柄成了第 301 代起，与快照里的第 2 代起对不上 → 恢复失败）
 void s2a_snap_kernel_fresh(void) { glock(); g_gen = 0; g_gen_async = 0; g_nhlog = 0; atomic_store(&g_snap_lastseq, -1); pthread_mutex_unlock(&G); }
-// 恢复局接着记：快照里的句柄日志整份当开头（恢复完成、游戏线程放开之前调，见 snapshot.c snap_live_after_restore）
-void s2a_snap_hlog_continue(void) {
-    glock();
-    if (g_nrhlog > g_caphlog) { g_caphlog = g_nrhlog + 4096; g_hlog = realloc(g_hlog, sizeof *g_hlog * (size_t)g_caphlog); }
-    if (g_nrhlog) memcpy(g_hlog, g_rhlog, sizeof *g_hlog * (size_t)g_nrhlog);
-    g_nhlog = g_nrhlog; int last = -1; for (int i = 0; i < g_nrhlog; i++) { if (g_rhlog[i].ctx > last) last = g_rhlog[i].ctx; if (g_rhlog[i].uid > g_huid) g_huid = g_rhlog[i].uid; }
-    if (last >= 0) atomic_store(&g_snap_lastseq, last);
-    pthread_mutex_unlock(&G);
-}
+void s2a_snap_hlog_continue(void) { glock(); hlog_take_restored(); pthread_mutex_unlock(&G); }
 int s2a_snap_hlog_load(FILE *f) {
     if (fread(&g_nrhlog, sizeof g_nrhlog, 1, f) != 1 || g_nrhlog < 0) return -1;
     g_rhlog = malloc(sizeof *g_rhlog * (size_t)(g_nrhlog ? g_nrhlog : 1));
     if (g_nrhlog && fread(g_rhlog, sizeof *g_rhlog, (size_t)g_nrhlog, f) != (size_t)g_nrhlog) return -1;
+    glock(); g_hlog_taken = 0; pthread_mutex_unlock(&G);
     g_rforce = malloc(sizeof *g_rforce * (size_t)(g_nrhlog ? g_nrhlog : 1));
     int ncs_req = 0, ncs_out = 0, nguest = 0, ncl = 0;
     for (int i = 0; i < g_nrhlog; i++) { snap_hlog_t *x = &g_rhlog[i]; if (x->op) ncl++; else if (!x->cs) nguest++; else if (x->ctx >= 0) ncs_req++; else ncs_out++; }

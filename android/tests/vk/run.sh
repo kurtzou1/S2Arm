@@ -220,6 +220,9 @@ fi
 if standalone_mode; then
     exec bash "$repo/android/tests/vk/standalone/${mode#--}.sh"
 fi
+if [ "$mode" = --copy-t2b-core ]; then
+    exec bash "$repo/android/tests/vk/run_replay_copy_t2b.sh"
+fi
 if [ -z "$mode" ]; then
     for f in "$repo"/android/tests/vk/standalone/*.sh; do bash "$f"; done
 fi

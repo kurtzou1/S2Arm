@@ -116,6 +116,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSError *e = nil; id<MTLLibrary> L = a ? [dev newLibraryWithData:a error:&e] : nil, M = b ? [dev newLibraryWithData:b error:&e] : nil;
     CHECK(L && [L newFunctionWithName:@"fa"], "切片建库取到入口 fa");
     CHECK(M && [M newFunctionWithName:@"fb"], "分片 1 切片建库取到入口 fb");
+    // 还没有 Metal 设备时取库（快照恢复局在 mtl_init 之前建着色器）：回空且给出错误，不能空着错误回空（调用方只能报成「no reflection json」）
+    { NSError *ne = nil; int ly = 0; id<MTLLibrary> NL = lp_library(&p, nil, "00000000000000aa_b", 0, &ly, &ne);
+      CHECK(!NL && ne && ne.code == ENODEV && strstr(ne.localizedDescription.UTF8String, "no Metal device"), "没有设备时取库：回空、错误码 ENODEV（得到 %ld：%s）", (long)ne.code, ne ? ne.localizedDescription.UTF8String : "无错误"); }
+    { NSError *ye = nil; int ly = 0; id<MTLLibrary> YL = lp_library(&p, dev, "00000000000000aa_b", 0, &ly, &ye);
+      CHECK(YL && [YL newFunctionWithName:@"fa"] && !ye, "有设备时 lp_library 照常建库取到入口 fa"); }
     // 10-26 巫师3：分片整片映射且常驻，21 片 1343 MB 吃光低区。11-01 起一段 = 只映射这一段（无主之地3：malloc 读出的段被库持有、全算常驻 1.4 GB）。
     //   两个分片都取过、库也建着：.pak 映射总字节 ≤ 取到的 4 段各自按页取整之和（整片映射会超）
     char real[PATH_MAX]; int okp = realpath(dir, real) != NULL; uint64_t pg = (uint64_t)getpagesize(), lim = 0;

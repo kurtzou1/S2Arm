@@ -182,6 +182,33 @@ class Secrets:
     def delete(self, a): self.d.pop(a, None)
 
 
+@unittest.skipIf(os.name == "nt", "Windows 走 DPAPI，不经 security")
+class KeychainLoad(unittest.TestCase):
+    """读密码按 security 退出码分开：44 = 没有这一项（要重新导入）；36 = 这个会话读不了（ssh 下钥匙串锁着，重新导入没用）；其他非 0 照实报"""
+    def load(self, rc, out=""):
+        with patch.object(devcert.subprocess, "run", return_value=types.SimpleNamespace(returncode=rc, stdout=out, stderr="boom")):
+            return devcert.Secrets(Path(tempfile.gettempdir())).load(SHA1)
+
+    def test_found(self):
+        self.assertEqual(self.load(0, "cHfDpA==\n"), "pwä")   # base64("pwä")，手算
+
+    def test_not_found(self):
+        self.assertIsNone(self.load(44))
+
+    def test_locked(self):
+        with self.assertRaises(Failure) as e:
+            self.load(36)
+        self.assertEqual(e.exception.code, "devcert_keychain")
+        self.assertIn("图形会话", str(e.exception))
+        self.assertNotIn("重新导入", str(e.exception))
+
+    def test_other(self):
+        with self.assertRaises(Failure) as e:
+            self.load(51)
+        self.assertEqual(e.exception.code, "devcert_keychain")
+        self.assertIn("退出 51", str(e.exception))
+
+
 class Operation(unittest.TestCase):
     def setUp(self):
         self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t, True)

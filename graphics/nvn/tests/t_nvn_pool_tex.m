@@ -462,6 +462,36 @@ int main(void) { @autoreleasepool {
         VERIFY(gpu_seen > 0 && nw > 0 && (int)du_dg == pkg_seen && (int)du_sg == total_seen,
                "⑰ pool_seen_scan 紧凑重查：active_words=%u，dg-only 重查 %llu（期望仅 view_pkg=%d，跳过 gpu_only=%d），sg 重查 %llu（期望全量=%d）",
                nw, (unsigned long long)du_dg, pkg_seen, gpu_seen, (unsigned long long)du_sg, total_seen);
+        // ⑱ pool_room：按 GPU 真占（不含零拷贝包的游戏内存）对工作集一半、内存余量、单帧 32 MB 放行；新登记贴图首查即入池表不落哑图
+        //   期望手算：工作集 28 GB → 上限 14 GB；真占 5 GB 余 9 GB，单帧未花 → 32 MB，已花 28 MB → 4 MB，花满 → 0；真占 15 GB → 0；
+        //   余量门槛 = max(余量下限 1 GB, 2 × 回收门槛 1.5 GB) = 3 GB（回收关着 = 1 GB）；余量 2.5 GB（够旧门槛、在回收区间里）→ 0，= 3 GB → 0，3 GB + 256 MB → 32 MB
+        {
+            const uint64_t ws = 28ull << 30, gpu_ok = 5ull << 30, gpu_hi = 15ull << 30, margin = 1ull << 30, rlo = 1536ull << 20;
+            const uint64_t floor = pool_avail_floor(margin, rlo), floor_off = pool_avail_floor(margin, 0);
+            uint64_t r_live   = pool_room_calc(gpu_ok, ws, 0, 0, 0, margin);
+            uint64_t r_spent  = pool_room_calc(gpu_ok, ws, POOL_FRAME_BYTES - (4u << 20), 0, 0, margin);
+            uint64_t r_full   = pool_room_calc(gpu_ok, ws, POOL_FRAME_BYTES, 0, 0, margin);
+            uint64_t r_gpu_hi = pool_room_calc(gpu_hi, ws, 0, 0, 0, margin);
+            uint64_t r_ios_mid = pool_room_calc(gpu_ok, ws, 0, 1, 2560ull << 20, floor);
+            uint64_t r_ios_lo = pool_room_calc(gpu_ok, ws, 0, 1, 3ull << 30, floor);
+            uint64_t r_ios_ok = pool_room_calc(gpu_ok, ws, 0, 1, (3ull << 30) + (256u << 20), floor);
+            // 设备总量里压进超过工作集二十分之一的零拷贝包（同游戏内存：未碰的匿名映射，不占实存），真占不变：新贴图照样首查即建（原先按设备总量判，这里落哑图）
+            size_t pg = (size_t)getpagesize(), big = ((size_t)(g_dev.recommendedMaxWorkingSetSize / 20) + (64u << 20) + pg - 1) & ~(pg - 1);
+            void *gm = mmap(NULL, big, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); REQUIRE(gm != MAP_FAILED);
+            id<MTLBuffer> wrap = nocopy_buf(gm, big, nil); REQUIRE(wrap);
+            VERIFY((uint64_t)g_dev.currentAllocatedSize >= g_dev.recommendedMaxWorkingSetSize / 20 && s2a_gpu_alloc_bytes() < g_dev.recommendedMaxWorkingSetSize / 2,
+                   "⑱ 前提：设备总量 %llu MB ≥ 工作集二十分之一 %llu MB，真占 %llu MB", (unsigned long long)(g_dev.currentAllocatedSize >> 20),
+                   (unsigned long long)(g_dev.recommendedMaxWorkingSetSize / 20 >> 20), (unsigned long long)(s2a_gpu_alloc_bytes() >> 20));
+            texture(164, 4, 4, 0);
+            uint64_t e164 = table_entry(164, 0, NULL);
+            wrap = nil;   // 映射不拆：缓冲由自动释放池收，拆早了 Metal 还引用着
+            VERIFY(r_live == POOL_FRAME_BYTES && r_spent == (4u << 20) && r_full == 0 &&
+                   r_gpu_hi == 0 && floor == (3ull << 30) && floor_off == margin && r_ios_mid == 0 && r_ios_lo == 0 && r_ios_ok == POOL_FRAME_BYTES && e164 != dum,
+                   "⑱ pool_room：live=%lluMB spent=%lluMB full=%llu gpu_hi=%llu floor=%lluMB floor_off=%lluMB ios_mid=%llu ios_lo=%llu ios_ok=%lluMB e164=%#llx(dum=%#llx)",
+                   (unsigned long long)(r_live >> 20), (unsigned long long)(r_spent >> 20), (unsigned long long)r_full,
+                   (unsigned long long)r_gpu_hi, (unsigned long long)(floor >> 20), (unsigned long long)(floor_off >> 20), (unsigned long long)r_ios_mid, (unsigned long long)r_ios_lo,
+                   (unsigned long long)(r_ios_ok >> 20), (unsigned long long)e164, (unsigned long long)dum);
+        }
     }
     printf("%s t_nvn_pool_tex：%u 项，%u 项失败（追不到槽的句柄按编号读池：池表 + 已读位图 + 未写渲染目标不建 + 小贴图预建 + 表复用）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;

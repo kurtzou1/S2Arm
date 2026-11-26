@@ -4062,8 +4062,35 @@ static int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uint || pf
 static void srgb_twin_mark(id<MTLTexture> v) { if (v) objc_setAssociatedObject(v, &g_twin_view_key, (__bridge id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN); }
 static int srgb_twin_view(id o) { return o && objc_getAssociatedObject(o, &g_twin_view_key) != nil; }
 static int stex_backed(id<MTLTexture> t);   // 放置式 / 稀疏贴图（nvn_stex.inc 胶水）
+// 同一贴图反复升级诊断（D-67FG / D-6A9G / D-XJNP：同一 serial 一局升「可写」3–5 万次，每次新建 + 整张拷贝）：按 serial 记上次升级出的那张，
+//   再升时判是哪条路把它丢了——序号表里还是它、调用方却拿着旧的（另一层缓存没跟上）；序号表里换成了别的贴图（重建 / 重传）；预排布贴图（NvPkg）重传换了一张。
+//   第 3 次起每个 serial 记一行红（全程至多 16 个 serial），之后不再记；表 64 格按 serial 取模覆盖，只存指针值作比较，不持有对象
+static struct { uint64_t ser, n; uintptr_t up; } g_tupd[64]; static pthread_mutex_t g_tupd_mu = PTHREAD_MUTEX_INITIALIZER; static int g_tupd_red;
+// 序号表里这个 serial 底下那张贴图（NvPkg 取它的 tex；视图取到底图，sRGB / 线性双生视图本身就是持有者）
+static uintptr_t upd_under(id h, int *pkg) {
+    *pkg = [h isKindOfClass:[NvPkg class]]; id<MTLTexture> x = *pkg ? ((NvPkg *)h)->tex : (id<MTLTexture>)h;
+    while (!*pkg && x.parentTexture && !srgb_twin_view(x)) x = x.parentTexture;
+    return (uintptr_t)(__bridge void *)x;
+}
+// pre：升级前序号表里底下那张；post：升级后序号表里底下那张
+static void tex_upgrade_diag(const tex_t *t, id holder, uintptr_t pre, int pkg, id<MTLTexture> asked, MTLTextureUsage add, uintptr_t post) {
+    pthread_mutex_lock(&g_tupd_mu);
+    unsigned i = (unsigned)(t->serial % 64); uintptr_t last = g_tupd[i].ser == t->serial ? g_tupd[i].up : 0;
+    if (g_tupd[i].ser != t->serial) { g_tupd[i].ser = t->serial; g_tupd[i].n = 0; }
+    uint64_t n = ++g_tupd[i].n; g_tupd[i].up = post;
+    int say = n == 3 && last && g_tupd_red < 16; if (say) g_tupd_red++;
+    pthread_mutex_unlock(&g_tupd_mu);
+    if (!say) return;
+    const char *why = !holder ? "序号表里已没有这个 serial（被删 / 淘汰后重建）"
+                    : pre == last ? "序号表里还是上次升级出的那张，调用方却拿着旧的（另一层缓存没跟上）"
+                    : pkg ? "预排布贴图（NvPkg）重传换了一张，没带上升级过的用途"
+                    : "序号表里换成了别的贴图（重建 / 别名表换了）";
+    MLOG("【红】同一贴图第 %llu 次升级 ser=%llu：%s；持有者 %s，调用方给的用途 %#lx、要加 %#lx，格式 %lu %ux%u 标志 %#x（D-67FG 一类）",
+         (unsigned long long)n, (unsigned long long)t->serial, why, pkg ? "NvPkg" : holder ? (((id<MTLTexture>)holder).parentTexture ? "视图" : "贴图") : "无",
+         (unsigned long)asked.usage, (unsigned long)add, (unsigned long)asked.pixelFormat, t->d.width, t->d.height, t->d.flags);
+}
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
-    id holder = tex_get(t->serial);
+    id holder = tex_get(t->serial); int upd_pkg; uintptr_t upd_pre = upd_under(holder, &upd_pkg);   // 反复升级诊断（tex_upgrade_diag）
     // The serial holds an sRGB / linear view of the asked texture, or the asked texture is that view (upstream reference implementation, MIT, 92f223a7): the parent is upgraded and the
     //   view made again on it, so the pair keeps sharing its bytes
     id<MTLTexture> view = srgb_twin_view(holder) && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
@@ -4129,6 +4156,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         defer_obj_release(base);
     }
     MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", root ? "image atomics (R32 storage, an RGBA8 view of the same bytes in its place)" : add & MTLTextureUsageRenderTarget ? "render-target use" : add & MTLTextureUsageShaderWrite ? "shader writes" : "format views", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
+    { int pk2; uintptr_t post = upd_under(tex_get(t->serial), &pk2); tex_upgrade_diag(t, holder, upd_pre, upd_pkg, asked, add, post); }
     return upgraded_view ? upgraded_view : upgraded;
 }
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) { return tex_upgrade(t, base, MTLTextureUsagePixelFormatView, view_pf); }
@@ -6490,11 +6518,20 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
                                                                                          usage:MTLTextureUsageShaderRead | (can_write ? MTLTextureUsageShaderWrite : 0)];
         size_t row = ((size_t)t->d.width * bpb + al - 1) / al * al;
+        // R32 整数的可写缓冲贴图建时就带原子与格式视图用途（同上：缓冲贴图没有无损压缩可丢，加用途不花成本）。原先只给读写，原生 texture_buffer 原子
+        //   （img_atomic_prepare）用到时 tex_upgrade 补；缓冲贴图会随序号淘汰 / 对象收尾后再解析重建，重建的又不带，于是每次重建都升级一次，每次升级
+        //   g_ser_gen++ 让所有贴图编号缓存重解析（11-26 Mac 霍格沃茨之遗 ser 5947 R32Uint 245760 元素 300 秒升 61 次；D-67FG / D-XJNP iPhone / Mac 一局 3–5 万次，
+        //   与卡顿、坏指针崩溃同现）。建不出就逐级退：去格式视图 → 去原子 → 只读
+        int r32i = pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint;
+        if (can_write && r32i) d.usage |= MTLTextureUsageShaderAtomic | MTLTextureUsagePixelFormatView;
         id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
+        if (!mt && (d.usage & MTLTextureUsagePixelFormatView)) { d.usage &= ~MTLTextureUsagePixelFormatView; mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row]; }
+        if (!mt && (d.usage & MTLTextureUsageShaderAtomic)) { d.usage &= ~MTLTextureUsageShaderAtomic; mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row]; }
         if (!mt && can_write) {
             d.usage = MTLTextureUsageShaderRead;
             mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
         }
+        if (mt && (d.usage & MTLTextureUsageShaderAtomic)) tex_note_atomic(mt);   // 用途读回可能不带原子位（tex_atomic_usage 认登记）
         if (!mt) { RED_ONCE(39, "cannot create buffer texture ser=%llu: %u elements format %#x", (unsigned long long)t->serial, t->d.width, t->d.format); return nil; }
         pool_tview_note(b);   // pool_age leaves this pool resident
         res_add(mt);
@@ -8717,7 +8754,10 @@ static NvShader *shader_build(NSString *pc, int stage, int layer, int depth_zero
             fb_compile_note(stl_now() - t0, pc); mnote = msl_note(pc, src); msrc = sp; }
         if (lib) MLOG("shader %s loaded from the fallback translation (%s)", pc.UTF8String, fb);
     }
-    if (!lib || !j) { MLOG("【红】 failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
+    if (!lib || !j) {   // the reason, never a bare miss: an empty library with no error used to read as "no reflection json" while the json was there (restore before mtl_init)
+        MLOG("【红】 failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : !jd ? "no reflection json (not in the library container)" : !j ? "reflection json unreadable"
+             : !g_dev ? "no Metal device yet" : "its library was not built (no error given)");
+        return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("【红】 shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("【红】 vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
     NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1; o->pkg_lib = dir == g_msl_dir;
@@ -9902,6 +9942,14 @@ static uint64_t g_tex_mis_n, g_tex_mis_shown;
 static int tex_mis_placeholder(uint64_t serial, unsigned long w, unsigned long h, unsigned long d, unsigned long layers, unsigned long levels) {
     return serial && serial < 64 && w <= 4 && h <= 4 && d <= 1 && layers <= 1 && levels <= 1;
 }
+// A 3D texture in a slot the shader declares 2D / 2D array: the game left another draw's 3D texture bound (one title's layout UI shader, 2cb15d249f23ab19, keeps an 8x8x8 R11G11B10F
+//   3D texture, a colour-grading lookup table, in its third texture slot; the dialog window it draws is intact on screen). Metal has no 2D view of a 3D texture, so the slot reads 0;
+//   Ryujinx binds nothing there either (Texture.GetTargetTexture: IsSameDimensionsTarget is false for 3D against 2D) and reads 0 too. A plain line naming that, not a red one, so red
+//   stays for what needs looking at. Narrow on purpose: the other way round, a 2D texture read as 3D, the hardware samples the texture's own texels (#674, the tex3d bridge copies
+//   them), so a 2D-in-3D slot left without the bridge stays red, as do buffer textures, 1D and multisample mismatches. Pure, t_nvn_tex_mis_placeholder tests it
+static int tex_mis_3d_in_2d(unsigned long want, unsigned long have) {
+    return have == MTLTextureType3D && (want == MTLTextureType2D || want == MTLTextureType2DArray);
+}
 uint64_t mtl_tex_mis_count(void) { return g_tex_mis_n; }
 static void tex_mis_note(NvShader *sh, int stage, int slot, int tid, id<MTLTexture> t, MTLTextureType want, const char *outcome) {
     g_tex_mis_n++;
@@ -9913,11 +9961,12 @@ static void tex_mis_note(NvShader *sh, int stage, int slot, int tid, id<MTLTextu
     if (t.textureType == MTLTextureTypeTextureBuffer) snprintf(bt, sizeof bt, ", %lu elements at pool offset %lu, %lu past the linear-texture alignment", (unsigned long)t.width, (unsigned long)t.bufferOffset,
                                                                 (unsigned long)(t.bufferOffset % [g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]));
     int ph = tt && tex_mis_placeholder(tt->serial, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.arrayLength, (unsigned long)t.mipmapLevelCount);
+    int d3 = tt && !ph && tex_mis_3d_in_2d((unsigned long)want, (unsigned long)t.textureType);
     // 尺寸与创建序号一并打出（11-19 定性：红行里约 56% 是开局占位小贴图；有一款游戏的 ID 263 不算占位、原因读不出——序号 ≥ 64 还是比 4x4 大，下一批诊断看这里）
     MLOG("%stexture type mismatch: shader %s (stage %d) declares slot %d as Metal type %lu, texture ID %d is type %lu (NVN target %d, format %#x, Metal format %lu, serial %llu, %lux%lux%lu, layers %lu, levels %lu%s); %s%s",
-         ph ? "" : "【红】 ", sh->key, stage, slot, (unsigned long)want, tid, (unsigned long)t.textureType, tt ? (int)tt->d.target : -1, tt ? (unsigned)tt->d.format : 0u, (unsigned long)t.pixelFormat,
+         ph || d3 ? "" : "【红】 ", sh->key, stage, slot, (unsigned long)want, tid, (unsigned long)t.textureType, tt ? (int)tt->d.target : -1, tt ? (unsigned)tt->d.format : 0u, (unsigned long)t.pixelFormat,
          tt ? (unsigned long long)tt->serial : 0ull, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.arrayLength, (unsigned long)t.mipmapLevelCount, bt, outcome,
-         ph ? " (the game's start-up placeholder texture)" : "");
+         ph ? " (the game's start-up placeholder texture)" : d3 ? " (游戏绑了不同维度的贴图：3D 贴图在声明 2D 的槽，Ryujinx 同样不绑、读 0；真机可能取第 0 层)" : "");
 }
 // Alpha from red: the fragment shaders the game profile's alpha_from_red lists read a single-channel render target whose channel mapping is exactly (R, 0, 0, 1) as (R, 0, 0, R).
 // A workaround for NintendoWare layout captures (BotW, Odyssey): the game rebuilds each capture on the same storage with its own mapping ((1, 1, 1, R) for an A8 capture), which was lost while
@@ -12806,23 +12855,35 @@ static int tex_storage_live(const treg_t *r) {
 // A handle read from game memory may name any registered texture, and on the console that costs nothing: the data is in the pool and a handle is a number. Here each is a Metal texture beside
 // the pool's copy, and making them all took Ocarina of Time past Metal's working set on a 16 GB Mac (upstream: 12.1 GB, once a kernel panic at 14.7 GB wired). Shaders read few of them:
 // a shader's read sets the ID's bit (pool_seen) and those are made whatever the budget, up to POOL_REQ_BYTES a frame (a budget without this left out exactly the large textures those
-// shaders read: scenery in shadow near black, upstream). The smallest textures are made up front, POOL_FRAME_BYTES a frame up to a twentieth of the working set, as a pass that
-// runs once (a bake) has no second frame to find its texture in. A read of the rest finds the dummy until the next submission folds its bit
+// shaders read: scenery in shadow near black, upstream). The smallest textures are made up front, POOL_FRAME_BYTES a frame while what the GPU really holds stays under half the working
+// set (and, where known, memory headroom above mem_margin), as a pass that runs once (a bake) has no second frame to find its texture in, and a texture registered while the game streams
+// is read the frame it arrives. A read of the rest finds the dummy until the next submission folds its bit.
+// The limit used to be device-allocated bytes under a twentieth of the working set, but currentAllocatedSize counts every zero-copy wrap of game memory (several times over, see
+// nocopy_buf): in play it was over that twentieth always (player diagnostics: 0.7–6.8 GB against a few hundred MB), nothing was made up front, and each newly streamed texture
+// showed the dummy for a frame before the seen scan made it
 enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20 };
 static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_req;
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
-static uint64_t pool_budget(void) { return g_dev.recommendedMaxWorkingSetSize / 20; }
 uint64_t s2a_gpu_alloc_bytes(void) {   // 浮层「GPU 已分配」（runtime/src/hud.c 弱定义）：设备总量减去零拷贝缓冲（游戏内存，已在进程实占里；nocopy_buf）
     if (!g_dev) return 0;
     uint64_t a = (uint64_t)g_dev.currentAllocatedSize, z = atomic_load(&g_nocopy_bytes);
     return a > z ? a - z : 0;
 }
 static void pool_walk_frame(void) { uint64_t f = atomic_load(&g_cur_frame); if (f != g_walk_frame) { g_walk_frame = f; g_walk_spent = 0; g_walk_req = 0; } }
-static uint64_t pool_room(void) {   // what may still be made up front this frame
+// What may still be made up front this frame: gpu = GPU allocation without the zero-copy wraps (s2a_gpu_alloc_bytes), ws = recommendedMaxWorkingSetSize, spent = made this frame
+// floor: the headroom made-up-front textures must leave. Not below what idle-texture reclaim brings headroom back to (2 × tex_reclaim_low, see tex_idle_reclaim):
+//   those textures sit in pool tables, which reclaim skips (tex_pinned), so making them between reclaim's threshold and its target pinned memory it could then not take back
+static uint64_t pool_avail_floor(uint64_t margin, uint64_t reclaim_low) { return 2 * reclaim_low > margin ? 2 * reclaim_low : margin; }
+static uint64_t pool_room_calc(uint64_t gpu, uint64_t ws, uint64_t spent, int has_avail, uint64_t avail, uint64_t floor) {
+    if (has_avail && avail <= floor) return 0;
+    uint64_t cap = ws / 2; if (gpu >= cap) return 0;
+    uint64_t head = cap - gpu, left = spent < POOL_FRAME_BYTES ? POOL_FRAME_BYTES - spent : 0;
+    return head < left ? head : left;
+}
+static uint64_t pool_room(void) {
     pool_walk_frame();
-    uint64_t want = pool_budget(), have = g_dev.currentAllocatedSize, room = have < want ? want - have : 0;
-    uint64_t left = g_walk_spent < POOL_FRAME_BYTES ? POOL_FRAME_BYTES - g_walk_spent : 0;
-    return room < left ? room : left;
+    uint64_t avail = 0; int has = mem_avail(&avail);
+    return pool_room_calc(s2a_gpu_alloc_bytes(), (uint64_t)g_dev.recommendedMaxWorkingSetSize, g_walk_spent, has, avail, pool_avail_floor(mem_margin(), tex_reclaim_low()));
 }
 // A render target no pass has written holds nothing to read, and a pass makes its texture when it renders. Made for a read, one that only registers next frame's target took three times the
 // textures and 17 GB allocated on Ocarina of Time (upstream): the game re-registers its IDs with transient targets, whose IDs a shader read as the previous texture
@@ -13221,8 +13282,8 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int rw, int base, __unsafe_
         for (int s = 0; s < 2; s++) if (g_pdirty[s].n) {
             uint32_t m = g_pdirty[s].n; uint32_t *ids = malloc(m * sizeof *ids); if (!ids) break;
             memcpy(ids, g_pdirty[s].list, m * sizeof *ids); pool_dset_clear(&g_pdirty[s]);
-            uint64_t room = s ? 0 : pool_room();
-            for (uint32_t j = 0; j < m; j++) { g_pool_upd_dirty++; if (s) pool_samp_update((int)ids[j]); else { int lr = pool_tex_update((int)ids[j], room); if (lr == 1) pool_dset_add(&g_pleft, (int)ids[j]); else if (lr == 2) pool_dset_add(&g_punwritten, (int)ids[j]); } }
+            uint64_t room0 = s ? 0 : pool_room(), spent0 = g_walk_spent;   // once a batch (headroom and device size are system calls); each texture then takes what the batch made so far off it
+            for (uint32_t j = 0; j < m; j++) { g_pool_upd_dirty++; if (s) pool_samp_update((int)ids[j]); else { uint64_t used = g_walk_spent - spent0, room = room0 > used ? room0 - used : 0; int lr = pool_tex_update((int)ids[j], room); if (lr == 1) pool_dset_add(&g_pleft, (int)ids[j]); else if (lr == 2) pool_dset_add(&g_punwritten, (int)ids[j]); } }
             free(ids);
         }
         pool_unwritten_scan();
@@ -13979,7 +14040,7 @@ static inline uint64_t cb_want(NvShader *sh, int reg) {
 enum { CBP_CACHE = 32 };
 typedef struct {
     uint64_t key, copy, want, gen, gpu;
-    int npend; uint32_t pend_gen, sbw_gen; uint8_t is_wd;
+    int npend, nubd; uint32_t pend_gen, sbw_gen; uint8_t is_wd, gpu_src;
     __unsafe_unretained id<MTLBuffer> buf; size_t off;
 } cb_pad_ent;
 static cb_pad_ent g_cb_pad[CBP_CACHE];
@@ -13991,9 +14052,11 @@ static int cbuf_pad_alloc(uint64_t key, uint8_t is_wd, const void *src_cpu, id<M
                           void **mb, uint64_t *mo, uint64_t *gpu, uint64_t *pav) {
     for (int i = 0; i < CBP_CACHE; i++) {
         cb_pad_ent *e = &g_cb_pad[i];
+        // A GPU-copied entry (e->gpu_src) already captured prior-submission writes (gw_live) in command order via blit(),
+        // so it remains valid across a pass-split retry within the same submission as long as no new writes occurred.
         if (e->gen == g_arena_gen && e->key == key && e->is_wd == is_wd && e->copy == copy && e->want >= want &&
-            e->pend_gen == g_pend_gen && e->sbw_gen == g_sbw_gen && e->npend == g_npend &&
-            (is_wd || !gw_live(key, key + copy))) {
+            e->pend_gen == g_pend_gen && e->sbw_gen == g_sbw_gen && e->npend == g_npend && e->nubd == g_nubd &&
+            (is_wd || e->gpu_src || (!gpu_src && !gw_live(key, key + copy)))) {
             *mb = (__bridge void *)e->buf; *mo = e->off; *gpu = e->gpu; *pav = e->want;
             return 1;
         }
@@ -14016,7 +14079,8 @@ static int cbuf_pad_alloc(uint64_t key, uint8_t is_wd, const void *src_cpu, id<M
     uint64_t agpu = ab.gpuAddress + ao;
     g_cb_pad[g_cb_pad_i++ % CBP_CACHE] = (cb_pad_ent){
         .key = key, .copy = copy, .want = want, .gen = g_arena_gen, .gpu = agpu,
-        .npend = g_npend, .pend_gen = g_pend_gen, .sbw_gen = g_sbw_gen, .is_wd = is_wd,
+        .npend = g_npend, .nubd = g_nubd, .pend_gen = g_pend_gen, .sbw_gen = g_sbw_gen,
+        .is_wd = is_wd, .gpu_src = (uint8_t)(gpu_src != 0),
         .buf = ab, .off = ao,
     };
     *mb = (__bridge void *)ab; *mo = ao; *gpu = agpu; *pav = want;
@@ -18454,6 +18518,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (g_enc == en && pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
     if (g_enc == en && fc) se_bind(en, pr->sh[1], 1);   // the variant reads its table at RED_SLOT, filled for this draw (the argument block above is reused across draws, the table is not)
+    if (g_enc == en && g_mtk.on && !g_mtk.emu) mtk_bind(en);   // task / mesh stage arguments may also call blit() and end the pass (e.g. cbuf_pad_alloc GPU copy or tex_upgrade)
     // Binding ended the pass: a texture view that needs a format-view usage upgrades its texture (tex_upgrade), whose copy goes through blit() and rp_end. en is then an ended encoder and the
     //   draw below crashed inside the driver (11-02 Need for Speed: Hot Pursuit Remastered, SIGSEGV at 0x7bc in drawIndexedPrimitives, right after "texture upgraded to allow format views").
     //   Draw again in a new pass: the texture is upgraded now, so the second binding does not copy (the depth guard stops a binding that would end every pass)

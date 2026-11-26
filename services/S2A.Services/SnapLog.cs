@@ -116,7 +116,7 @@ namespace S2A.Services
             t.HasLiveHandles = s => s2a_snap_seq_live(s) != 0;
             t.Unuse = u => s2a_snap_handle_unuse(u);
             t.Forget = s => s2a_snap_hlog_forget(s);
-            t.Gone = k => { if (k.Obj != 0) return; _lastUpdate.Remove(k.Cookie); foreach (var key in new List<(ulong, uint, uint)>(_lastMm.Keys)) if (key.Item1 == k.Cookie) _lastMm.Remove(key);
+            t.Gone = k => { _lastNifm.Remove(k); if (k.Obj != 0) return; foreach (var key in new List<ReqTable.Key>(_lastNifm.Keys)) if (key.Cookie == k.Cookie) _lastNifm.Remove(key); _lastUpdate.Remove(k.Cookie); foreach (var key in new List<(ulong, uint, uint)>(_lastMm.Keys)) if (key.Item1 == k.Cookie) _lastMm.Remove(key);
                 foreach (var key in new List<(ulong, uint, uint)>(_lastNvWait.Keys)) if (key.Item1 == k.Cookie) _lastNvWait.Remove(key);
                 if (_nvCookies.Remove(k.Cookie)) _nvMapped.Clear(); };
             return t;
@@ -303,7 +303,53 @@ namespace S2A.Services
             if (n.EndsWith("LmLogger") && c == 0) return true;
             //   共享字体：取载入状态 / 字号 / 共享内存偏移 / 按优先级列字体 / 取字体信息（1 / 2 / 3 / 5 / 6）；取共享内存句柄（4）照常
             if (n.EndsWith("ISharedFontManager") && (c == 1 || c == 2 || c == 3 || c == 5 || c == 6)) return true;
+            //   网络连接请求 nifm IRequest 的取结果（1）：只回结果码。取请求状态（0）只有 Submit 之后第一次改状态（清挂起、发事件），由 NifmLast 按对象只留最后一对；
+            //   取事件句柄（2）、取消（3）、提交（4）、设选项（11）照常记（D-NXYJ：哈迪斯离线轮询 nifm，开局 40 秒请求日志 128 MB / 63.8 万条，托管堆每 30 秒涨约 200 MB 到 abort）
+            if (NifmRulesOn && n.EndsWith("Nifm.StaticService.IRequest") && c == 1) return true;
             return false;
+        }
+        internal static bool NifmRulesOn = true;   // 单测负对照用：关掉就 nifm IRequest 的提交 / 查询照常进主日志
+        internal const string NifmRequest = "Nifm.StaticService.IRequest";
+        // nifm IRequest 每个对象只留最后一对「提交（4）+ 其后第一次取请求状态（0）」，存档时接在日志末尾（同 _lastMm）。离线时提交把请求置「挂起」，
+        //   之后第一次取状态清挂起、发事件；再取只读。哈迪斯离线一直重新提交（Ryujinx IRequest.cs 注释：SubmitNetworkRequest 循环），每轮一对都记，
+        //   2 分钟撞总上限、这一局即时存档被关（11-26 Mac 实测 29 万条 / 96 MB）。对象的最终状态只由最后一次提交与它之后的第一次取状态决定，前面的对可以丢
+        private static readonly Dictionary<ReqTable.Key, (byte[] Submit, byte[] State)> _lastNifm = new();
+        // 持 _lock 调。回 true = 这条由本规则收下（不进主日志）；make 只在要留这条时才调（序列化）
+        internal static bool NifmLast(string n, long cmd, ReqTable.Key key, Func<byte[]> make)
+        {
+            if (!NifmRulesOn || !n.EndsWith(NifmRequest)) return false;
+            uint c = (uint)cmd;
+            if (c == 4) { _lastNifm[key] = (make(), null); return true; }
+            if (c != 0) return false;
+            if (_lastNifm.TryGetValue(key, out var p) && p.State == null) _lastNifm[key] = (p.Submit, make());   // 提交后第一次：改状态，留
+            return true;   // 其余取状态只读：不记
+        }
+        // 存档时接在末尾的 nifm 条目（按对象：提交、它之后第一次取状态）
+        internal static IEnumerable<byte[]> NifmTail() { foreach (var kv in _lastNifm) { yield return kv.Value.Submit; if (kv.Value.State != null) yield return kv.Value.State; } }
+        internal static void NifmReset() => _lastNifm.Clear();
+        // 请求日志总上限（维护者 11-19「快照日志要有界」）：规则管不到的高频请求兜底。超了这一局放弃即时存档——红行、清空日志、停止记录，
+        //   不删条目（删了重放会错）。日志大小因此不超过 LogCapBytes + 一条
+        internal static long LogCapBytes = 96L << 20;
+        [DllImport("s2a_native")] private static extern void s2a_snap_disable(int why);
+        private const int SnapOffLogCap = 2;   // runtime/src/native.h S2A_SNAP_OFF_LOGCAP
+        private static bool _capped;
+        internal static bool Capped => _capped;
+        internal static bool CapReached(ReqTable tab, long cap) => tab.Bytes > cap;   // 纯判定，单测直接用
+        // 持 _lock 调：超上限就放弃本局即时存档。回 true = 已放弃（调用方本条不记）
+        private static bool CapLocked()
+        {
+            if (!CapReached(_tab, LogCapBytes)) return false;
+            if (!_capped)
+            {
+                _capped = true;
+                var top = new List<KeyValuePair<string, long>>(_bytesBy); top.Sort((x, y) => y.Value.CompareTo(x.Value));
+                var sb = new StringBuilder(); for (int i = 0; i < Math.Min(5, top.Count); i++) sb.Append($"{top[i].Key} {top[i].Value >> 10} KB×{_countBy[top[i].Key]}；");
+                Console.Error.WriteLine($"[s2a] 【红】即时存档：服务请求日志超过上限 {LogCapBytes >> 20} MB（{_tab.Count} 条），这一局放弃即时存档、清空日志、不再记（游戏照常玩）。占地最多：{sb}");
+                SnapSwitch.Save = false;
+                _tab.Clear(); _lastUpdate.Clear(); _lastMm.Clear(); _lastNvWait.Clear(); _lastNifm.Clear();
+                try { s2a_snap_disable(SnapOffLogCap); } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+            }
+            return true;
         }
 
         // 请求开始（游戏线程上，处理前）：回本条序号，不记回 -1
@@ -333,8 +379,15 @@ namespace S2A.Services
             _pendingNvMap = null;
             if (NvRule(n, num, cookie, cmd, msg, size)) { lock (_lock) { _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; } s2a_snap_hctx(-3); return -1; }
             if (Drop(n, cmd) || DropNvSubmit(n, cmd, msg, size) || DropBinderQuery(n, cmd, msg, size)) { lock (_lock) { _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; } s2a_snap_hctx(-3); return -1; }
+            if (NifmRulesOn && n.EndsWith(NifmRequest) && ((uint)cmd == 0 || (uint)cmd == 4))
+            {
+                ReqTable.Key nk = TargetKey(cookie, msg, size, out _);
+                lock (_lock) { if (!_capped) NifmLast(n, cmd, nk, () => Serialize(-1, num, cookie, cmd, n, msg, size)); _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; }
+                s2a_snap_hctx(-3); return -1;
+            }
             lock (_lock)
             {
+                if (_capped || CapLocked()) { s2a_snap_hctx(-3); return -1; }
                 int seq = _seq++; _kept++;
                 _pending = Serialize(seq, num, cookie, cmd, n, msg, size); _pendingIds?.Clear(); _pendingTipc = size >= 4 && (*(uint*)msg & 0xFFFF) >= 0x10;
                 _pendingKey = TargetKey(cookie, msg, size, out _pendingClose); _pendingSessions?.Clear();
@@ -624,6 +677,7 @@ namespace S2A.Services
                     foreach (var kv in _lastUpdate) { byte[] e = kv.Value.ToArray(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     foreach (var kv in _lastMm) { byte[] e = (byte[])kv.Value.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     foreach (var kv in _lastNvWait) { byte[] e = (byte[])kv.Value.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
+                    foreach (byte[] ne in NifmTail()) { byte[] e = (byte[])ne.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     outLog.W.Write(EntMeta); outLog.W.Write(0); _tab.WriteMeta(outLog.W);
                     outLog.SaveTo(p); _savedRaw = outLog.Length; _savedZ = outLog.Stored;
                 }
@@ -642,7 +696,7 @@ namespace S2A.Services
         [UnmanagedCallersOnly(EntryPoint = "S2A_SnapSessionReset")]
         private static int SessionReset(int restoring)
         {
-            lock (_lock) { _tab.Clear(); _seq = 0; _kept = 0; _dropped = 0; _maxSeq = -1; _dropBy.Clear(); _lastUpdate.Clear(); _lastMm.Clear(); _lastNvWait.Clear(); _nvMapped.Clear(); _nvCookies.Clear(); }
+            lock (_lock) { _capped = false; _lastNifm.Clear(); _tab.Clear(); _seq = 0; _kept = 0; _dropped = 0; _maxSeq = -1; _dropBy.Clear(); _lastUpdate.Clear(); _lastMm.Clear(); _lastNvWait.Clear(); _nvMapped.Clear(); _nvCookies.Clear(); }
             SnapSwitch.Save = SnapSwitch.CanSave && restoring == 0;
             return 0;
         }
@@ -839,7 +893,7 @@ namespace S2A.Services
         //   没有元数据的是存档时接在末尾的「只留最后一条」（渲染器 RequestUpdate、时钟 SetAndWait）：放回各自的表，下次存照样只留一条
         private static void RebuildTable(byte[] all)
         {
-            _tab.Clear(); _lastNvWait.Clear(); _nvMapped.Clear(); _nvCookies.Clear();
+            _tab.Clear(); _lastNvWait.Clear(); _nvMapped.Clear(); _nvCookies.Clear(); _lastNifm.Clear();
             var r = new BinaryReader(new MemoryStream(all)); var parts = new SortedDictionary<int, (int Start, int End, long Cmd, ulong Cookie, string Name)>();
             int metaAt = -1;
             while (r.BaseStream.Position < r.BaseStream.Length)
@@ -887,11 +941,19 @@ namespace S2A.Services
                 if (targets.TryGetValue(kv.Key, out var tc)) { _tab.Add(kv.Key, bytes, tc.T); continue; }
                 if (n.Contains("AudioRenderer") && !n.Contains("Manager") && c == 4) { var ms = new MemoryStream(); ms.Write(bytes); _lastUpdate[kv.Value.Cookie] = ms; continue; }
                 if (n.StartsWith("mm:") && (c == 2 || c == 6) && bytes.Length > 0 && MmRequestIdOf(bytes) is uint rid) { _lastMm[(kv.Value.Cookie, c, rid)] = bytes; continue; }
+                if ((c == 0 || c == 4) && n.EndsWith(NifmRequest) && NifmLast(n, c, NifmKeyOf(bytes, kv.Value.Cookie), () => bytes)) continue;   // nifm 提交 / 取状态：回到按对象只留最后一对的表（按原顺序：先提交、后取状态）
                 _tab.Add(kv.Key, bytes, new ReqTable.Key(0, 0));   // 旧快照（没有元数据）：挂在根上，不收（大小定在快照那一刻）
             }
             foreach (var kv in targets) foreach (ReqTable.Key ck in kv.Value.C) _tab.Created(kv.Key, ck);
             foreach (var kv in deps) _tab.Restore(kv.Key, kv.Value.U, kv.Value.D);
             foreach (ReqTable.Key k in closed) _tab.Close(k);
+        }
+        // 序列化好的一条（EntReq）的目标（会话 + 域对象，同记录时 TargetKey）
+        private static ReqTable.Key NifmKeyOf(byte[] e, ulong cookie)
+        {
+            var r = new BinaryReader(new MemoryStream(e)); r.ReadUInt32(); r.ReadInt32(); r.ReadUInt32(); r.ReadUInt64(); r.ReadInt64(); r.ReadString();
+            int size = r.ReadInt32(); byte[] msg = r.ReadBytes(size);
+            fixed (byte* m = msg) return TargetKey(cookie, m, msg.Length, out _);
         }
         // 序列化好的一条（EntReq）里 mm:u SetAndWait 的请求号：消息原文里 CMIF 头后第 1 个 u32
         private static uint? MmRequestIdOf(byte[] e)

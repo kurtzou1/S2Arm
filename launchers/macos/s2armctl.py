@@ -9,7 +9,7 @@
 #   s2armctl targets                             打 iPhone 包的目标设备：当前目标、连着的设备、可选机型和系统
 #   s2armctl errors [游戏号]                     最近失败任务的错误码、原因、恢复建议、日志位置和日志末尾
 #   s2armctl diag [export [输出.zip]] | diag pull   导出 Mac 诊断包（不给路径就放桌面）/ 拉回 iPhone 诊断
-#   s2armctl snapshot <输出.png> [--app]      主窗口截图：缺省系统截图（与屏幕一致，要屏幕录制权限），不行或 --app 时 App 自绘
+#   s2armctl snapshot <输出.png>              主窗口截图：App 离屏自绘（不走系统截屏，不弹屏幕录制授权框）
 #   s2armctl keys <prod.keys>                 导入密钥（等同拖进来）
 #   s2armctl fonts <目录|"">                  原版字体目录（空串 = 清掉）
 #   s2armctl games <路径>...                  添加游戏（引导页上就走引导页的入口）
@@ -820,16 +820,7 @@ def main():
         return
     if cmd == 'snapshot':
         out = rest[0]
-        # 优先系统截图按主窗口区域截（与屏幕所见一致，含弹出层 / 毛玻璃；需要调用方有屏幕录制权限）；不行再让 App 自己画
-        if '--app' not in rest and not WINDOWS:
-            ws = [w for w in call('GET', '/state')['windows'] if not w['sheet'] and w['rect'][2] > 200]
-            if ws:
-                x, y, w, h = ws[0]['rect']
-                # 10 秒上限：缺屏幕录制权限时系统会弹授权框、screencapture 一直等
-                try: r = subprocess.run(['screencapture', '-x', '-R', f'{x:.0f},{y:.0f},{w:.0f},{h:.0f}', out], capture_output=True, text=True, timeout=10)
-                except subprocess.TimeoutExpired: r = subprocess.CompletedProcess([], 124, '', '10 秒没截出来（多半在等屏幕录制授权）')
-                if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0: print(out, '（系统截图）'); return
-                print(f'系统截图不行（{(r.stderr or r.stdout).strip()}），改用 App 自绘（不含弹出层、毛玻璃）', file=sys.stderr)
+        # 只让 App 离屏自绘：系统截屏（screencapture / 窗口服务器合成）会弹屏幕录制授权框、挂在屏幕上等人点，界面验证就挂住了
         open(out, 'wb').write(call('GET', '/snapshot', raw=True)); print(out, '（App 自绘）')
         # 有弹出层开着而 App 只能自绘时，App 在截图口径里写「截不全」：照实说、退出码 3，别把缺了弹出层的图当证据
         how = call('GET', '/state').get('lastSnapshotPath', '')

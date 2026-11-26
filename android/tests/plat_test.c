@@ -2,6 +2,7 @@
 // same binary also exercises the Bionic TSD paths.
 #include "../../platform/plat.h"
 #include "s2a_native.h"
+#include "s2a_window.h"   // S2A_WIN_SIZE：安卓窗口真值（原先写死 64 GiB，11-14 窗口放大后过时：本用例只在 Linux 建、Mac 门禁不跑）
 
 #include <errno.h>
 #include <inttypes.h>
@@ -317,19 +318,19 @@ int main(void) {
     char npdm[256], detail[256]; snprintf(npdm, sizeof npdm, "%s/main.npdm", dir);
     s2a_layout layout; uint64_t need = 0;
     CHECK(plat_layout_override(npdm, 3, 80u << 20, 1, 0x7000000000ull,
-                               64ull << 30, &layout, &need, detail, sizeof detail) == 0,
+                               S2A_WIN_SIZE, &layout, &need, detail, sizeof detail) == 0,
           "Android layout provider");
     CHECK(layout.win_size == need && layout.heap_size == 3284ull * (1ull << 20), "layout budget");
     CHECK(layout.alias_base >= layout.win_base &&
           layout.alias_base + layout.alias_size <= layout.win_base + layout.win_size,
           "Android VAMM alias stays in window");
     CHECK(plat_layout_override(npdm, 3, 0, 1, 0x7000000000ull,
-                               64ull << 30, &layout, &need, detail, sizeof detail) == 0 &&
+                               S2A_WIN_SIZE, &layout, &need, detail, sizeof detail) == 0 &&
           layout.alias_base >= layout.win_base &&
           layout.alias_base + layout.alias_size <= layout.win_base + layout.win_size,
           "Android non-VAMM alias stays in window");
     CHECK(plat_layout_override(npdm, 2, 80u << 20, 1, 0x7000000000ull,
-                               64ull << 30, &layout, &need, detail, sizeof detail) == EINVAL,
+                               S2A_WIN_SIZE, &layout, &need, detail, sizeof detail) == EINVAL,
           "invalid address space fails");
     CHECK(rmdir(dir) == 0, "layout temp directory removed");
 

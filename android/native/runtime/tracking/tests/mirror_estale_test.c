@@ -195,14 +195,46 @@ static int run_d2_child(void) {
 }
 
 // ---------- precise 模式：restore_precise 重试 + 观察子页哈希记账 ----------
+// 确定性竞争（11-26）：原先只靠 churn 线程与 2000 次恢复碰运气，整套满载时 churn 线程可能一轮都没排上，
+//   用例判「没测到竞争」红（门禁 1 次 / 单跑 0 次）。这里先排定次序逼出一次：辅助线程在 churn 页开换页事务（世代变奇数）
+//   并按住 → 主线程恢复，拿别名必遇奇数世代、进入等待 → 辅助线程看到等待计数涨了才结束事务放行。不靠调度，
+//   等不到等待计数（恢复没守奇数世代）本身就是红。
+static _Atomic int force_state;   // 0 空闲 / 1 事务已开 / 2 已放行
+static void *force_thread(void *arg) {
+    uintptr_t page = (uintptr_t)arena + (size_t)write_pages * model_page;
+    uint64_t waits0 = *(const uint64_t *)arg;
+    s2a_android_mirror_begin(page, model_page);
+    atomic_store_explicit(&force_state, 1, memory_order_release);
+    uint64_t deadline = now_ns() + 5000ull * 1000000ull;
+    while (s2a_android_mirror_test_waits() == waits0 && now_ns() < deadline) sched_yield();
+    s2a_android_mirror_end(page, model_page, 1, 1);
+    atomic_store_explicit(&force_state, 2, memory_order_release);
+    return NULL;
+}
+static int precise_forced_round(uintptr_t p, uint8_t value) {
+    uint64_t waits0 = s2a_android_mirror_test_waits();
+    pthread_t t;
+    atomic_store(&force_state, 0);
+    if (pthread_create(&t, NULL, force_thread, &waits0)) return 2;
+    while (atomic_load_explicit(&force_state, memory_order_acquire) != 1) sched_yield();
+    s2a_track_restore_precise(p + 8192 + 16, &value, 1);   // 事务开着：必须等到放行才落笔
+    pthread_join(t, NULL);
+    if (s2a_android_mirror_test_waits() == waits0) { fprintf(stderr, "[estale-fixture] 【红】换页事务开着时精确恢复没等世代回偶数\n"); return 9; }
+    if (((const uint8_t *)p)[8192 + 16] != value) { fprintf(stderr, "[estale-fixture] 【红】排定竞争后恢复未落到页上\n"); return 4; }
+    return 0;
+}
 static int run_precise_child(void) {
     if (model_page < 16384) { fprintf(stderr, "[estale-fixture] SKIP precise: 需要 16K 模型\n"); return 0; }
     uintptr_t p = (uintptr_t)arena;
     pthread_t t;
-    if (pthread_create(&t, NULL, churn_thread, NULL)) return 2;
     s2a_track_reprotect(p, model_page, S2A_TRACK_READ);                       // 整页要保护
     s2a_track_write_quiet(p + 4096 + 16, 1);                                  // 解开页：sub1 记脏，sub0/2/3 转观察
     uint64_t retries0 = s2a_android_mirror_test_retries(), waits0 = s2a_android_mirror_test_waits();
+    for (int i = 0; i < 16; i++) {   // 排定的竞争先做、在 churn 线程起来之前：换页事务同一时刻只许开一个（mirror_begin 遇奇数世代即报红）
+        int rc = precise_forced_round(p, (i & 1) ? 0x5a : 0xa5);
+        if (rc) return rc;
+    }
+    if (pthread_create(&t, NULL, churn_thread, NULL)) return 2;
     for (int i = 0; i < 2000; i++) {
         uint8_t value = (i & 1) ? 0x5a : 0xa5;
         s2a_track_restore_precise(p + 8192 + 16, &value, 1);                  // 世代搅动下会 ESTALE/等偶数重试
@@ -227,7 +259,7 @@ static int run_precise_child(void) {
             (unsigned long long)retries, (unsigned long long)waits, (unsigned long long)atomic_load(&churn_rounds));
     if (!dirty_cpu) { fprintf(stderr, "[estale-fixture] 【红】观察页上的普通 CPU 写没报脏\n"); return 6; }
     if (dirty_restored) { fprintf(stderr, "[estale-fixture] 【红】精确恢复伪报观察子页脏（哈希记账被重试破坏）\n"); return 7; }
-    if (retries + waits == 0) { fprintf(stderr, "[estale-fixture] 【红】没有发生世代重试，用例没测到竞争\n"); return 8; }
+    if (retries + waits < 16) { fprintf(stderr, "[estale-fixture] 【红】排定的 16 轮竞争没有全部记到世代等待 / 重试（%llu）\n", (unsigned long long)(retries + waits)); return 8; }
     return 0;
 }
 

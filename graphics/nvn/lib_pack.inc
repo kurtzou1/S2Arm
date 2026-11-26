@@ -149,6 +149,8 @@ static id<MTLLibrary> lp_library(lp_pack *p, id<MTLDevice> dev, const char *name
     id<MTLLibrary> lib = [g_lp_libs objectForKey:bk]; int ly = g_lp_layer[bk].intValue;
     os_unfair_lock_unlock(&g_lp_lib_mu);
     if (lib) { atomic_fetch_add(&g_lp_lib_shared, 1); if (layer) *layer = ly; return lib; }
+    if (!dev) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENODEV userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%s: no Metal device yet (the library is built before the device exists)", name]}];
+                return nil; }   // [nil newLibraryWithData:] returns nil and leaves the error unset: say so, or the caller can only report "no reflection json"
     dispatch_data_t d = lp_get(p, name, kind);
     if (!d) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%s: its library segment could not be mapped", name]}];
               return nil; }

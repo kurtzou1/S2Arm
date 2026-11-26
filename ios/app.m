@@ -751,7 +751,8 @@ int s2a_ios_mouse_lock_wanted(void);   // ios/mouse.m
 // 静音键下照样出声（#789，系统设置「静音模式下也播放声音」S2APlayInSilentMode，缺省关 = 跟随静音键）：音频会话类别开 = Playback（不跟静音键），
 //   关 = SoloAmbient（系统缺省，原先一直是它）。启动和每次回前台各设一次（玩家去「设置」改完切回来就生效）；放后台队列，
 //   不在主线程启动早期抢 AVAudioSession（phone_motion.m：真机首次抢会话卡约 2 秒）。类别没变不重设
-//   「与其他 App 混音」（#896，S2AMixWithOthers，缺省关）开 = Ambient：别的 App 的音乐 / 播客照放、和游戏混在一起，静音键只静音游戏；优先于「静音键下照样出声」
+//   「与其他 App 混音」（#896，S2AMixWithOthers，缺省关）开 = Ambient：别的 App 的音乐 / 播客照放、和游戏混在一起，静音键只静音游戏；
+//   两项都开 = Playback + MixWithOthers：既混音、静音键也不静音游戏（#2273：原先混音优先走 Ambient，「静音键下照样出声」开着也被静音键静音）
 //   游戏库设置页（S2ArmShellHost ShellSettingsView「声音」）也能改：库与游戏同一进程，改完不经过回前台，听偏好变更即设（只在这两个值真变了才设）
 static atomic_int g_audio_play = -1;   // 上次按哪组值设的（静音键下出声 | 混音 << 1；-1 = 还没设过）
 // 正在用麦克风的收音会话数（#2151，s2a_mic_begin / s2a_mic_end）：> 0 时类别 = PlayAndRecord（只有它能收音；外放走扬声器、不走听筒，
@@ -761,7 +762,9 @@ static int audio_choice(void) { NSUserDefaults *d = NSUserDefaults.standardUserD
 static void audio_category_set(int choice) {
         BOOL play = choice & 1, mix = (choice >> 1) & 1, mic = atomic_load(&g_mic_users) > 0;
         AVAudioSession *s = AVAudioSession.sharedInstance;
-        NSString *want = mic ? AVAudioSessionCategoryPlayAndRecord : mix ? AVAudioSessionCategoryAmbient : play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
+        NSString *want = mic ? AVAudioSessionCategoryPlayAndRecord : play ? AVAudioSessionCategoryPlayback : mix ? AVAudioSessionCategoryAmbient : AVAudioSessionCategorySoloAmbient;
+        // 混音靠选项：Ambient 本身就和别的 App 混；Playback / PlayAndRecord 要带 MixWithOthers（两项都开、或收音时开着混音）
+        AVAudioSessionCategoryOptions mixopt = mix && (play || mic) ? AVAudioSessionCategoryOptionMixWithOthers : 0;
         // 每次（起局 / 回前台 / 改设置）记一行现状：「没声音」类诊断据此判是不是跟随静音键的类别、声音去了哪个输出、系统音量是不是 0
         //   （D-N6G7 等：管线满、设备照常播完，看不出声音被谁吞了；静音拨片本身的状态系统不给读，类别 SoloAmbient / Ambient 才会被它静音）
         { NSMutableString *outs = [NSMutableString string];
@@ -769,17 +772,17 @@ static void audio_category_set(int choice) {
           NSString *cat = s.category;
           LOG("[声] 音频会话现状：类别 %s（%s）、输出 %s、系统音量 %.0f%%", cat.UTF8String ?: "?",
               [cat isEqualToString:AVAudioSessionCategoryPlayback] ? "不跟随静音键" : "跟随静音键：拨到静音就没声音", outs.length ? outs.UTF8String : "无", s.outputVolume * 100.0); }
-        if ([s.category isEqualToString:want]) return;
+        if ([s.category isEqualToString:want] && (s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers) == mixopt) return;   // 类别与混音选项都没变不重设
         NSError *e = nil;
 #if TARGET_OS_TV   // 电视不收音（g_mic_users 恒 0），也没有「外放走扬声器」这个选项
-        BOOL ok = [s setCategory:want error:&e];
+        BOOL ok = [s setCategory:want withOptions:mixopt error:&e];
 #else
         BOOL ok = mic ? [s setCategory:want withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-                                                        (mix ? AVAudioSessionCategoryOptionMixWithOthers : 0) error:&e]
-                      : [s setCategory:want error:&e];
+                                                        mixopt error:&e]
+                      : [s setCategory:want withOptions:mixopt error:&e];
 #endif
-        LOG("[声] 音频会话类别 → %s（%s）%s%s", mic ? "PlayAndRecord" : mix ? "Ambient" : play ? "Playback" : "SoloAmbient",
-            mic ? "游戏在用麦克风" : mix ? "与其他 App 混音、静音键只静音游戏" : play ? "静音键下照样出声" : "跟随静音键",
+        LOG("[声] 音频会话类别 → %s%s（%s）%s%s", mic ? "PlayAndRecord" : play ? "Playback" : mix ? "Ambient" : "SoloAmbient", mixopt ? " + MixWithOthers" : "",
+            mic ? "游戏在用麦克风" : play && mix ? "与其他 App 混音、静音键下照样出声" : play ? "静音键下照样出声" : mix ? "与其他 App 混音、静音键只静音游戏" : "跟随静音键",
             ok ? "" : "，设不上：", ok ? "" : e.localizedDescription.UTF8String ?: "?");
 }
 static void audio_category_apply(void) {

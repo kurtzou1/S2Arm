@@ -48,14 +48,17 @@ int s2a_snap_reenable(int why) {
 // 游戏库长按卡片给不给「回到这一刻」（ios/app.m s2a_shell_snapshot_available；exists = 这款快照目录里有完整清单）：
 //   玩家开着快照 → 给；这一局只是因地址放不下关了快照（s2a_snap_disable 的原因码，只有 S2A_SNAP_OFF_ADDRESS = 1）→ 照样给（11-22：已有快照不能变成看不见的文件，
 //   恢复局按快照清单原址重占窗口与命令记录区，vawin.c snap_retake，不靠这一局的快照区）；玩家在设置里关了快照 → 不给（同改动前）
-int s2a_snap_restore_offered(int exists) { snap_sw(); return exists && ((g_snap_sw & 1) || g_snap_off == 1); }
-const char *s2a_snap_source(void) { snap_sw(); return g_snap_off ? "本局放不下快照区" : g_snap_src; }   // 原因码现在只有 S2A_SNAP_OFF_ADDRESS（native.h）
+int s2a_snap_restore_offered(int exists) { snap_sw(); return exists && ((g_snap_sw & 1) || g_snap_off == 1 || g_snap_off == 2); }   // 1 = S2A_SNAP_OFF_ADDRESS、2 = S2A_SNAP_OFF_LOGCAP（native.h）：日志超限只停这一局的记录，已有快照照样能回
+const char *s2a_snap_source(void) { snap_sw(); return g_snap_off == 2 ? "本局请求日志超过上限" : g_snap_off ? "本局放不下快照区" : g_snap_src; }   // 原因码现在只有 S2A_SNAP_OFF_ADDRESS（native.h）
 int s2a_snap_saving(void) { return snap_sw() & 1; }
 // 恢复中：每次现读 S2A_SNAP_RESTORE。进程内「回到这一刻」在宿主重启前才设它、恢复完 unsetenv，开局缓存的那一位跟不上——
 //   iPhone 上重建时把这一局当成不在恢复，按本款学到的跨度收了窗口（59392 → 8192 MB），快照核对「窗口不符」拒绝恢复
 int s2a_snap_restoring(void) { const char *r = getenv("S2A_SNAP_RESTORE"); return r && *r; }
 int s2a_snap_mode(void) { return snap_sw() != 0 || s2a_snap_restoring(); }
 int s2a_snap_logging(void) { int v = atomic_load(&g_snap_live); if (v < 0) { v = snap_sw() == 1; atomic_store(&g_snap_live, v); } return v; }
+// 玩家点「存下这一刻」前的判定（snapshot.c s2a_snap_request_save 用）：0 能存；-3 这一局请求日志超过上限、已放弃即时存档（原因码 2 = S2A_SNAP_OFF_LOGCAP），
+//   界面要明确说「这一局记录太长，暂时不能即时存档」，不能报成「稍后再试」让玩家以为再点就能存；-1 其他不能存（没开 / 恢复中）
+int s2a_snap_save_gate(void) { if (g_snap_off == 2) return -3; return s2a_snap_logging() ? 0 : -1; }
 void s2a_snap_live_set(int on) { atomic_store(&g_snap_live, on ? 1 : 0); }
 #if !defined(__APPLE__)
 // 安卓：快照引擎（thread.c / snapshot.c 的苹果段）不编，开关恒关，服务层 C#（SnapLog.cs）不会真调下面三个；

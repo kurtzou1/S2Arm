@@ -220,7 +220,7 @@ if [ "${GATE_LIST:-}" = 1 ]; then
     name=${s%%	*}
     if [ -n "$LINUX_LOCAL" ] && apple_step "$name"; then printf '%s\t需苹果工具链\n' "$name"; else echo "$name"; fi
     # stdout 保留一行一步的机器合同；本机登记沿用路由诊断前缀写 stderr。
-    if awk -F'	' -v n="$name" '$1 == n && $2 == "*" { found=1 } END { exit !found }' < <(printf '%s\n' "$GLT"); then
+    if LC_ALL=C awk -F'	' -v n="$name" '$1 == n && $2 == "*" { found=1 } END { exit !found }' < <(printf '%s\n' "$GLT"); then
       echo "路由：${name}［本机］" >&2
     fi
   done
@@ -381,7 +381,7 @@ WH=(); SK=(); LPI=(); LPK=(); PLAN=; PI=(); F75=(); mx=60   # WH[i] = 本机 / g
 for i in $(seq 1 $N); do
   s=${STEPS[$((i - 1))]}; name=${s%%	*}; lim=${s##*	}; WH[$i]=本机; SK[$i]=
   [ "$HOST" = gate-host ] && [ -z "$WHY" ] || continue
-  ks=$(awk -F'	' -v n="$name" '$1 == n { print $2 }' < <(printf '%s\n' "$GLT") | tr '\n' ' ')
+  ks=$(LC_ALL=C awk -F'	' -v n="$name" '$1 == n { print $2 }' < <(printf '%s\n' "$GLT") | tr '\n' ' ')
   case " $ks " in *" * "*) continue;; esac
   WH[$i]=gate-host; for k in $ks; do SK[$i]="${SK[$i]:+${SK[$i]} }$k"; done; [ -n "${SK[$i]}" ] && { LPI+=("$i"); LPK+=("${SK[$i]}"); }   # 同一步的几个键合成本机一份（钩子编一次回放器跑完）
   PLAN="$PLAN$name	${SK[$i]}"$'\n'; PI+=("$i"); [ "$lim" -gt $mx ] && mx=$lim
@@ -410,7 +410,7 @@ TK=()   # TK[i] = 第 i 步（单测）的缓存键；没有 = 不走缓存
 tc_keys() {   # tc_keys <步号…>：给其中的单测步一次算好键（tools/test_cache.py key）；关了 / 没有算键器 / 算失败 = 不走缓存
   [ "$TCON" = 1 ] && [ -f tools/test_cache.py ] || return 0
   local i n f ix=() fs=() ks k j=0
-  for i; do n=${STEPS[$((i - 1))]%%	*}; f=$(awk -F'	' -v n="$n" '$1 == n { print $2; exit }' < <(printf '%s\n' "$TFL")); [ -n "$f" ] && { ix+=("$i"); fs+=("$f"); }; done
+  for i; do n=${STEPS[$((i - 1))]%%	*}; f=$(LC_ALL=C awk -F'	' -v n="$n" '$1 == n { print $2; exit }' < <(printf '%s\n' "$TFL")); [ -n "$f" ] && { ix+=("$i"); fs+=("$f"); }; done
   [ ${#ix[@]} -gt 0 ] || return 0
   ks=$(python3 tools/test_cache.py key . "${fs[@]}" 2> "$L/tckey.log") || return 0
   while IFS= read -r k; do [ $j -lt ${#ix[@]} ] || break; case $k in [0-9a-f]*) TK[${ix[$j]}]=$k;; esac; j=$((j + 1)); done < <(printf '%s\n' "$ks"); }

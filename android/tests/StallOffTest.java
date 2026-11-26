@@ -1,9 +1,9 @@
 package org.s2arm.android;
 
 import java.io.File;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermissions;
 
 /**
  * 游戏库「重新打开帧率补丁」（StallOff）的宿主回归，期望按口径手写：标记在本款 state 目录（与起局同一处，GameSession.stateDir 建的那个）；
@@ -33,13 +33,13 @@ public final class StallOffTest {
         demand(!StallOff.marked(root, id), "a directory is not a mark (same as start-up)");
         Files.delete(StallOff.mark(root, id).toPath());
 
+        // 删不掉：注入一个必定失败的删法（同真机上删不掉时文件系统抛的 AccessDeniedException），不靠改目录权限——
+        //   root 下权限挡不住删除，那样造出来的「删不掉」在 root 跑的门禁里不成立（11-26 joe-win 门禁以 root 跑）。
         Files.write(StallOff.mark(root, id).toPath(), "fps\n".getBytes());
-        Files.setPosixFilePermissions(state.toPath(), PosixFilePermissions.fromString("r-x------"));
-        try {
-            String why = StallOff.reopen(root, id);
-            demand(why != null && why.startsWith("AccessDeniedException"), "undeletable mark reports the real cause, got " + why);
-            demand(StallOff.marked(root, id), "undeletable mark is still there");
-        } finally { Files.setPosixFilePermissions(state.toPath(), PosixFilePermissions.fromString("rwx------")); }
+        String why = StallOff.reopen(root, id, p -> { throw new AccessDeniedException(p.toString()); });
+        demand(why != null && why.equals("AccessDeniedException: " + StallOff.mark(root, id).getPath()), "undeletable mark reports the real cause, got " + why);
+        demand(StallOff.marked(root, id), "undeletable mark is still there");
+        demand(StallOff.reopen(root, id) == null && !StallOff.marked(root, id), "the production deleter removes it afterwards");
         System.out.println("StallOffTest: ok (" + checks + " checks)");
     }
 }

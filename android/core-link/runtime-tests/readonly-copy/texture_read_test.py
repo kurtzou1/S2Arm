@@ -36,7 +36,8 @@ def run(out):
         library = out/'libreadonly_fixture.so'
         native += ['-shared', '-D_GNU_SOURCE']
         sources += [REPO/('android/native/'+name) for name in [
-            'runtime/tracking/platform.c', 'plat_android.c', 'memory.c', 'guest_signal.c', 'tsd.c']]
+            'runtime/tracking/platform.c', 'plat_android.c', 'memory.c', 'guest_signal.c', 'tsd.c',
+            'runtime/vm/backing.c']]   # readonly_copy.c 在 Linux 下读 plat_backing_sequence（换页世代）；共享库链接不查缺符号，缺了要到加载时才 127
     else:
         raise RuntimeError('texture read host gate requires macOS or Linux')
     native += [str(path) for path in sources]+['-o', str(library)]

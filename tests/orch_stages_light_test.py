@@ -649,8 +649,7 @@ class LightTest(unittest.TestCase):
         dll.write_bytes(b'original dll')
         st = container.stat()
         rows = [[str(container), str(st.st_size), str(int(st.st_mtime)), pid]]
-        raw = '\t'.join(rows[0]) + '\n'
-        raw += f'{st.st_size} {st.st_mtime_ns} {st.st_ctime_ns} {st.st_ino}\n'
+        raw = f'{pid}\t{st.st_size} ' + hashlib.sha256(b'ORIGINAL CONTAINER BOUNDARY').hexdigest() + '\n'   # 程序号 + 大小 + 内容（≤128 KiB 全文）
         raw += hashlib.sha256(b'original dll').hexdigest() + '  -\n'
         raw += hashlib.sha256(b'ORIGINAL EXECUTION BOUNDARY').hexdigest() + '  -\n'
         raw += bytes(16).hex() + '\n'
@@ -663,6 +662,30 @@ class LightTest(unittest.TestCase):
         self.assertEqual(container.stat().st_size, st.st_size)
         self.assertEqual(container.stat().st_mtime_ns, st.st_mtime_ns)
         self.assertNotEqual(stages.Stages._aoc_base(current, rows, tool), expected)
+
+    def test_aoc_key_follows_content_not_path(self):
+        """同一份原件放两个不同路径（两台出包机）键相等；内容变了键变；大文件只取首尾各 64 KiB，期望按手算"""
+        pid, container, tool = self._container_fixture()
+        current = refresh.seed(self.store, '原创', self.source)
+        tool.with_suffix('.dll').write_bytes(b'original dll')
+        big = bytes(range(256)) * 1024   # 256 KiB：首 64 KiB + 尾 64 KiB 进键，中间不进
+        container.write_bytes(big)
+        other = self.home / 'elsewhere' / 'deeper' / 'renamed.nsz'
+        other.parent.mkdir(parents=True)
+        other.write_bytes(big)
+        os.utime(other, ns=(1, 2))   # 修改时间也不同
+        def key(path):
+            return stages.Stages._aoc_base(current, [[str(path), '1', '2', pid]], tool)
+        raw = f'{pid}\t{len(big)} ' + hashlib.sha256(big[:65536] + big[-65536:]).hexdigest() + '\n'
+        raw += hashlib.sha256(b'original dll').hexdigest() + '  -\n'
+        raw += hashlib.sha256(b'ORIGINAL EXECUTION BOUNDARY').hexdigest() + '  -\n'
+        raw += bytes(16).hex() + '\n'
+        self.assertEqual(key(container), hashlib.sha256(raw.encode()).hexdigest()[:16])
+        self.assertEqual(key(other), key(container))
+        changed = bytearray(big)
+        changed[10] ^= 1   # 头部一个字节
+        other.write_bytes(bytes(changed))
+        self.assertNotEqual(key(other), key(container))
 
     def test_aoc_real_transaction_cache_skip_and_host_change(self):
         pid, container, tool = self._container_fixture()

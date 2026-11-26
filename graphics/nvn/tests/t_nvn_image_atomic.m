@@ -97,8 +97,9 @@ static void run_case(int buffer,int sign,int native_buffer,int variant) {
     S.cprog=&q; args_dirty_all(); dispatch(&dp);
     uint64_t fence=nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fence,10000000000ull)); REQUIRE(!mtl_last_commit_error());
     id<MTLTexture> after=tex_mtl(&input),out_image=tex_mtl(&output);
-    CHECK(tex_atomic_usage(after)==(buffer?native_buffer:1),"%s input atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(after),(unsigned long)after.usage);
-    CHECK(!tex_atomic_usage(out_image),"%s ordinary output atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(out_image),(unsigned long)out_image.usage);
+    // R32 整数可写缓冲贴图建时就带原子用途（nvn_mtl.m tex_mtl_ 缓冲贴图：没有压缩可丢；重建后不必再升级），三维的照旧只在真用原子时才加
+    CHECK(tex_atomic_usage(after)==1,"%s input atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(after),(unsigned long)after.usage);
+    CHECK(tex_atomic_usage(out_image)==buffer,"%s ordinary output atomic_declared=%d (expected %d: buffer textures carry it from creation) usage_getter=%#lx",label.UTF8String,tex_atomic_usage(out_image),buffer,(unsigned long)out_image.usage);
     if(buffer) {
         CHECK(after.buffer==before.buffer && after.bufferOffset==before.bufferOffset,
             "%s upgrade preserves backing buffer and offset",label.UTF8String);
@@ -151,6 +152,23 @@ static void run_case(int buffer,int sign,int native_buffer,int variant) {
         CHECK(b[4*i]==(uint32_t)initial && b[4*i+1]==(uint32_t)(initial+20) && b[32+i]==(uint32_t)(initial+20),
             "%s second dispatch lane%u CAS success/failure and ordinary observer",label.UTF8String,i);
     }
+    if(buffer) {
+        // 缓冲贴图被重建（序号淘汰 / 对象收尾后按描述再解析）：11-26 Mac 霍格沃茨之遗 ser 5947（R32Uint 245760 元素，原生 texture_buffer 原子）每次重建都
+        //   「升级成可写 + 原子」一次、300 秒 61 次（D-67FG / D-XJNP 一局 3–5 万次）。期望（不跑被测实现）：重建的贴图建时就带够用途，派发不再升级
+        serial_del(input.serial); mtl_vc_drop(input.serial); uint64_t u0=g_pfv_upgrades;
+        id<MTLTexture> rebuilt=tex_mtl(&input); REQUIRE(rebuilt);
+        nvn_be_sub_begin(); S.cprog=&p; args_dirty_all(); dispatch(&dp); S.cprog=&q; args_dirty_all(); dispatch(&dp);
+        fence=nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fence,10000000000ull)); REQUIRE(!mtl_last_commit_error());
+        CHECK(rebuilt!=second && g_pfv_upgrades==u0 && tex_mtl(&input)==rebuilt,
+            "%s rebuilt buffer texture (serial dropped): upgrades expected %llu->%llu, actual ->%llu; storage kept=%d",label.UTF8String,
+            (unsigned long long)u0,(unsigned long long)u0,(unsigned long long)g_pfv_upgrades,tex_mtl(&input)==rebuilt);
+        read_image(tex_mtl(&output),b);
+        for(unsigned i=0;i<8;i++) {
+            int32_t initial=sign?-100-(int)i:100+(int)i;
+            CHECK(b[4*i]==(uint32_t)initial && b[4*i+1]==(uint32_t)(initial+20) && b[32+i]==(uint32_t)(initial+20),
+                "%s rebuilt dispatch lane%u CAS success/failure and ordinary observer",label.UTF8String,i);
+        }
+    }
 }
 static void unbound_buffer(int sign) {
     NSString *label=sign?@"unbound-int-buffer":@"unbound-uint-buffer";
@@ -168,7 +186,7 @@ static void unbound_buffer(int sign) {
     CHECK(sink.textureType==MTLTextureTypeTextureBuffer && sink.pixelFormat==(sign?MTLPixelFormatR32Sint:MTLPixelFormatR32Uint) && tex_atomic_usage(sink),
         "%s dummy has buffer type/R32 class, atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(sink),(unsigned long)sink.usage);
     id<MTLTexture> out_image=tex_mtl(&output);
-    CHECK(!tex_atomic_usage(out_image),"%s ordinary output atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(out_image),(unsigned long)out_image.usage);
+    CHECK(tex_atomic_usage(out_image)==1,"%s R32 buffer output carries atomic usage from creation, atomic_declared=%d usage_getter=%#lx",label.UTF8String,tex_atomic_usage(out_image),(unsigned long)out_image.usage);
 }
 
 // 过期字节只按真写记（审计 #743 P1-1 ②，nvn_mtl.m gpw_mark）：CPU_NO_ACCESS 池存储整块填 0x11223344，输入是 IMAGE 旗标的 4×4×4 R32UI。
@@ -231,7 +249,7 @@ int main(int argc,char **argv) {
             run_case(1,0,native_buffer,0);
         }
         nvn_be_drain();
-        printf("%s t_nvn_image_atomic: %u checks %u failures; %s, no gameplay proof\n",failures?"FAIL":"PASS",checks,failures,argv[2]);
+        printf("%s t_nvn_image_atomic: %u checks %u failures; %s, no gameplay proof\n",failures?"✗":"✓",checks,failures,argv[2]);
         return failures!=0;
     }
 }

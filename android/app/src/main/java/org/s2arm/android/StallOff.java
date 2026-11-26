@@ -3,6 +3,7 @@ package org.s2arm.android;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * 停帧救场的「这款帧率补丁下次也关」标记（runtime/src/cpatch.c s2a_cpatch_persist_fps_off 写进本款 state 目录；
@@ -20,10 +21,15 @@ final class StallOff {
     /** 这款的帧率补丁是不是被停帧救场关着（起局读的口径：是普通文件才算）。 */
     static boolean marked(File privateRoot, String titleId) { return mark(privateRoot, titleId).isFile(); }
 
+    /** 删标记这一步（可替换：宿主单测换成必定失败的删法，验「删不掉报真原因」，不靠文件权限造——root 下权限挡不住删除）。 */
+    interface Deleter { void delete(Path p) throws IOException; }
+
     /** 重新打开：删标记。null = 删了（或本来就没有）；否则是删不掉的真原因（异常类名 + 消息）。 */
-    static String reopen(File privateRoot, String titleId) {
+    static String reopen(File privateRoot, String titleId) { return reopen(privateRoot, titleId, Files::deleteIfExists); }
+
+    static String reopen(File privateRoot, String titleId, Deleter deleter) {
         File f = mark(privateRoot, titleId);
-        try { Files.deleteIfExists(f.toPath()); return null; }
+        try { deleter.delete(f.toPath()); return null; }
         catch (IOException | SecurityException e) { return e.getClass().getSimpleName() + ": " + e.getMessage(); }
     }
 }

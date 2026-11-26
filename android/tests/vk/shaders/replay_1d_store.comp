@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, r32f) uniform writeonly image2D one;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2DArray layers;
+
+void main() {
+    imageStore(one, ivec2(2, 0), vec4(106));
+    imageStore(layers, ivec3(2, 0, 1), vec4(107));
+}

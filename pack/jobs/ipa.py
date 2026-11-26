@@ -566,9 +566,9 @@ def _swap_pack(c, gid, pack_dir, want):
     if (image / layout.LEGACY_IOS_PACK).exists():   # 旧库留下的 pack/（没被 ios_pack 改过名的）：新资源包已在 .pack，旧的删掉
         _rm(c, managed, image / layout.LEGACY_IOS_PACK)
     compat = host_update.engine_compat(c) or {}
-    from rewrite_refresh import rewriter_id   # 这次的改写产物出自哪版改写器：改写器以后修了，更新手机时只核记号不同的款（rewrite_refresh.py）
+    from rewrite_refresh import game_bid, rewriter_id, tables_id   # 这次的改写产物出自哪版改写器 / 哪份逐款表：以后变了，更新手机时只核记号不同的款（rewrite_refresh.py）
     from sgrade_bf import BF_GEN   # 这次的直连库出自本引擎翻译器：可读瓦片版代数（S 级升级按它判要不要补 _bf，pack/jobs/sgrade_bf.py）
-    layout.update_info(c, gid, ios=dict(shellId=current_shell_id(c), pack=want, rewriterId=rewriter_id(c), bfGen=BF_GEN, libGen=host_update.LIB_GEN, builtBy=host_update.built_by(c), **compat))   # libGen：直连库内容代数（host_update.LIB_GEN）
+    layout.update_info(c, gid, ios=dict(shellId=current_shell_id(c), pack=want, rewriterId=rewriter_id(c), tablesId=tables_id(c, game_bid(c, gid)), bfGen=BF_GEN, libGen=host_update.LIB_GEN, builtBy=host_update.built_by(c), **compat))   # libGen：直连库内容代数（host_update.LIB_GEN）
 
 
 def drop_iphone_delivery(c, gid):

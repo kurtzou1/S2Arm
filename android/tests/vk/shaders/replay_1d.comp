@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D one;
+layout(set = 0, binding = 1) uniform sampler2DArray layers;
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float value[]; } out_data;
+layout(set = 0, binding = 3) uniform sampler2D zero_one;
+layout(set = 0, binding = 4) uniform sampler2DArray zero_layers;
+
+void main() {
+    int i = 0;
+    for (int mip = 0; mip < 2; mip++) {
+        for (int x = 0; x < (8 >> mip); x++)
+            out_data.value[i++] = texelFetch(one, ivec2(x, 0), mip).r;
+        for (int layer = 0; layer < 4; layer++)
+            for (int x = 0; x < (8 >> mip); x++)
+                out_data.value[i++] = texelFetch(layers, ivec3(x, 0, layer), mip).r;
+    }
+    out_data.value[i++] = texelFetch(zero_one, ivec2(0), 0).r;
+    out_data.value[i] = texelFetch(zero_layers, ivec3(0), 0).r;
+}

@@ -209,8 +209,8 @@ typealias Request = ControlRequest
             "notice": s.notice ?? NSNull(), "error": s.error ?? NSNull(),
             "installReadiness": s.installReadiness?.json ?? NSNull(),
             "cachedAt": Date().timeIntervalSince1970,   // 快照时刻：客户端见它停在 20 秒前 = 主线程卡住，改按作业记录判（s2armctl.py wait）
-            "screenCaptureAllowed": Self.screenCaptureAllowed, "lastSnapshotPath": lastSnapshotPath, "overlays": overlays(),
-            // 窗口在屏幕上的位置（左上角原点，单位点），给客户端用系统 screencapture -R 截真画面
+            "lastSnapshotPath": lastSnapshotPath, "overlays": overlays(),
+            // 窗口在屏幕上的位置（左上角原点，单位点）
             "windows": NSApp.windows.filter(\.isVisible).map { w -> [String: Any] in
                 let top = (NSScreen.screens.first?.frame.maxY ?? 0) - w.frame.maxY
                 return ["title": w.title, "number": w.windowNumber, "sheet": w.sheetParent != nil, "main": w.isMainWindow,
@@ -218,34 +218,16 @@ typealias Request = ControlRequest
         ]
     }
 
-    // 窗口截图：先用窗口服务器按窗口号合成本 App 的主窗口 + 弹出层（与屏幕上一致，含毛玻璃；截自己的窗口不需要屏幕录制权限），
-    //   接口在新 SDK 里标了废弃，运行时按符号取；取不到 / 出不了图再退回只画视图层级（不含弹出层，毛玻璃画不出）
+    // 窗口截图只走离屏渲染：逐窗口画视图层级（cacheDisplay），不走系统截屏 / 窗口服务器合成——那两条会弹屏幕录制授权框、挂着等人点
     var lastSnapshotPath = ""
     // 当前盖在主窗口上的弹出层（从界面状态读）：给 AI 看「有没有弹框挡着」，截图口径也拿它核对弹出层叠全了没有
     func overlays() -> [String] {
         [(store.showOnboarding, "引导页"), (store.editingInput, "输入映射页"), (store.inputGuide != nil, "键位引导"), (store.error != nil, "「操作未完成」提示框")].filter { $0.0 }.map { $0.1 }
     }
-    static var screenCaptureAllowed: Bool {
-        typealias P = @convention(c) () -> Bool
-        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGPreflightScreenCaptureAccess") else { return false }
-        return unsafeBitCast(sym, to: P.self)()
-    }
     func snapshot() -> Data? {
         let vis = NSApp.windows.filter { $0.isVisible && $0.contentView != nil }
         guard let main = vis.first(where: { $0.title == "S2Arm" && $0.sheetParent == nil }) ?? vis.first(where: { $0.sheetParent == nil }) else { return nil }
-        let ids = ([main] + vis.filter { $0 !== main && ($0.sheetParent === main || $0.parent === main) }).reversed().map { CGWindowID($0.windowNumber) }
-        typealias Fn = @convention(c) (CGRect, CFArray, UInt32, UInt32) -> Unmanaged<CGImage>?
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImageFromArray") {
-            let f = unsafeBitCast(sym, to: Fn.self)
-            let arr = ids.map { NSNumber(value: $0) } as CFArray
-            // .null = 各窗口外接框；1 = kCGWindowImageBoundsIgnoreFraming（不带阴影）
-            if let img = f(.null, arr, 1, 0)?.takeRetainedValue(), img.width > 1 {
-                lastSnapshotPath = "window-server"
-                return NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
-            }
-            lastSnapshotPath = "window-server 返回空图（多半缺屏幕录制权限）"
-        } else { lastSnapshotPath = "window-server 符号取不到" }
-        // 退回：逐窗口画视图层级，弹出层（引导页等）按屏幕位置叠到主窗口上；毛玻璃画不出（显示成纯色）
+        // 逐窗口画视图层级，弹出层（引导页等）按屏幕位置叠到主窗口上；毛玻璃画不出（显示成纯色）
         func draw(_ w: NSWindow) -> NSBitmapImageRep? {
             guard let v = w.contentView?.superview ?? w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return nil }
             v.cacheDisplay(in: v.bounds, to: rep); return rep
@@ -262,11 +244,11 @@ typealias Request = ControlRequest
             r.draw(in: NSRect(x: (w.frame.minX - main.frame.minX) * scale, y: (w.frame.minY - main.frame.minY) * scale, width: w.frame.width * scale, height: w.frame.height * scale))
         } }
         NSGraphicsContext.restoreGraphicsState()
-        lastSnapshotPath += " → 退回视图层级（弹出层 \(sheets.count) 个已叠上；毛玻璃画不出）"
+        lastSnapshotPath = "视图层级（弹出层 \(sheets.count) 个已叠上；毛玻璃画不出）"
         // 界面状态说开着的弹出层比实际叠上的多（某个弹出层不是单独窗口、画不出）时明说截不全，不给一张像是「什么都没弹」的图
         let open = overlays()
         if open.count > sheets.count {
-            lastSnapshotPath += "；截不全：\(open.joined(separator: "、"))开着，App 自绘没把它叠上。要截到请在「系统设置 → 隐私与安全性 → 屏幕录制」里允许 S2Arm 后重开 App"
+            lastSnapshotPath += "；截不全：\(open.joined(separator: "、"))开着，App 自绘没把它叠上"
         }
         return canvas.representation(using: .png, properties: [:])
     }

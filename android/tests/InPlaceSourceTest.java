@@ -57,7 +57,9 @@ public final class InPlaceSourceTest {
         Path objects = game.resolve("objects");
         if (!Files.isDirectory(objects)) return 0;
         try (var walk = Files.walk(objects)) {
-            return (int) walk.filter(p -> Files.isRegularFile(p) && !p.toString().contains("/tmp/")).count();
+            // 排除对象库自己的暂存目录 objects/tmp/。按相对 objects 的路径判，不能对整条路径找「/tmp/」：
+            //   Linux 的临时目录就在 /tmp 下，整条路径都带它，对象会被全部排除（Mac 的临时目录在 /var/folders 下才没露出来）。
+            return (int) walk.filter(p -> Files.isRegularFile(p) && !objects.relativize(p).startsWith("tmp")).count();
         }
     }
 

@@ -23,7 +23,9 @@ void rp_op_clear_tex(nvn_gpu_cmd c, const p_clear_tex *o, const void *rec) {
     if (!(o->mask & 15) || !o->r.width || !o->r.height) return;
     const tex_t *t = o->tex;
     if (!t || !c) { if (c) nvn_unimpl("tex", "clear_no_texture", rec); return; }
-    if (t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != NVN_TEXTURE_TARGET_2D_ARRAY) {
+    nvn_texdesc d = t->d;
+    rp_fold_1d_desc(&d);
+    if (d.target != NVN_TEXTURE_TARGET_2D && d.target != NVN_TEXTURE_TARGET_2D_ARRAY) {
         nvn_unimpl("tex", "clear_target", rec); return;
     }
     if (t->d.samples > 1 || o->value_type > CLEAR_TEX_INT) { nvn_unimpl("tex", "clear_samples_or_value", rec); return; }
@@ -35,12 +37,12 @@ void rp_op_clear_tex(nvn_gpu_cmd c, const p_clear_tex *o, const void *rec) {
     }
     uint32_t lv = o->has_view && o->view.set_levels ? o->view.base_level : 0;
     uint32_t levels = t->d.levels ? t->d.levels : 1;
-    if (lv >= levels || lv >= 32 || !t->d.width || !t->d.height) { nvn_unimpl("tex", "clear_level", rec); return; }
-    uint32_t w = t->d.width >> lv, h = t->d.height >> lv;
+    if (lv >= levels || lv >= 32 || !d.width || !d.height) { nvn_unimpl("tex", "clear_level", rec); return; }
+    uint32_t w = d.width >> lv, h = d.height >> lv;
     if (!w) w = 1;
     if (!h) h = 1;
     uint32_t l0 = o->has_view && o->view.set_layers ? o->view.min_layer : 0;
-    uint32_t layers = t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY ? t->d.depth : 1;
+    uint32_t layers = d.target == NVN_TEXTURE_TARGET_2D_ARRAY ? d.depth : 1;
     int32_t nz = o->r.depth ? o->r.depth : 1;
     if (o->r.xoffset < 0 || o->r.yoffset < 0 || o->r.zoffset < 0 || o->r.width < 0 || o->r.height < 0 || nz < 0 ||
         (uint64_t)o->r.xoffset + o->r.width > w || (uint64_t)o->r.yoffset + o->r.height > h ||
@@ -63,9 +65,9 @@ void rp_op_clear_tex(nvn_gpu_cmd c, const p_clear_tex *o, const void *rec) {
         if (!gpu) { rp_view_pin_end(); return; }
         if (whole) nvn_gpu_clear_view(c, gpu, cl.value.f, cl.value.u, is_int);
         else {
-            nvn_gpu_pass_desc d = {0}; d.ncolor = 1; d.w = w; d.h = h; d.layers = 1;
-            d.color[0].view = gpu; d.color[0].load = NVN_GPU_LOAD_LOAD; d.color[0].store = NVN_GPU_STORE_STORE;
-            nvn_gpu_pass_begin(c, &d); nvn_gpu_clear_rect(c, &cl); nvn_gpu_pass_end(c); rp_dirty_all();
+            nvn_gpu_pass_desc pass = {0}; pass.ncolor = 1; pass.w = w; pass.h = h; pass.layers = 1;
+            pass.color[0].view = gpu; pass.color[0].load = NVN_GPU_LOAD_LOAD; pass.color[0].store = NVN_GPU_STORE_STORE;
+            nvn_gpu_pass_begin(c, &pass); nvn_gpu_clear_rect(c, &cl); nvn_gpu_pass_end(c); rp_dirty_all();
         }
         rp_view_pin_end(); rp_tex_mark_gpu_written(t);
     }

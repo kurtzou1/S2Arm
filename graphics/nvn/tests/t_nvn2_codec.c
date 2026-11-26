@@ -101,6 +101,27 @@ size_t nvn2_av1c_from_tu(const uint8_t *tu, size_t n, uint8_t *out, size_t cap);
 void *s2a_av1_open(int threads) __attribute__((weak));
 int s2a_av1_decode(void *h, const uint8_t *data, uint32_t len, uint8_t **planes, int32_t *strides, int32_t *info) __attribute__((weak));
 void s2a_av1_close(void *h) __attribute__((weak));
+typedef int (*s2a_av1_out_fn)(void *ctx, uint8_t **planes, int32_t *strides, int32_t *info, int64_t ts);
+void *s2a_av1_open_mt(int threads, int frame_delay) __attribute__((weak));
+int s2a_av1_send(void *h, const uint8_t *data, uint32_t len, int64_t ts, s2a_av1_out_fn out, void *ctx) __attribute__((weak));
+int s2a_av1_flush(void *h, s2a_av1_out_fn out, void *ctx) __attribute__((weak));
+void s2a_av1_reset(void *h) __attribute__((weak));
+// 帧并行接口的出帧记录：每帧的 MD5 和时间戳（按出帧次序）
+static void md5_420(uint8_t **pl, const int32_t *st, int w, int h, int bps, char out[33]);
+typedef struct { int n; char md[8][33]; int64_t ts[8]; } av1_mt_rec;
+typedef struct { char (*ref)[33]; int n, same; } av1_se_rec;
+static int av1_se_take(void *ctx, uint8_t **pl, int32_t *st, int32_t *info, int64_t ts) {
+    av1_se_rec *r = ctx; char md[33];
+    if (info[0] == 64 && info[1] == 64 && r->n < 40) { md5_420(pl, st, 64, 64, 1, md); r->same += !strcmp(md, r->ref[r->n]) && ts == r->n; }
+    r->n++;
+    return 1;
+}
+static int av1_mt_take(void *ctx, uint8_t **pl, int32_t *st, int32_t *info, int64_t ts) {
+    av1_mt_rec *r = ctx;
+    if (r->n < 8 && info[0] == 96 && info[1] == 64 && info[2] == 8) { md5_420(pl, st, 96, 64, 1, r->md[r->n]); r->ts[r->n] = ts; }
+    r->n++;
+    return 1;
+}
 // 真 libvpx 链没链（真身 libs2a_vpx.a 回 1 / 空垫片 services/vpx/stub.c 回 0——本条单测照宿主同一口径链二者之一，见 nvn2_codec.mk）：
 //   垫片时 VP9 系统小节照跑（nvn2_codec.c 见 0 默认走系统）、要真 libvpx 当参考的对拍跳过
 int s2a_vpx_linked(void) __attribute__((weak));
@@ -320,6 +341,8 @@ static int cover(const char *path) {
 }
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--cover")) return cover(argv[2]);
+    // 下面各小节按「送几包取几帧」核像素与次序；单测线程取帧慢（软解 / 负载高）时追帧会丢过时的帧，这里关掉，只核解码本身
+    setenv("S2A_VIDEO_CATCHUP", "0", 1);
     // ---------- av1C ----------
     uint8_t c[256];
     CHECK(nvn2_av1c_from_tu(red_av1_0, sizeof red_av1_0, c, sizeof c) == sizeof av1c_want && !memcmp(c, av1c_want, sizeof av1c_want));
@@ -783,6 +806,48 @@ int main(int argc, char **argv) {
         printf("dav1d 10 位：2 帧里 MD5 对上 %d 帧\n", same); CHECK(same == 2);
         uint8_t junk[16] = {0x32, 0x0e, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}; uint8_t *pl[3]; int32_t st[3], info[6];
         h = s2a_av1_open(1); CHECK(s2a_av1_decode(h, junk, sizeof junk, pl, st, info) != 0); s2a_av1_close(h);
+
+        // 帧并行（最大帧延迟按线程数 / 指定 4）：同样 6 帧、同样 MD5、按次序出来，时间戳跟着帧；出帧比送包晚的在 flush 里取完
+        for (int k = 0; k < 2 && s2a_av1_open_mt; k++) {
+            void *m = s2a_av1_open_mt(k ? 8 : 6, k ? 4 : 0); CHECK(m);
+            av1_mt_rec rec = { 0 }; int ok = 1;
+            for (int i = 0; i < 6; i++) ok &= s2a_av1_send(m, ts_av1[i], (uint32_t)ts_av1_n[i], 1000 * (i + 1), av1_mt_take, &rec) == 0;
+            int before = rec.n;
+            ok &= s2a_av1_flush(m, av1_mt_take, &rec) == 0;
+            s2a_av1_close(m);
+            same = 0; for (int i = 0; i < 6 && i < rec.n; i++) same += !strcmp(rec.md[i], want8[i]) && rec.ts[i] == 1000 * (i + 1);
+            printf("dav1d 帧并行（%s）：送完 6 包时出了 %d 帧、flush 后共 %d 帧，MD5 与时间戳都对上 %d 帧\n", k ? "延迟 4、8 线程" : "延迟自动、6 线程", before, rec.n, same);
+            CHECK(ok && rec.n == 6 && same == 6);
+        }
+        // 换代（游戏 Flush / 跳转）：帧并行（延迟 4、8 线程）先送 3 包，再清（s2a_av1_reset），再从头送 6 包（时间戳换成 100000 起）。
+        //   期望：清之后只出新送的 6 帧，MD5 同 want8、时间戳都是新的，没有一帧带着清之前的时间戳（不清时 dav1d 里压着的旧帧会先出来）
+        if (s2a_av1_open_mt && s2a_av1_reset) {
+            void *m = s2a_av1_open_mt(8, 4); CHECK(m);
+            av1_mt_rec old = { 0 }, rec = { 0 }; int ok = 1;
+            for (int i = 0; i < 3; i++) ok &= s2a_av1_send(m, ts_av1[i], (uint32_t)ts_av1_n[i], 1000 * (i + 1), av1_mt_take, &old) == 0;
+            s2a_av1_reset(m);
+            for (int i = 0; i < 6; i++) ok &= s2a_av1_send(m, ts_av1[i], (uint32_t)ts_av1_n[i], 100000 * (i + 1), av1_mt_take, &rec) == 0;
+            ok &= s2a_av1_flush(m, av1_mt_take, &rec) == 0;
+            s2a_av1_close(m);
+            int stale = 0; same = 0;
+            for (int i = 0; i < 6 && i < rec.n; i++) { stale += rec.ts[i] < 100000; same += !strcmp(rec.md[i], want8[i]) && rec.ts[i] == 100000 * (i + 1); }
+            printf("dav1d 帧并行换代：清之前交出 %d 帧，清之后出 %d 帧、带旧时间戳 %d 帧、MD5 与新时间戳对上 %d 帧\n", old.n, rec.n, stale, same);
+            CHECK(ok && rec.n == 6 && stale == 0 && same == 6);
+        }
+        // 「显示已有帧」小包：帧并行与一帧接一帧逐帧 MD5 相同、一帧不少（旧送包逻辑帧并行时这条流少 2 帧）
+        if (s2a_av1_open_mt) {
+            static char ref[SE_AV1_COUNT][33];
+            void *h1 = s2a_av1_open(2); int n1 = 0; const uint8_t *q = se_av1_data;
+            for (int i = 0; i < SE_AV1_COUNT; q += se_av1_n[i++]) { uint8_t *pl[3]; int32_t st[3], info[6];
+                if (s2a_av1_decode(h1, q, se_av1_n[i], pl, st, info) == 0 && n1 < SE_AV1_COUNT) md5_420(pl, st, 64, 64, 1, ref[n1++]); }
+            s2a_av1_close(h1);
+            void *m = s2a_av1_open_mt(6, 0); av1_se_rec rec = { ref, 0, 0 }; int err = 0; q = se_av1_data;
+            for (int i = 0; i < SE_AV1_COUNT; q += se_av1_n[i++]) err += s2a_av1_send(m, q, se_av1_n[i], i, av1_se_take, &rec) != 0;
+            err += s2a_av1_flush(m, av1_se_take, &rec) != 0;
+            s2a_av1_close(m);
+            printf("dav1d 帧并行「显示已有帧」小包：%d 包，一帧接一帧出 %d 帧，帧并行出 %d 帧、MD5 对上 %d 帧、送包失败 %d\n", SE_AV1_COUNT, n1, rec.n, rec.same, err);
+            CHECK(n1 == SE_AV1_COUNT && rec.n == SE_AV1_COUNT && rec.same == SE_AV1_COUNT && err == 0);
+        }
     }
 
     // ---------- AV1 强制软解（S2A_AV1_SOFT=1）走整条接管路径：8 位、10 位红（没链 dav1d 时两段跳过：强制软解没兜底、垫片也没有）----------
@@ -819,6 +884,27 @@ int main(int argc, char **argv) {
             printf("AV1 软解整条路径 96x64：逐像素对公式最大差 %d、超 ±1 的 %d 个分量\n", maxd, bad); CHECK(bad == 0);
             s2a_av1_close(h); rig_down(&r, &AV1);
         }
+        // 追帧：6 帧片源时间相隔 1 ms（送完就全都到时），最后一包带流结束。关追帧：6 帧照交；开追帧：游戏取得慢时丢过时的帧，
+        //   交出的时间戳照样递增、最后一帧（下一格是结束标记）不丢、结束标记照样到——游戏靠它知道片子放完
+        for (int on = 0; on < 2; on++) {
+            setenv("S2A_VIDEO_CATCHUP", on ? "1" : "0", 1);
+            rig r; rig_up(&r, &AV1, 96, 64); uint64_t id;
+            for (int i = 0; i < 6; i++) CHECK(((f_sub)E(AV1.sub))(&id, r.obj, ts_av1[i], ts_av1_n[i], (int64_t)i * 1000000, i == 5) == 0);
+            usleep(300000);   // 解码线程把 6 帧都解进先解队列；出帧线程先填满两格缓冲
+            int frames = 0, mono = 1, eos_seen = 0; int64_t last = -1;
+            for (int k = 0; k < 10 && !eos_seen; k++) {
+                sync_h h; uint32_t idx = take(&r, &AV1, &spev, &h);
+                uint16_t w, hh, w2, h2; int64_t pts; uint8_t eos;
+                CHECK(((f_props)E(AV1.props))(&w, &hh, &w2, &h2, &pts, &eos, r.obj, idx) == 0);
+                if (eos) eos_seen = 1; else { frames++; mono &= pts > last; last = pts; }
+                ((f_rel)E(AV1.rel))(r.obj, idx, 0, 0);
+                usleep(20000);   // 游戏取得慢：每格之间 20 ms，后面的帧早已到时
+            }
+            printf("AV1 追帧%s：交出 %d 帧（片源 6 帧），时间戳递增 %d，最后一帧片源 %.0f ms，结束标记 %d\n", on ? "开" : "关", frames, mono, last / 1e6, eos_seen);
+            CHECK(eos_seen && mono && last == 5000000 && (on ? frames < 6 && frames >= 2 : frames == 6));
+            rig_down(&r, &AV1);
+        }
+        setenv("S2A_VIDEO_CATCHUP", "0", 1);
         unsetenv("S2A_AV1_SOFT");
     } else printf("AV1 强制软解 / 整条路径：宿主没链 dav1d 垫片（本机走 AV1 硬解路线），两段跳过\n");
 

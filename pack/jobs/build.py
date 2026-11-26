@@ -1075,6 +1075,7 @@ def prepare(c):
                             engine="S2Arm", gameId=game["id"], gameName=game["name"], compatibility="unverified",
                             files=snapshot(c, temporary), **(host_update.engine_compat(c) or {}),   # 只换宿主的判据（host_update.py）
                             rewriterId=__import__("rewrite_refresh").rewriter_id(c),
+                            tablesId=__import__("rewrite_refresh").tables_id(c, (current / "exefs/main").read_bytes()[0x40:0x48].hex() if (current / "exefs/main").is_file() else ""),
                             bfGen=__import__("sgrade_bf").BF_GEN, libGen=host_update.LIB_GEN, builtBy=host_update.built_by(c))   # 直连库的可读瓦片版代数（S 级升级按它判要不要补 _bf，pack/jobs/sgrade_bf.py）   # 改写产物出自哪版改写器：改写器修了，起局前只核记号不同的（rewrite_refresh.refresh_mac）
             atomic(temporary / "manifest.json", manifest)   # v0.2.3 清理：不再紧接着全量复验——清单就是同一进程刚从这些文件量出来的
             sha = host_update.install_host(c, host)

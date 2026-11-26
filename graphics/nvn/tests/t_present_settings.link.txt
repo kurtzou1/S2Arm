@@ -159,6 +159,7 @@ hdr runtime/include/s2a_text_input_rules.h
 hdr runtime/include/s2a_ui_text.h
 hdr runtime/include/s2a_unattended.h
 hdr runtime/include/s2a_widen_remember.h
+hdr runtime/include/s2a_window.h
 hdr runtime/ns2pro/include/NS2Transport.h
 hdr runtime/src/as_type.h
 hdr runtime/src/det_mring.h

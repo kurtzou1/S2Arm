@@ -19,8 +19,9 @@ find_package(Threads REQUIRED)
 add_library(s2arm_rewriter SHARED jni.c)
 target_link_libraries(s2arm_rewriter PRIVATE s2a_rewriter Threads::Threads)
 if(NOT ANDROID)
-    find_package(JNI REQUIRED)
     # JNI is supplied by the calling VM. Only headers are needed, never libjvm.
+    # Without COMPONENTS, FindJNI also demands AWT, which headless JDKs (Linux gate hosts) do not ship.
+    find_package(JNI REQUIRED COMPONENTS JVM)
     target_include_directories(s2arm_rewriter PRIVATE ${JNI_INCLUDE_DIRS})
 endif()
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

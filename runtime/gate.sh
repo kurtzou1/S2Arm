@@ -145,11 +145,15 @@ run_groups() {   # run_groups <键…>：前置建一次 → 非 SER 组按上�
 depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就什么都不打。见上方「按源文件跳组」
   [ -n "${GATE_CHANGED:-}" ] && [ "${NATIVE_GATE_DEPSKIP:-1}" != 0 ] || return 0
   local f c=() h=() st day key cd b k bo=; [ "${GATE_BUILD_ONLY:-}" = 1 ] && bo=1
+  # 11-26 不再按目录分（原先只认 runtime/ graphics/ 下的 C 源：android/native 下的 C 源改了，只改它时清单空 → 全编；
+  #   同 runtime 源一起改时它被忽略 → 编到它的组可能被跳，假绿）。C 系源文件不论在哪都和每组 make -n 的源文件比；
+  #   头文件不论在哪：只编按 include 闭包换成源文件，完整门禁全跑；其余一切（Makefile / *.mk / 链接脚本 / 编译参数文件 / 生成器脚本 / 数据）
+  #   都可能改编译结果、又不在源文件清单里，一改就全跑。GATE_CHANGED 是列车 / 守望给的「改动 ∩ 本钩子输入」，不是全部改动
   for f in $GATE_CHANGED; do case $f in
-    runtime/*.c|runtime/*.m|runtime/*.mm|runtime/*.cpp|runtime/*.cc|runtime/*.S|runtime/*.s|graphics/*.c|graphics/*.m|graphics/*.mm|graphics/*.cpp|graphics/*.cc|graphics/*.S|graphics/*.s) c+=("$f");;
+    *.c|*.m|*.mm|*.cpp|*.cc|*.S|*.s) c+=("$f");;
     # 只编（11-24 收窄）：头文件也收窄——按 #include / #import 静态闭包（tools/include_closure.py）求出受影响的源文件，并进 c；跑的组只看编不编得过
-    runtime/*.h|runtime/*.inc|runtime/*.hpp|graphics/*.h|graphics/*.inc|graphics/*.hpp) [ -n "$bo" ] && h+=("$f") || return 0;;
-    runtime/*|graphics/*|Makefile|*/build.mk|tests/autoplay/*|tests/build.mk|compat/*) return 0;;   # 非 C 源落在本钩子管的路径下：全跑
+    *.h|*.inc|*.hpp|*.hh|*.def) [ -n "$bo" ] && h+=("$f") || return 0;;
+    *) return 0;;
   esac; done
   if [ ${#h[@]} -gt 0 ]; then local x; while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done < <(python3 -B tools/include_closure.py "${h[@]}" 2> /dev/null) || return 0; fi
   [ ${#c[@]} -gt 0 ] || { [ -n "$bo" ] && [ ${#h[@]} -gt 0 ] && echo "$*"; return 0; }   # 只编：改的头文件没有源用到 → 一组都不用编
@@ -185,8 +189,8 @@ SK=" ${GATE_SKIP:-} "; TG=" $(grep -oE '^native-test-[a-z_0-9]+' <<< "$MP" | sed
 case $TG in (*[![:space:]]*) ;; (*) echo "原生层单测目标列表为空 → 红"; exit 1;; esac
 n=0
 RUN=(); for k in $TG; do case $SK in *" $k "*) continue;; esac; RUN+=("$k"); n=$((n + 1)); done
-# 按源文件跳组（11-14 门禁提速）：只在本批改动「只有 runtime/ 或 graphics/ 下的 C 系源文件」时，跳过源文件清单里一个改动都没有的组。
-#   改动里有头文件 / 数据 / 脚本 / mk / Makefile / build.mk / 别的门禁路由路径、没给 GATE_CHANGED、今天这台机器还没全跑过 → 全跑。
+# 按源文件跳组（11-14 门禁提速）：只在本批改动「只有 C 系源文件（只编另含头文件）」时，跳过源文件清单里一个改动都没有的组（11-26 起不分目录）。
+#   改动里有头文件（完整门禁）/ 数据 / 脚本 / mk / Makefile / 链接脚本等任何非源文件、没给 GATE_CHANGED、今天这台机器还没全跑过 → 全跑。
 #   每组源文件清单 = make -n -B native-test-<键> 里出现的 .c / .m / .mm / .cpp / .cc / .S / .s（不受增量构建影响），按 Makefile + */build.mk +
 #   runtime/tests/mk/*.mk 的内容哈希缓存（变了重算）；清单算不出 / 为空的组照跑。11-14 模拟：今天 64 次触发本钩子的合并里 17 次只需跑 0–5 组
 NDS=$(depskip "${RUN[@]}") || NDS=

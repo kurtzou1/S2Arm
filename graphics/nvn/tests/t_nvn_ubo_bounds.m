@@ -43,7 +43,17 @@ static NSString *const source = @"#include <metal_stdlib>\nusing namespace metal
 // Mirrors ea0819b6b94018ff_b (cb_ext=144, bound=112) and unaligned tail tests.
 "fragment float4 ubo_ext_probe(constant Desc6& d [[buffer(0)]]) {\n"
 "    return float4((*d.fp_c9)._m0[0].x, (*d.fp_c9)._m0[1].x, (*d.fp_c9)._m0[1].y, (*d.fp_c9)._m0[8].x);\n"
-"}\n";
+"}\n"
+"struct MeshV { float4 pos [[position]]; float4 col [[user(locn0)]]; };\n"
+"using TriMesh = metal::mesh<MeshV, void, 3, 1, topology::triangle>;\n"
+"[[mesh]] void mesh_ubo_probe(constant Desc6& d [[buffer(0)]], TriMesh out) {\n"
+"    out.set_primitive_count(1);\n"
+"    float4 c = float4((*d.fp_c9)._m0[0].x, (*d.fp_c9)._m0[1].x, (*d.fp_c9)._m0[1].y, (*d.fp_c9)._m0[8].x);\n"
+"    const float2 p[3] = {float2(-1,-1), float2(3,-1), float2(-1,3)};\n"
+"    for (uint i = 0; i < 3; i++) { MeshV v; v.pos = float4(p[i], 0, 1); v.col = c; out.set_vertex(i, v); }\n"
+"    out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2);\n"
+"}\n"
+"fragment float4 mesh_fs_pass(MeshV in [[stage_in]]) { return in.col; }\n";
 
 static NvShader *make_fs_loop(id<MTLLibrary> lib, const char *key) {
     NvShader *fs = [NvShader new]; fs->stage = 1;
@@ -312,6 +322,77 @@ int main(void) {
             uint8_t px7[4] = {0}; read_pixel0(&rt, px7);
             CHECK(approx_u8(px7[0], 0) && approx_u8(px7[1], 64) && approx_u8(px7[2], 64) && approx_u8(px7[3], 0),
                   "GPU-filled 16B UBO sees filled 0.25 and zero +2304/+2352 (got %u,%u,%u,%u)", px7[0], px7[1], px7[2], px7[3]);
+        }
+
+        // Case 8: native mesh draw whose mesh stage binds a short GPU-filled UBO while a render pass is open.
+        // Previously mtk_encode bound stage 3/4 after draw()'s g_enc != en check, so blit() ended the pass and left
+        // g_blit (a compute encoder on Metal 4) open, crashing rec_thread with unrecognized selector on drawMeshThreadgroups*.
+        if (g_mesh_ok) {
+            NvShader *ms = [NvShader new]; ms->stage = 4; ms->mesh_kind = 2; ms->mesh_task = 0; ms->mesh_threads = 1;
+            ms->fn = [lib newFunctionWithName:@"mesh_ubo_probe"]; REQUIRE(ms->fn);
+            strlcpy(ms->key, "6666666666666666_b", sizeof ms->key);
+            ms->rf.pos_attr = -1; ms->rf.nb = 1;
+            ms->rf.b = calloc(1, sizeof *ms->rf.b); REQUIRE(ms->rf.b);
+            ms->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 6, .aid = 0};
+            ms->ae = [ms->fn newArgumentEncoderWithBufferIndex:0]; REQUIRE(ms->ae);
+            ms->arg_len = ms->ae.encodedLength;
+            ms->cb_ext[6] = 144;
+
+            NvShader *mfs = [NvShader new]; mfs->stage = 1;
+            mfs->fn = [lib newFunctionWithName:@"mesh_fs_pass"]; REQUIRE(mfs->fn);
+            strlcpy(mfs->key, "7777777777777777_b", sizeof mfs->key);
+            mfs->rf.pos_attr = -1; mfs->rf.color_known = 1; mfs->rf.color_mask = 1;
+
+            NvProg *mesh_pr = [NvProg new]; mesh_pr->sh[4] = ms; mesh_pr->sh[1] = mfs;
+            prog_t mesh_p = {.magic = MAGIC('P', 'R', 'O', 'G'), .serial = nvn_new_serial()}; serial_put(mesh_p.serial, mesh_pr);
+
+            uint8_t *ubo_mesh = memory + 114688;
+            memset(ubo_mesh, 0, 256);
+            memcpy(ubo_mesh + 128, &f_three_q, 4);   // poison at _m0[8].x (past 16B binding)
+            nvn_be_sub_begin(); state_reset();
+            mtl_sub_fill((uint64_t)(uintptr_t)ubo_mesh, 16, 0x3f000000u);   // 0.5f
+            S.prog = &mesh_p;
+            S.ubo[4][6] = (p_bind_buf){.addr = (uint64_t)(uintptr_t)ubo_mesh, .size = 16};
+            set_rt(&rt);
+            rp_begin(); REQUIRE(g_enc);   // open render pass before mesh draw so blit() inside mtk_bind splits it
+            p_draw mdw = {.prim = DM_PRIM_MESH_TASKS, .count = 1, .first = 0, .instances = 1};
+            mesh_tasks_draw(&mdw);
+            fence = nvn_be_sub_commit();
+            waited = nvn_be_wait(fence, 10000000000ull);
+            cb_err = mtl_last_commit_error();
+            CHECK(waited && !cb_err && !mtl_gpu_halted(), "mesh draw with short GPU-filled UBO splits pass and retries without crashing");
+            if (!cb_err && !mtl_gpu_halted()) {
+                uint8_t px8[4] = {0}; read_pixel0(&rt, px8);
+                CHECK(approx_u8(px8[0], 128) && approx_u8(px8[1], 0) && approx_u8(px8[2], 0) && approx_u8(px8[3], 0),
+                      "mesh draw short GPU-filled UBO reads 0.5 and zero-padded tail (got %u,%u,%u,%u)", px8[0], px8[1], px8[2], px8[3]);
+            }
+        }
+
+        // Case 9: short UBO with gw_live == 1 (prior in-flight GPU write): retry after blit() must reuse the GPU-copied
+        // cbuf_pad_alloc entry instead of missing cache again and dropping the draw after 2 retries.
+        {
+            uint8_t *ubo_gw = memory + 122880;
+            memset(ubo_gw, 0, 256);
+            memcpy(ubo_gw + 0, &f_quarter, 4);
+            memcpy(ubo_gw + 16, &f_half, 4);
+            memcpy(ubo_gw + 128, &f_three_q, 4);
+            // rt already holds (128, 0, 0, 0) from Case 8 (or prior case), distinct from (64, 128, 0, 0) below.
+            nvn_be_sub_begin(); state_reset();
+            set_rt(&rt);
+            gw_put((uint64_t)(uintptr_t)ubo_gw, (uint64_t)(uintptr_t)ubo_gw + 64, g_fence + 100, g_done);
+            S.prog = &ext_p;
+            S.ubo[1][6] = (p_bind_buf){.addr = (uint64_t)(uintptr_t)ubo_gw, .size = 112};
+            rp_begin(); REQUIRE(g_enc);
+            uint64_t made_before = g_cb_pad_made;
+            draw(&tri, NULL);
+            uint64_t made_delta = g_cb_pad_made - made_before;
+            fence = nvn_be_sub_commit();
+            waited = nvn_be_wait(fence, 10000000000ull);
+            cb_err = mtl_last_commit_error();
+            uint8_t px9[4] = {0}; read_pixel0(&rt, px9);
+            CHECK(waited && !cb_err && made_delta == 1 && approx_u8(px9[0], 64) && approx_u8(px9[1], 128) && approx_u8(px9[3], 0),
+                  "gw_live short UBO reuses GPU-copied cbuf_pad_alloc entry on retry (made=%llu, px=%u,%u,%u,%u)",
+                  (unsigned long long)made_delta, px9[0], px9[1], px9[2], px9[3]);
         }
 
         unlink(map); unlink(user);

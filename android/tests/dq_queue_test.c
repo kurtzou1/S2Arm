@@ -29,6 +29,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -454,6 +455,45 @@ static void run_wait_phase(void) {
 static unsigned c7_bucket(uint64_t ns) { static const uint64_t ub[8] = { 20000, 50000, 100000, 200000, 500000, 1000000, 2000000, 5000000 }; unsigned i = 0; while (i < 8 && ns >= ub[i]) i++; return i; }
 static int u64_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 static uint64_t hist_total(const uint64_t *h) { uint64_t t = 0; for (int i = 0; i < DQH_N; i++) t += __atomic_load_n(&h[i], __ATOMIC_RELAXED); return t; }
+// 本机「定时醒」链路自己的延迟（C7a 上限用）：一条辅助线程照录制线程的睡法睡（单调时钟条件变量定时等，100 微秒起、没活翻倍、
+//   封顶 DQ_POLL_MAX_US，没人叫），主线程空闲 15 毫秒后发布一个标记、空转等它取走，量「发布 → 取走」。这一段不经被测队列，
+//   只量宿主的定时器与调度：同一封顶下，录制线程取一条记录的等待不该比它长出一截。各宿主差得多（11-26 实测：一台 Linux 门禁机
+//   WSL 6.6 内核定时等 2 毫秒最大 2.4 毫秒，另一台 WSL 6.18 内核到 5.3 毫秒，C7a 真实现最大 6.9–10.8 毫秒），固定墙钟上限在抖动大的宿主上必红。
+static struct { pthread_mutex_t mu; pthread_cond_t cv; _Atomic uint64_t pub, took; _Atomic int stop; } g_cal;
+static void *cal_main(void *arg) {
+    (void)arg;
+    uint64_t seen = 0, wait_us = 100;
+    pthread_mutex_lock(&g_cal.mu);
+    while (!atomic_load(&g_cal.stop)) {
+        const uint64_t p = atomic_load_explicit(&g_cal.pub, memory_order_acquire);
+        if (p != seen) { seen = p; atomic_store_explicit(&g_cal.took, p, memory_order_release); wait_us = 100; continue; }
+        struct timespec dl; clock_gettime(CLOCK_MONOTONIC, &dl);
+        uint64_t ns = (uint64_t)dl.tv_nsec + wait_us * 1000ull; dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
+        if (pthread_cond_timedwait(&g_cal.cv, &g_cal.mu, &dl) == ETIMEDOUT && wait_us < DQ_POLL_MAX_US) wait_us *= 2;
+        if (wait_us > DQ_POLL_MAX_US) wait_us = DQ_POLL_MAX_US;
+    }
+    pthread_mutex_unlock(&g_cal.mu);
+    return NULL;
+}
+static uint64_t host_timed_wake_max_ns(int rounds) {
+    pthread_mutex_init(&g_cal.mu, NULL);
+    pthread_condattr_t ca; pthread_condattr_init(&ca); pthread_condattr_setclock(&ca, CLOCK_MONOTONIC); pthread_cond_init(&g_cal.cv, &ca); pthread_condattr_destroy(&ca);
+    atomic_store(&g_cal.pub, 0); atomic_store(&g_cal.took, 0); atomic_store(&g_cal.stop, 0);
+    pthread_t th; pthread_create(&th, NULL, cal_main, NULL);
+    uint64_t mx = 0;
+    for (int k = 1; k <= rounds; k++) {
+        usleep(15000);   // 同 C7a：空闲到退避封顶
+        const uint64_t t0 = now_ns();
+        atomic_store_explicit(&g_cal.pub, (uint64_t)k, memory_order_release);   // 不叫：等它自己定时醒
+        while (atomic_load_explicit(&g_cal.took, memory_order_acquire) != (uint64_t)k) { }
+        const uint64_t d = now_ns() - t0; if (d > mx) mx = d;
+    }
+    atomic_store(&g_cal.stop, 1);
+    pthread_mutex_lock(&g_cal.mu); pthread_cond_signal(&g_cal.cv); pthread_mutex_unlock(&g_cal.mu);
+    pthread_join(th, NULL);
+    pthread_cond_destroy(&g_cal.cv); pthread_mutex_destroy(&g_cal.mu);
+    return mx;
+}
 static void run_latency_phase(void) {
     phase("C7 等待分布读数");
     set_dq(1);
@@ -482,7 +522,11 @@ static void run_latency_phase(void) {
     CHECK(m == 0 || gw[m / 2] < 200000ull, "C7a：「发布 → 做完」比记下的等活延迟平均多出 %.0f 微秒（中位）——读数没有贴住真实的等待", m ? (double)gw[m / 2] / 1e3 : 0.0);
     qsort(ge, (size_t)m, sizeof ge[0], u64_cmp);
     const uint64_t emax = m ? ge[m - 1] : 0;
-    CHECK(emax < 10ull * 1000000ull, "C7a：定时醒封顶 %d 微秒，一条记录却等了 %.0f 微秒", (int)DQ_POLL_MAX_US, (double)emax / 1e3);
+    // 上限：原来的 10 毫秒，或本机定时醒链路自己的最大延迟（80 轮）的两倍再加 1 毫秒，取大——只在抖动大的宿主上放宽，不比原来收紧。
+    //   定时醒不封顶（退避一路翻倍）由 C6d / M9 守；这里守「读数里的等待贴着一个定时醒间隔」，宿主自己的抖动不算实现的错。
+    const uint64_t host = host_timed_wake_max_ns(80), bound = 2ull * host + 1000000ull > 10ull * 1000000ull ? 2ull * host + 1000000ull : 10ull * 1000000ull;
+    CHECK(emax < bound, "C7a：定时醒封顶 %d 微秒，一条记录却等了 %.0f 微秒（上限 %.0f 微秒 = max(10 毫秒, 2 × 本机定时醒链路最大延迟 %.0f 微秒 + 1 毫秒)）",
+          (int)DQ_POLL_MAX_US, (double)emax / 1e3, (double)bound / 1e3, (double)host / 1e3);
     CHECK(emax == 0 || nvn_vk_dbg_dq_stat(DQS_TMO_WORK) > 0, "C7a：记录是定时醒取走的，却没有定时醒取走的计数");
     uint64_t dh[DQH_N]; for (int i = 0; i < DQH_N; i++) dh[i] = __atomic_load_n(&g_dq_hw[i], __ATOMIC_RELAXED) - hw0[i];
     for (int i = 0; i < DQH_N; i++) CHECK(dh[i] == want_bucket[i], "C7a：直方图第 %d 桶：测试按规格算 %u 个、实现记了 %llu 个", i, want_bucket[i], (unsigned long long)dh[i]);
@@ -508,7 +552,7 @@ static void run_latency_phase(void) {
     // d 百分位的取整：101 个样本、99 个在第 2 桶、2 个在最后一桶——两个已经占 1.98%（> 1%），p99 必须落在最后一桶（向下取整会错落在第 2 桶）
     { uint64_t h[DQH_N] = {0}; h[2] = 99; h[DQH_N - 1] = 2;
       CHECK(dq_hist_pct(h, 101, 99) == DQH_N - 1 && dq_hist_pct(h, 101, 50) == 2, "C7d：合成直方图（99 个在 <100 桶、2 个在 ≥5000 桶）：p99 落在第 %u 桶（应为 %d）、p50 落在第 %u 桶（应为 2）", dq_hist_pct(h, 101, 99), DQH_N - 1, dq_hist_pct(h, 101, 50)); }
-    printf("  %-38s 空闲后 1 条记录（定时醒 100 微秒起封顶 %d 微秒）：%d 轮有样本，中位等 %.0f 微秒，最大 %.0f 微秒；清空等待最大 %.0f 微秒\n", "C7 等待分布读数", (int)DQ_POLL_MAX_US, got, m ? (double)ge[m / 2] / 1e3 : 0.0, (double)emax / 1e3, (double)dmax / 1e3);
+    printf("  %-38s 空闲后 1 条记录（定时醒 100 微秒起封顶 %d 微秒）：%d 轮有样本，中位等 %.0f 微秒，最大 %.0f 微秒（本机定时醒链路最大 %.0f 微秒、上限 %.0f 微秒）；清空等待最大 %.0f 微秒\n", "C7 等待分布读数", (int)DQ_POLL_MAX_US, got, m ? (double)ge[m / 2] / 1e3 : 0.0, (double)emax / 1e3, (double)host / 1e3, (double)bound / 1e3, (double)dmax / 1e3);
     set_wait(200, 0, 0);   // 还原缺省
 }
 

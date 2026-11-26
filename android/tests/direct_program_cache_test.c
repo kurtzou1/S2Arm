@@ -234,6 +234,28 @@ static void probe_tests(void) {
     CHECK(s2a_program_cache_store(g_dir, id, payload, sizeof payload, why, sizeof why) == 0, "restore probe fixture");
 }
 
+// 目录索引（program_cache.c）：确定没有文件的身份不再逐次 open。验法：建好索引后把目录权限收成 000——
+//   逐次 open 会撞 EACCES（只读头返回 -1、正式读取报「打开失败」）；走索引则不碰文件系统，照常按未命中报。
+//   已登记的身份照旧 open（撞 EACCES 如实报错），证明索引只省「没有」的那一半。root 不受权限位约束，跳过。
+static void index_tests(void) {
+    if (geteuid() == 0) { printf("note: index_tests skipped under root\n"); return; }
+    uint8_t have[32], none[32], sha[32]; uint64_t plen = 0; char why[256];
+    fill(have, sizeof have, 31); fill(none, sizeof none, 32);
+    static uint8_t payload[512]; fill(payload, sizeof payload, 33);
+    CHECK(s2a_program_cache_store(g_dir, have, payload, sizeof payload, why, sizeof why) == 0, "index fixture stored");
+    CHECK(s2a_program_cache_probe(g_dir, none, sha, &plen, why, sizeof why) == 1, "absent identity probes as no file");
+    CHECK(chmod(g_dir, 0) == 0, "lock the cache directory");
+    why[0] = 0;
+    CHECK(s2a_program_cache_probe(g_dir, none, sha, &plen, why, sizeof why) == 1, "indexed absence answers without opening the directory");
+    uint8_t *got = NULL; size_t glen = 0;
+    why[0] = 0;
+    CHECK(s2a_program_cache_load(g_dir, none, &got, &glen, NULL, why, sizeof why) != 0 && strcmp(why, "未命中") == 0,
+          "indexed absence is a plain miss for the formal load too");
+    CHECK(s2a_program_cache_probe(g_dir, have, sha, &plen, why, sizeof why) == -1, "an indexed entry is still opened (and the lock is real)");
+    CHECK(chmod(g_dir, 0700) == 0, "unlock the cache directory");
+    CHECK(s2a_program_cache_probe(g_dir, have, sha, &plen, why, sizeof why) == 0 && plen == sizeof payload, "stored entry probes after unlock");
+}
+
 int main(void) {
     char tmpl[] = "/tmp/s2a-pcache-XXXXXX";
     char *dir = mkdtemp(tmpl);
@@ -387,6 +409,7 @@ int main(void) {
 
     probe_tests();
     sync_failure_tests();
+    index_tests();
 
     // 清场
     char cmd[700];

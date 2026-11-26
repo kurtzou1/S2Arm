@@ -42,6 +42,9 @@ static inline void rp_fold_1d_desc(nvn_texdesc *d) {
     if (d->target == NVN_TEXTURE_TARGET_1D) { d->target = NVN_TEXTURE_TARGET_2D; d->height = 1; d->depth = 1; }
     else if (d->target == NVN_TEXTURE_TARGET_1D_ARRAY) { d->depth = d->height ? d->height : 1; d->height = 1; d->target = NVN_TEXTURE_TARGET_2D_ARRAY; }
 }
+static inline uint32_t rp_tex_height(const tex_t *t) {
+    return rp_fold_1d_target(t->d.target) == t->d.target ? t->d.height : 1;
+}
 // 贴图自身的层数（不含视图记录）：立方体 6，二维数组 / 立方体数组取 depth，一维数组取 height，其余 1。
 static inline uint32_t rp_tex_layer_count(const tex_t *t) {
     return t->d.target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 :

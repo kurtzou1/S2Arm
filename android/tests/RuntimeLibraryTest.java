@@ -134,7 +134,9 @@ public final class RuntimeLibraryTest {
         check(dev.override() && goodSha.equals(dev.sha256), "override selected");
         check(dev.file.getParentFile().getName().equals(RuntimeLibrary.STAGE)
             && dev.file.getCanonicalPath().startsWith(cache.getCanonicalPath() + "/"), "the loaded file is the code-cache copy");
-        check(!dev.file.canWrite() && goodSha.equals(RuntimeLibrary.sha256(dev.file)), "copy is read-only and has the SHA");
+        // 看权限位，不用 canWrite()：root 跑（只有 root 的 Linux 门禁机）时 canWrite() 对只读文件也是 true，验不到「副本只读」
+        check(Files.getPosixFilePermissions(dev.file.toPath()).stream().noneMatch(p -> p.name().endsWith("_WRITE"))
+            && goodSha.equals(RuntimeLibrary.sha256(dev.file)), "copy is read-only and has the SHA");
         check(dev.line().startsWith("runtime-library: dev-override sha256=" + goodSha + " base-apk=" + APK_SHA
             + " source-commit=" + COMMIT + " dirty=true diff=" + DIFF + " ilc=Release aot-host=linux-arm64")
             && dev.line().contains("开发局，不作性能读数"), dev.line());
