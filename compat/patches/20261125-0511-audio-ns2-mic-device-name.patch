@@ -1,0 +1,47 @@
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+index 77e9553d1094125fa3830908844ae1840d8f4150..09586f58e188417048951b5bfc42c55c60cb8029 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+@@ -1,4 +1,3 @@
+-using Ryujinx.Audio.Input;
+ using Ryujinx.Audio.Output;
+ using Ryujinx.Horizon.Common;
+ using Ryujinx.Horizon.Sdk.Applet;
+@@ -16,8 +15,8 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     //   时之笛：nn::audio::GetDefaultVirtualOutputDevice → devmgr::Initialize 连不上 auddmg:u 即 Abort。
+     //   外部输出流（OpenOutputStream / Start / Stop）还走 300 / 401 / 700 / 800，流本身在 audsmx:u（AudioSystemMixer.cs），两边经 ExternalStreamRegistry 按流号对上。
+     //   外部输入流（麦克风，OpenInputStream / Start / Stop，#2151）同一组命令、功能 = 2。
+-    //   只实现语义能定死的命令：虚拟输出设备就是宿主那一个声音输出（与 audout:u ListAudioOuts 同一来源），虚拟输入设备就是宿主那一个收音
+-    //   （与 audin:u ListAudioIns 同一来源）；其余命令不进命令表、按未知命令报红；已实现的命令遇到 SDK 从不发的取值（未知功能、未知设备名、未知标志）也报红，不回成功兜底。
++    //   只实现语义能定死的命令：虚拟输出设备就是宿主那一个声音输出（与 audout:u ListAudioOuts 同一来源），虚拟输入设备就是宿主那一个收音，
++    //   名字用 Switch 2 设备管理自己的 "TrueRawAudioIn"（见 VirtualInputDeviceName）；其余命令不进命令表、按未知命令报红；已实现的命令遇到 SDK 从不发的取值（未知功能、未知设备名、未知标志）也报红，不回成功兜底。
+     partial class AudioDeviceManagerUserSessionManager : IServiceObject
+     {
+         private readonly ExternalStreamRegistry _registry;
+@@ -56,6 +55,11 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         public const uint VirtualOutputDeviceToken = 1;
+         public const uint VirtualInputDeviceToken = 2;
+ 
++        // 虚拟输入设备名（#2151，11-25）：时之笛开哼唱识别时 300 / 401 / 700 发的设备名是 "TrueRawAudioIn"（玩家 macOS 0.6.10 日志），
++        //   不是老接口 audin:u 的 "BuiltInHeadset"——原先借 audin:u 的名字，300 报「不是本机虚拟设备」、输入流没建起来，
++        //   游戏照样走 InputStreamImpl::Purge 读空对象 +0x340 崩。列输入设备（0 / 100）也回这个名字，游戏不论按列表取还是写死都对得上
++        public const string VirtualInputDeviceName = "TrueRawAudioIn";
++
+         private const int VirtualDeviceProfileSize = 0x228;
+         private const int ProfileLatencyOffset = 0x218;
+         private const int ProfileDeviceTokenOffset = 0x220;
+@@ -241,10 +245,12 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             }
+         }
+ 
+-        // 本机虚拟设备：输出 = 宿主声音输出（audout:u 同源），输入 = 宿主收音（audin:u 同源，"BuiltInHeadset"）
++        // 本机虚拟设备：输出 = 宿主声音输出（audout:u 同源），输入 = 宿主收音（VirtualInputDeviceName）
++        private static readonly string[] InputDeviceNames = [VirtualInputDeviceName];
++
+         private static string[] DeviceNames(uint functionality)
+         {
+-            return functionality == FunctionalityInput ? AudioInputManager.ListAudioIns(false) : AudioOutputManager.ListAudioOuts();
++            return functionality == FunctionalityInput ? InputDeviceNames : AudioOutputManager.ListAudioOuts();
+         }
+ 
+         private static void RequireDevice(int command, ReadOnlySpan<byte> name, uint functionality)

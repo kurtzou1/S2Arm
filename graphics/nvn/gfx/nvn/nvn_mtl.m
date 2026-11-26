@@ -2962,13 +2962,15 @@ static int ev_wait(volatile uint32_t *val, uint32_t mode, uint32_t v, const uint
     return 0;
 }
 static void ts_clk(void);
+static int ts_mode(void);
 void mtl_sub_counter(uint64_t addr, uint32_t type) {
-    // #653: legacy Metal does not implement the nvn_gpu per-report timestamp contract.
-    // Count this unsupported capability at its real entry point; preserve legacy feedback.
-    if (type == NVN_COUNTER_TYPE_TIMESTAMP || type == NVN_COUNTER_TYPE_TIMESTAMP_TOP) {
-        static _Atomic uint64_t unsupported;
-        uint64_t n = atomic_fetch_add(&unsupported, 1) + 1;
-        if (n && !(n & (n - 1))) MLOG("per-report GPU timestamp unsupported on legacy Metal (count=%llu); retaining legacy counter feedback", (unsigned long long)n);
+    // Timestamp reports (#653): their time comes from ts_mode (logged once when first asked). Only the submission mode, where every report of one
+    //   submission reads the same time, is worth a count here; the segment modes give each report its own segment's GPU start / end (Metal 4 and Metal 3 alike).
+    //   This used to say "unsupported on legacy Metal" on every backend, a Metal 4 run included, and sent a diagnosis down the wrong path (11-25)
+    if ((type == NVN_COUNTER_TYPE_TIMESTAMP || type == NVN_COUNTER_TYPE_TIMESTAMP_TOP) && ts_mode() == 0) {
+        static _Atomic uint64_t same;
+        uint64_t n = atomic_fetch_add(&same, 1) + 1;
+        if (n && !(n & (n - 1))) MLOG("counter timestamp reports: %llu so far, one time per submission (gpu_timestamps off): reports in one submission read the same time", (unsigned long long)n);
     }
     sbw_note(addr, 16, SBW_REPORT); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk();
 }
@@ -7593,6 +7595,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 //   wait for it (mhrise 10-26: a fresh install's first run built 111 such pipelines on the submit thread); the draw after it is ready takes it as before. Only where losing it costs
 //   no more than a frame: every colour / depth target was attached in the last two frames too (drawn every frame: a one-off bake target waits), and neither shader writes storage
 //   (MeloNX allowAsyncCompileSkip). On by default on every platform (a Mac play session stalled 14 s on one frame's first uses, #187); DM_NVN_FIRST_SKIP=0 waits instead, which frame replay sets because it compares pixels
+//   Skipped only once the frame's wait budget (DM_NVN_PSO_FRAME_MS) is used up: before that the draw waits for its pipeline (first_skip_ok)
 static int first_skip_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_NVN_FIRST_SKIP");
@@ -8927,7 +8930,7 @@ static int rt_range_pr_ro(NvProg *p) {
 //   Prefetched shaders used to be recorded when claimed: Splatoon 3 creates 12610 programs in its first 10 s and draws with 287 keys' pipelines, so pso_user.tsv listed all of them
 //   and the next start's prepare step loaded every one before the first frame (delivery line 10-27)
 // D-92BW 库按活跃集持有（iPad mini 6 奥德赛：开局预热建的 1689 个库全程映射着，库切片 718 MB、Metal 内部约 2 GB，几分钟后宿主低区耗尽闪退）：
-//   预热建完全部管线后（warm_finish → sh_release_unused），只被预热用过的着色器放掉库和函数、留下骨架（对象本身、反射、键都在：已建管线按着色器对象作键，照常命中）；
+//   预热建完全部管线后（warm_finish → sh_release_unused；默认只在 iOS 放，见 sh_release_on），只被预热用过的着色器放掉库和函数、留下骨架（对象本身、反射、键都在：已建管线按着色器对象作键，照常命中）；
 //   要再读它的库 / 函数只有两条路，都先补回：游戏第一次用它（shader_used，置 s_rec 之后永不再放）、再次预热（多程序换程序后 warm_shader）。
 //   补回 = 按同一键 / 阶段 / 深度约定重走 shader_build 的加载（t_hydrate），取回 fn / fn_u / tf_fn / geo_fn / plib / at_lib；其余懒载成员（_bv / _bp / _ft、
 //   at_fns）放掉时退回「没试过」，用到时按原路自己再载。放与补都在 g_hyd_mu 里：成员在锁外只会从空变成有，读的一方不会撞见被清掉
@@ -10959,7 +10962,7 @@ static os_unfair_lock g_fz_fn_lock = OS_UNFAIR_LOCK_INIT;
 typedef struct { char key[24]; uint8_t fbmask, nfc; int8_t fx[32]; uint8_t lmap[8]; } bf_key;
 static nvn_hmap g_bf_fn = {.klen = sizeof(bf_key)}; static unsigned g_bf_libs;
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
-static void pb_tick(void); static void pb_touch_r(const pso_key *k); static void pb_built_r(const pso_key *k); static int pb_warm_full(uint64_t built_unclaimed);   // 管线额度（nvn_pso_budget.inc）：先用到的几个
+static void pb_tick(void); static void pb_touch_r(const pso_key *k); static void pb_built_r(const pso_key *k); static int pb_warm_full(uint64_t built_unclaimed); static int pb_prefetch_full(void);   // 管线额度（nvn_pso_budget.inc）：先用到的几个
 static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
 static const char g_tf_mark;
 static char g_geo_mark;
@@ -11750,6 +11753,10 @@ static int first_skip_ok(const pso_key *k, NvShader *vs, NvShader *fs) {
     int st = pso_pend_state(k);
     if (st == 2) return 0;   // already compiled: pso_pend_take takes it at once
     if (st != 1) return FSKN(3);   // the background table is full: build here as before
+    // 这一帧的等待预算（DM_NVN_PSO_FRAME_MS，缺省 100 ms）还有：先等（pso_pend_take 按单条上限与本帧预算等，等不到再跳），不一上来就跳。跳过的那一笔这一帧画不出来，
+    //   画在每帧重画的中间目标（G-buffer）上时光照读到空白，物体闪白一两帧（11-25 一款动作冒险游戏入水：首遇跳过 256 笔、角色闪白；改成等之后不闪，后台管线多数
+    //   几毫秒内就好，入水那一刻没有 ≥ 100 ms 的帧）。预算用完的帧照旧跳过，慢的编译服务拖不住整帧（同 pso_budget_left_ms 的来由）
+    if (pso_budget_left_ms() > 0) return 0;
     g_first_skipped = 1; return 1;
 }
 // 跳过的绘制晚了几帧（11-21 编批库方案「物体晚出现」的读数）：按（顶点键, 片元键）记第一次被跳过的帧号，同一对第一次画成时记下隔了几帧。
@@ -12094,6 +12101,65 @@ static void shader_urgent(NSString *k, int st) {
     } });
     os_unfair_lock_unlock(&g_shpre_mu);
 }
+// 游戏登记程序时（ProgramSetShaders，通常在进场景 / 读区域时，早于第一次画它）在后台先取这对顶点 / 片元的随包拉取基础管线（hybrid_prefetch）：
+//   预热清单只覆盖跑过的状态，新场景（例：入水）里清单外的对首遇时没有基础管线，只能跳过（角色闪白）或在提交线程上查（卡）。不读绘制状态：键按单采样、
+//   不开 alpha-to-coverage 的中性状态填（基础管线颜色状态留空，基底键只看采样数 / a2c / a21 / 拓扑类，游戏绝大多数绘制落在这一把）。
+//   自己四条 utility 道，两个栈、后进先出：第一帧之前登记的（开局一口气两千多个）进「开局栈」，等预热做完才查——放在着色器预取的道上、或开局就查，
+//   会压住预取、和预热抢编译服务（11-25 实测第一帧 31 s → 70 s）；第一帧之后登记的（读新区域）进「局中栈」，立即查、最近登记的先查，
+//   不排在开局那一批后面（11-25：只按先进先出、等预热，入水时开局那批才查了一半，首遇没有基础管线 547 次、角色闪白）
+enum { PAIRPRE_LANES = 4 };
+static NSMutableSet<NSString *> *g_pairpre_seen;   // g_shpre_mu
+static NSMutableArray<NSArray<NSString *> *> *g_pairpre_live, *g_pairpre_boot;   // g_pairpre_lk
+static os_unfair_lock g_pairpre_lk = OS_UNFAIR_LOCK_INIT;
+static dispatch_queue_t g_pairpre_q[PAIRPRE_LANES];
+static _Atomic uint64_t g_pairpre_n, g_pairpre_hit;
+static void pairpre_run(NSArray<NSString *> *ks) {
+    shmap_load();
+    NSString *vk = nil, *fk = nil;
+    for (NSString *k in ks) { NSString *st = shmap_stage(k); int s_ = st ? stage_of(st) : -1; if (s_ == 0 && !vk) vk = k; else if (s_ == 1 && !fk) fk = k; }
+    if (!vk || !fk) return;
+    NSString *vkb = [vk stringByAppendingString:@"_b"], *fkb = [fk stringByAppendingString:@"_b"];
+    if (!shader_loadable(vkb) || !shader_loadable(fkb)) return;
+    NvShader *vs = shader_load(vkb, 0, 0), *fs = vs ? shader_load(fkb, 1, 0) : nil;
+    if (!vs || !fs) return;
+    pso_key k; memset(&k, 0, sizeof k); k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.cfmt[0] = (uint32_t)MTLPixelFormatRGBA8Unorm; k.samples = 1; k.chmask = 0xffffffffu;
+    pso_key_norm(&k, vs, fs, 0);
+    int r = hybrid_prefetch(&k, vs, fs);
+    if (r < 0) return;   // 已有 / 已查过 / 这对不走混合管线
+    uint64_t m = atomic_fetch_add(&g_pairpre_n, 1) + 1, h = r ? atomic_fetch_add(&g_pairpre_hit, 1) + 1 : atomic_load(&g_pairpre_hit);
+    if (!(m & (m - 1)) && m >= 16) MLOG("program registration: package pulling bases looked up for %llu new shader pairs off the frame path, %llu found", (unsigned long long)m, (unsigned long long)h);
+}
+// 每登记一对踢一次：取局中栈顶；局中栈空、预热已完就取开局栈顶；只剩开局栈而预热没完就等（等的时候照样先看局中栈）
+static void pairpre_tick(void) {
+    for (;;) {
+        if (atomic_load(&g_shpre_stopping)) return;
+        NSArray<NSString *> *ks = nil; int wait = 0;
+        os_unfair_lock_lock(&g_pairpre_lk);
+        if (g_pairpre_live.count) { ks = g_pairpre_live.lastObject; [g_pairpre_live removeLastObject]; }
+        else if (g_pairpre_boot.count) { if (atomic_load(&g_warm_running)) wait = 1; else { ks = g_pairpre_boot.lastObject; [g_pairpre_boot removeLastObject]; } }
+        os_unfair_lock_unlock(&g_pairpre_lk);
+        if (ks) { @autoreleasepool { pairpre_run(ks); } return; }
+        if (!wait) return;
+        usleep(50000);
+    }
+}
+void nvn_be_pair_prefetch(const uint8_t (*keys)[8], int n) {
+    if (n < 2 || !shpre_on() || !hybrid_on()) return;
+    NSMutableArray<NSString *> *ks = [NSMutableArray array];
+    for (int i = 0; i < n; i++) { const uint8_t *m = keys[i]; static const uint8_t z[8]; if (!memcmp(m, z, 8)) continue;
+        [ks addObject:[NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]]]; }
+    if (ks.count < 2) return;
+    NSString *pk = [ks componentsJoinedByString:@"|"];
+    os_unfair_lock_lock(&g_shpre_mu);
+    if (atomic_load(&g_shpre_stopping) || !g_shpre.n) { os_unfair_lock_unlock(&g_shpre_mu); return; }
+    if (!g_pairpre_seen) { g_pairpre_seen = [NSMutableSet set]; g_pairpre_live = [NSMutableArray array]; g_pairpre_boot = [NSMutableArray array];
+        for (int i = 0; i < PAIRPRE_LANES; i++) g_pairpre_q[i] = dispatch_queue_create("dm.nvn.pair-pre", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); }
+    if ([g_pairpre_seen containsObject:pk]) { os_unfair_lock_unlock(&g_shpre_mu); return; }
+    [g_pairpre_seen addObject:pk];
+    os_unfair_lock_lock(&g_pairpre_lk); [atomic_load(&g_cur_frame) ? g_pairpre_live : g_pairpre_boot addObject:ks]; os_unfair_lock_unlock(&g_pairpre_lk);
+    static _Atomic unsigned rr; dispatch_async(g_pairpre_q[atomic_fetch_add(&rr, 1) % PAIRPRE_LANES], ^{ pairpre_tick(); });
+    os_unfair_lock_unlock(&g_shpre_mu);
+}
 void nvn_be_shader_prefetch(const uint8_t md[8]) {
     if (!shpre_on()) return;
     NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
@@ -12320,6 +12386,7 @@ static void warm_task_(WarmTask *t) {
             if (!ps) { MLOG("【红】 background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
             WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = t->vkey; item->fs_key = t->fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
             warm_enqueue(item); g_warm_rps++;
+            if (!sk.merged) hybrid_prefetch(&k, vs, fs);   // 这对的随包拉取基础管线也先取好：不在清单里的新状态首遇时直接用拉取管线画（nvn_hybrid.inc）
         }
     }
 }
@@ -12339,7 +12406,16 @@ static int sh_release(NvShader *o) {
     o->skel = 1;
     return 1;
 }
+// 预热后放库默认只在 iOS 做（D-92BW 是 iPad 宿主低区耗尽闪退的修法）。Mac 不放：库段是文件映射，内存吃紧时系统可直接丢掉、不进压缩；放掉后游戏首次用到
+//   要在提交线程上 shader_build 补回，补回里 newFunctionWithName:constantValues: 是同步特化编译（11-25 一款动作冒险游戏：缓存热时预热 28 s 就做完、
+//   2 万多个着色器放掉，进游戏补回 925 次共 8.8 s，入水那一帧补回 75 次 945 ms；不放时程序足迹只差约 0.1–0.2 GB）。DM_NVN_SH_RELEASE=1 / 0 强制放 / 不放
+static int g_sh_rel = -1;   // 单测置回 -1 重读
+static int sh_release_on(void) {
+    if (g_sh_rel < 0) { const char *e = getenv("DM_NVN_SH_RELEASE"); g_sh_rel = e && *e ? atoi(e) > 0 : TARGET_OS_IPHONE; }
+    return g_sh_rel;
+}
 static void sh_release_unused(void) {
+    if (!sh_release_on()) { MLOG("shader libraries after the prewarm: kept (released only on iOS by default; DM_NVN_SH_RELEASE=1 releases them here too)"); return; }
     os_unfair_lock_lock(&g_shader_lock); NSArray<NvShader *> *all = g_shcache.allValues; os_unfair_lock_unlock(&g_shader_lock);
     uint64_t live0 = atomic_load(&g_lp_hi_live), n = 0;
     @autoreleasepool {
@@ -12357,6 +12433,8 @@ static void warm_finish(void) {
     shader_load_stats();
     sh_release_unused();
     if (g_warm_mps) MLOG("pipeline prewarm: %llu task / mesh pipelines built (M lines)", (unsigned long long)g_warm_mps);
+    if (atomic_load(&g_hy_pre_n)) MLOG("pipeline prewarm: package pulling bases looked up for %llu shader pairs, %llu found (%.1f ms in all, on the prewarm workers)",
+                                       (unsigned long long)atomic_load(&g_hy_pre_n), (unsigned long long)atomic_load(&g_hy_pre_hit), atomic_load(&g_hy_pre_ns) / 1e6);
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu; not in the library yet (compiled at their first use) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale, (unsigned long long)atomic_load(&g_cold_skips));
     if (g_warm_rf_cand) { uint64_t rf[DM_RF_STATS]; dm_shader_refresh_stats(rf);   // D-NJC8：与「别的游戏版本」分开数（原先都算进那一项）

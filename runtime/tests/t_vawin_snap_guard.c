@@ -6,6 +6,7 @@
 //   → 两块都有部分不在本局窗口里，合并后护栏 = [0x7000000000, 0x7180000000) 共 6144 MB
 //   模式 A（恢复）：构造后护栏两端都占着；模拟 GC 往护栏里保留落不进去；恢复局起宿主前 → 窗口 = 快照窗口、命令记录区 = 快照值
 //   模式 B（有快照、普通局）：构造后护栏占着；起宿主前 → 护栏放掉（还给宿主），窗口不动
+//     GC 上限在 main 开头按护栏占着时的低区选（D-6QWZ：只量到 1447 MB、落「不设」），放掉护栏后要重选一次
 //   模式 C（反证：没有快照 = 改前行为）：构造后 0x70c0000000 空着，模拟 GC 落进去；恢复 → 原址占不到，窗口退回 0x7180000000
 #include "../src/native.h"
 #include <sys/mman.h>
@@ -25,6 +26,8 @@ int s2a_snap_layout_of(const char *gid, uint64_t *wb, uint64_t *ws, uint64_t *cb
     (void)gid; *wb = *ws = *cb = *cl = 0; if (mode() == 'C') return -1;
     *wb = SWB; *ws = SWS; *cb = SCB; *cl = SCL; return 0; }
 static int bad;
+static int g_reapply;   // GC 上限重选（gclimit.c s2a_gc_limit_reapply，vawin.c 按名 dlsym 取）的调用次数
+__attribute__((used, visibility("default"))) void s2a_gc_limit_reapply(void) { g_reapply++; }
 static void eq(uint64_t got, uint64_t want, const char *what) { printf("%s [%c] %s：%#llx（期望 %#llx）\n", got == want ? "✓" : "✗", mode(), what, (unsigned long long)got, (unsigned long long)want); if (got != want) bad++; }
 static int taken(uint64_t a) { void *p = mmap((void *)a, 16384, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); int t = p != (void *)a; if (p != MAP_FAILED) munmap(p, 16384); return t; }
 int main(void) {
@@ -37,7 +40,8 @@ int main(void) {
     if (m != 'B') { g_restoring = 1; s2a_window_reserve_late(); s2a_window_get(&wb, &ws); s2a_snap_arena_get(&cb, &cu, &cv);
         if (m == 'A') { eq(wb, SWB, "恢复：窗口基址 = 快照"); eq(ws, SWS, "恢复：窗口长度 = 快照"); eq(cb, SCB, "恢复：命令记录区 = 快照"); eq(s2a_snap_arena_len(), SCL, "恢复：命令记录区 + 虚拟池区长"); }
         else { eq(wb, 0x7180000000ull, "反证：原址占不到，窗口退回"); eq(ws, 59392 * MB, "反证：窗口长度退回"); } }
-    else { s2a_window_reserve_late(); s2a_window_get(&wb, &ws);
+    else { int r0 = g_reapply; s2a_window_reserve_late(); s2a_window_get(&wb, &ws);
+        eq((uint64_t)(g_reapply - r0), 1, "普通局：放掉护栏后 GC 上限按现在的低区重选一次（构造期是护栏占着时选的）");
         eq(wb, 0x7180000000ull, "普通局：窗口不动"); eq(ws, 59392 * MB, "普通局：窗口长度不动");
         eq((uint64_t)taken(SCB), 0, "普通局：护栏底已放"); eq((uint64_t)taken(0x7180000000ull - 16384), 0, "普通局：护栏顶已放"); }
     printf("%s t_vawin_snap_guard [%c]：%d 处不符\n", bad ? "✗" : "✓", m, bad); return bad != 0;

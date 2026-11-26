@@ -89,8 +89,25 @@ int main(void) {
         pthread_mutex_lock(&g_pp_mu); g_pp[4].ps = real; g_pp[4].done = 1; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
         late = 0; ps = pso_pend_take(&k5, &late, 0);
         VERIFY(ps == real && !late, "⑥b 编完后不能跳的绘制取到那份管线");
+
+        // ⑦ 首遇跳过先看本帧等待预算（11-25 入水闪白：一上来就跳，画在每帧重画的中间目标上，物体闪白一两帧）：管线在后台编、本帧预算还有 → 不跳（交给 pso_pend_take 有界等）；
+        //    预算用完 → 跳；下一帧预算重置 → 又不跳。没有颜色 / 深度目标、着色器不写存储，所以前面几条「能不能跳」的规则都放行，只剩预算这一条在判
+        //    反证：改前预算还有时也返回 1（一上来就跳）
+        setenv("DM_NVN_PSO_FRAME_MS", "100", 1); g_pso_frame_ms = -1; atomic_fetch_add(&g_cur_frame, 1);
+        REQUIRE(R.rt.n == 0 && !R.rt.depth && first_skip_on());
+        pso_key k6; memset(&k6, 0x66, sizeof k6);
+        pthread_mutex_lock(&g_pp_mu); g_pp[5].k = k6; g_pp[5].ps = nil; g_pp[5].done = 0; g_pp[5].late = 0; g_pp[5].used = 1; pthread_mutex_unlock(&g_pp_mu);
+        g_first_skipped = 0;
+        VERIFY(first_skip_ok(&k6, NULL, NULL) == 0 && !g_first_skipped, "⑦ 后台在编、本帧预算还有：不跳，先等");
+        late = 0; ps = pso_pend_take(&k6, &late, 1);   // 等满本帧预算（约 100 ms）
+        VERIFY(!ps && late == 2, "⑦ 等满本帧预算仍没编完：预算跳过（类 %d）", late);
+        VERIFY(first_skip_ok(&k6, NULL, NULL) == 1 && g_first_skipped, "⑦ 本帧预算已尽：跳过");
+        atomic_fetch_add(&g_cur_frame, 1); g_first_skipped = 0;
+        VERIFY(first_skip_ok(&k6, NULL, NULL) == 0 && !g_first_skipped, "⑦ 下一帧预算重置：又先等、不跳");
+        pthread_mutex_lock(&g_pp_mu); g_pp[5].ps = real; g_pp[5].done = 1; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
+        VERIFY(first_skip_ok(&k6, NULL, NULL) == 0, "⑦ 后台已编完：不跳（直接取）");
     }
     if (failures) { printf("✗ t_nvn_smg3_stall：%u / %u 项不过\n", failures, checks); return 1; }
-    printf("✓ t_nvn_smg3_stall：%u 项全过（立方体→立方体数组视图、后台管线有界等待）\n", checks);
+    printf("✓ t_nvn_smg3_stall：%u 项全过（立方体→立方体数组视图、后台管线有界等待、首遇跳过先用本帧预算等）\n", checks);
     return 0;
 }

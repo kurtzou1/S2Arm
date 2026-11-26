@@ -367,13 +367,16 @@ static int unprotect_span_pages(range_t *r, uintptr_t first, uintptr_t last) {
         uint8_t st = atomic_load(&r->state[k]);
         if (st == PG_PROT) { if (!atomic_compare_exchange_strong(&r->state[k], &st, PG_BUSY)) continue; }
         else if (st == PG_NONE) { if (!atomic_compare_exchange_strong(&r->state[k], &st, PG_BUSY_WRITABLE)) continue; }
-        else if (!busy_wait(r, k)) {   // 别人正在改且等超时：把已认领的页按认领前状态回退，不能留下永久 BUSY
-            for (uintptr_t j = first; j < k; j++) {
-                uint8_t js = atomic_load(&r->state[j]);
-                if (js == PG_BUSY) atomic_store(&r->state[j], PG_PROT);
-                else if (js == PG_BUSY_WRITABLE) atomic_store(&r->state[j], PG_NONE);
+        else {
+            if (!busy_wait(r, k)) {   // 别人正在改且等超时：把已认领的页按认领前状态回退，不能留下永久 BUSY
+                for (uintptr_t j = first; j < k; j++) {
+                    uint8_t js = atomic_load(&r->state[j]);
+                    if (js == PG_BUSY) atomic_store(&r->state[j], PG_PROT);
+                    else if (js == PG_BUSY_WRITABLE) atomic_store(&r->state[j], PG_NONE);
+                }
+                return 0;
             }
-            return 0;
+            continue;   // 等完要回头重判并认领这一页：直接往下走它就没被认领，别的线程可再认领它，后面的整段 mprotect / 发布 / 回退会盖掉别人的认领
         }
         k++;
     }

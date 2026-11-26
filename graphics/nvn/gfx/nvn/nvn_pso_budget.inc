@@ -22,6 +22,8 @@
 //      扫不到（单测 / 回放不链原生层）= 不设地址额度
 //      只在 iOS / iPadOS 上设（#2218，11-25）：低区耗尽而崩只在 iPhone / iPad 上出现（#2020）；Mac 上低区被 Metal 内部与 malloc 吃到几十 MB 是常态，
 //      游戏照常运行（M1 Pro 时之笛不设额度一局低区 21 MB 正常退出），设了反而预热停在 70%、读区域那帧多现建 80 条、长约 470 ms
+//   ⑥ 混合管线的拉取基础管线（g_pbase，nvn_hybrid.inc）也是活着的管线：计入常驻条数，超额时与三张表一起按最久没用先放（在 g_pbase_lock 下）；
+//      放掉的那一对下次首遇照旧在后台重建。预热时 / 登记时先取基础管线到预热线就停（pb_prefetch_full），不为先取占掉游戏首遇要用的额度
 // 由 nvn_mtl.m 在 g_cps / g_cps_se 之后包含；渲染那半在 pso_get_vs_ptr 之前已前向声明（pb_touch_r / pb_tick）
 #define PB_KEEP_FRAMES 240   // 这么多帧内用过的不放（约 4–8 秒；在途命令缓冲最多几帧）
 #define PB_LOW_PCT 85        // 超额时放到额度的这个比例
@@ -36,6 +38,9 @@ static const struct { const char *prefix; uint32_t budget; } pb_table[] = {
 };
 static uint32_t g_pb_budget_v; static int g_pb_budget_init, g_pb_env;
 static _Atomic uint32_t g_pb_live_pub, g_pb_va, g_pb_peak; static _Atomic uint64_t g_pb_unclaimed, g_pb_va_holes;   // g_pb_va：地址额度，0 = 不设；g_pb_peak：活着条数的峰值
+// ⑥ g_pb_bases = g_pbase 里真管线的条数；g_pb_bases_pub = 发布 g_pb_live_pub 那一刻的 g_pb_bases。发布之后新放的（第一帧之前预热工人就在放）要另外补上
+static _Atomic uint32_t g_pb_bases, g_pb_bases_pub;
+static uint32_t pb_bases_since_pub(void) { uint32_t nb = atomic_load(&g_pb_bases), nb0 = atomic_load(&g_pb_bases_pub); return nb > nb0 ? nb - nb0 : 0; }
 static void (*g_pb_holes_fn)(uint64_t *total, uint64_t *largest);   // 原生层 s2a_low_holes（runtime/src/vawin.c），运行时取
 static int g_pb_holes_tried;   // 取过了（取不到 = 不设地址额度；单测直接置位、自己给桩）
 // 地址额度（⑤）：由一次扫描的空洞 T 与此刻活着的条数算
@@ -48,7 +53,7 @@ static uint32_t pb_va_from(uint64_t holes, uint64_t alive) {
 static void pb_va_sample(void) {
     if (!g_pb_holes_fn) return;
     uint64_t t = 0, l = 0; g_pb_holes_fn(&t, &l);
-    uint32_t va = pb_va_from(t, (uint64_t)atomic_load(&g_pb_live_pub) + atomic_load(&g_pb_unclaimed));
+    uint32_t va = pb_va_from(t, (uint64_t)atomic_load(&g_pb_live_pub) + atomic_load(&g_pb_unclaimed) + pb_bases_since_pub());
     uint32_t old = atomic_exchange(&g_pb_va, va); atomic_store(&g_pb_va_holes, t);
     if (!old) MLOG("pipeline budget: host low addresses %llu MB free (largest %llu MB) → room for %u pipelines resident in all (%llu KB each, %llu MB kept for the rest)",
                    (unsigned long long)(t >> 20), (unsigned long long)(l >> 20), va, (unsigned long long)(PB_VA_PER >> 10), (unsigned long long)(PB_VA_RESERVE >> 20));
@@ -93,7 +98,17 @@ static void pb_touch_r(const pso_key *k) { pb_touch(&g_pb_use_r, k); }
 static void pb_built_r(const pso_key *k) { pb_built(&g_pb_use_r, &g_pb_gone_r, k); }
 static uint32_t g_pb_cfail;   // 计算表里的失败记录（NSNull）条数：不是管线、不占额度（pb_cfail_note，失败记录永不删）
 static void pb_cfail_note(void) { g_pb_cfail++; }
-static uint32_t pb_live(void) { return g_pso.n + g_cps.n + g_cps_se.n - g_pb_cfail; }
+// ⑥ g_pbase 的用到帧 / 放掉过的键（g_pbase_lock 下）；g_pb_bases = 里面真管线的条数（不含 NSNull 占位 / 失败）
+static nvn_hmap g_pb_use_b = {.klen = sizeof(pbase_key)}, g_pb_gone_b = {.klen = sizeof(pbase_key)};
+_Static_assert(sizeof(pbase_key) <= sizeof(pso_key) && sizeof(cps_se_key) <= sizeof(pso_key), "pb_tick copies keys into pso_key-sized slots");
+static void pb_base_put_locked(const pbase_key *bk, id ps) {
+    id old = hm_get_id(&g_pbase, bk);
+    if (!old || old == NSNull.null) atomic_fetch_add(&g_pb_bases, 1);
+    hm_put_id(&g_pbase, bk, ps); pb_built(&g_pb_use_b, &g_pb_gone_b, bk);
+}
+static void pb_base_touch_locked(const pbase_key *bk) { pb_touch(&g_pb_use_b, bk); }
+static uint32_t pb_live(void) { return g_pso.n + g_cps.n + g_cps_se.n - g_pb_cfail + atomic_load(&g_pb_bases); }
+static void pb_live_publish(uint32_t live) { atomic_store(&g_pb_bases_pub, atomic_load(&g_pb_bases)); atomic_store(&g_pb_live_pub, live); }
 // 一张表里挑可放的：最后用到早于 now − PB_KEEP_FRAMES 的（没记过用到的也算：只当 0 帧），按帧从旧到新
 typedef struct { uint64_t at; nvn_hmap *tab, *use, *gone; uint32_t slot; } pb_cand;
 static int pb_cand_cmp(const void *a, const void *b) { uint64_t x = ((const pb_cand *)a)->at, y = ((const pb_cand *)b)->at; return x < y ? -1 : x > y; }
@@ -111,11 +126,13 @@ static void pb_tick(void) {
     uint64_t now = atomic_load(&g_cur_frame);
     if (now == g_pb_frame) return;
     g_pb_frame = now;
-    uint32_t budget = pb_budget(), live = pb_live(); atomic_store(&g_pb_live_pub, live);
+    uint32_t budget = pb_budget(), live = pb_live(); pb_live_publish(live);
     if (!budget || live <= budget) return;
     g_pb_ticks_over++;
     uint32_t low = (uint32_t)((uint64_t)budget * PB_LOW_PCT / 100), drop = live - low;
     pb_cand *v = NULL; size_t n = 0, cap = 0;
+    os_unfair_lock_lock(&g_pbase_lock);   // ⑥：后台会往 g_pbase 里放（会挪槽号），挑与放都在锁里
+    pb_collect(&g_pbase, &g_pb_use_b, &g_pb_gone_b, now, &v, &n, &cap);
     pb_collect(&g_pso, &g_pb_use_r, &g_pb_gone_r, now, &v, &n, &cap);
     pb_collect(&g_cps, &g_pb_use_c, &g_pb_gone_c, now, &v, &n, &cap);
     pb_collect(&g_cps_se, &g_pb_use_s, &g_pb_gone_s, now, &v, &n, &cap);
@@ -128,24 +145,35 @@ static void pb_tick(void) {
         void *obj = nvn_hm_del(v[i].tab, k); nvn_hm_del(v[i].use, k);
         if (!obj) continue;
         nvn_hm_put(v[i].gone, k, (void *)1);
+        if (v[i].tab == &g_pbase) atomic_fetch_sub(&g_pb_bases, 1);
         defer_obj_release((__bridge_transfer id)obj);   // 表里持的那一份：等 GPU 用完再放（在途命令缓冲可能还引用它）
         g_pb_evicted++;
     }
+    os_unfair_lock_unlock(&g_pbase_lock);
     free(keys); free(v);
-    uint32_t after = pb_live(); atomic_store(&g_pb_live_pub, after);
+    uint32_t after = pb_live(); pb_live_publish(after);
     if (g_pb_ticks_over <= 8 || !(g_pb_ticks_over & (g_pb_ticks_over - 1)))
         MLOG("pipeline budget: %u resident over the budget %u at frame %llu: released %zu not used in the last %d frames (%zu could be), now %u; so far released %llu, built again after release %llu, prewarm lines stopped by the budget %llu",
              live, budget, (unsigned long long)now, take, PB_KEEP_FRAMES, n, after, (unsigned long long)g_pb_evicted, (unsigned long long)g_pb_rebuilt, (unsigned long long)atomic_load(&g_pb_warm_stopped));
     if (take < drop) { static int warned; if (!warned++) MLOG("【黄】 pipeline budget: %u resident, all but %zu used in the last %d frames: nothing more to release (the game uses more pipelines at once than the budget)", after, n, PB_KEEP_FRAMES); }
 }
 // 预热线程：再建一条会不会超过预热线（常驻 + 预热已建还没被领走的）
+static int pb_at_warm_line(uint64_t built_unclaimed, uint32_t *budget, uint64_t *est) {
+    // 常驻（提交线程每帧发布一次；第一帧之前没发布过）+ 预热已建未领 + 发布之后新放进 g_pbase 的基础管线（预热工人在第一帧之前就在放，不补就漏算）
+    *budget = pb_budget(); *est = atomic_load(&g_pb_live_pub) + built_unclaimed + pb_bases_since_pub();
+    return *budget && *est * 100 >= (uint64_t)*budget * PB_WARM_PCT;
+}
 static int pb_warm_full(uint64_t built_unclaimed) {
     atomic_store(&g_pb_unclaimed, built_unclaimed);   // 地址额度按活着的条数算（⑤）：预热已建未领的也活着
-    uint32_t budget = pb_budget();
-    if (!budget) return 0;
-    uint64_t est = atomic_load(&g_pb_live_pub) + built_unclaimed;
-    if (est * 100 < (uint64_t)budget * PB_WARM_PCT) return 0;
+    uint32_t budget; uint64_t est;
+    if (!pb_at_warm_line(built_unclaimed, &budget, &est)) return 0;
     if (!atomic_fetch_add(&g_pb_warm_stopped, 1)) MLOG("pipeline budget: the prewarm stops at %llu pipelines (%d%% of the budget %u%s); the rest are built at their first use", (unsigned long long)est, PB_WARM_PCT, budget,
                                                         budget == atomic_load(&g_pb_va) && !g_pb_env ? ", from the host low addresses" : "");
     return 1;
+}
+// ⑥ 先取拉取基础管线（hybrid_prefetch：预热工人 / 登记时）：到预热线就不取。同 pb_warm_full 的线，但不记「预热停了几行」
+static int pb_prefetch_full(void) {
+    uint32_t budget; uint64_t est; int full = pb_at_warm_line((g_warm_rps + g_warm_cps) - (g_warm_claim_rps + g_warm_claim_cps), &budget, &est);
+    if (full) { static _Atomic int said; if (!atomic_exchange(&said, 1)) MLOG("pipeline budget: package pulling bases are no longer looked up ahead at %llu pipelines (%d%% of the budget %u); those pairs build their base at their first use", (unsigned long long)est, PB_WARM_PCT, budget); }
+    return full;
 }

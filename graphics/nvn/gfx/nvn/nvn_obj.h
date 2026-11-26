@@ -374,6 +374,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 void nvn_be_reg_samp(int id, const samp_par *p);
 void nvn_be_prog_release(prog_t *p);
 void nvn_be_shader_prefetch(const uint8_t key[8]);   // S2Arm: load a stage's shader library in the background (ProgramSetShaders), off the frame path
+void nvn_be_pair_prefetch(const uint8_t (*keys)[8], int n);   // S2Arm: look up the program's vertex / fragment pair's package pulling base in the background (ProgramSetShaders)
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
 void nvn_serial_floor(uint64_t floor);   // 新序号从 floor 之后编（帧回放：避开录像里的序号）

@@ -66,6 +66,8 @@ typedef struct { const void *vf, *ff; uint32_t samples, a2c, a21, topo; } pbase_
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};   // → id<MTLRenderPipelineState>，失败 NSNull
 static nvn_hmap g_pso_hy = {.klen = sizeof(pso_key)};   // 特化好的拉取管线，按它顶替的精确管线的键（提交线程）
 static os_unfair_lock g_pbase_lock = OS_UNFAIR_LOCK_INIT;
+// 基础管线也是活着的管线，算进管线额度（nvn_pso_budget.inc ⑥）：放进 g_pbase 一律经 pb_base_put_locked、用到经 pb_base_touch_locked（都在 g_pbase_lock 下）
+static void pb_base_put_locked(const pbase_key *bk, id ps); static void pb_base_touch_locked(const pbase_key *bk);
 static id g_hy_comp;   // Metal 4 编译器（m4_compiler）
 static int g_pso_pull;   // pso_get_ 这次返回的是拉取管线（绘制改绑布局块，不做 CPU 顶点转换）
 static _Atomic uint64_t g_hy_draws, g_hy_made, g_hy_none, g_hy_kicked, g_hy_bases, g_hy_base_fail, g_hy_spec_ns;
@@ -73,7 +75,8 @@ static _Atomic uint64_t g_hy_draws, g_hy_made, g_hy_none, g_hy_kicked, g_hy_base
 //   键 = sha256("<顶点键>\t<片元键>\t<顶点入口>") 前 20 字节十六进制（顶点 / 片元键带 _b，与出包 bkey 同一串）。归档只查不编（MTL4Archive 的建管线就是按描述查，
 //   查不中返回 nil，同 FailOnBinaryArchiveMiss），查不中（别的 GPU / 系统大版本、多重采样 / alpha-to-coverage 这类离线不出的描述、近平面 0 模式的 main0_z）照旧后台建。
 //   打开的归档留着（Metal 映射整份文件；一对只开一次，本局真用到的对才开）。DM_PSO_ARCHIVE=0 连随包的一起关（pso_archive.h par_open_dir）
-//   iPhone 包逐对 lzfse 压成 <名>.mtl4archive.lzfse（Mac 包原样）：首遇当场解这一份（hybrid_pkg_open）。开局后台先查中一次随包的预热对（hybrid_pkg_warm）
+//   iPhone 包逐对 lzfse 压成 <名>.mtl4archive.lzfse（Mac 包原样）：首遇时在后台队列解这一份（hybrid_pkg_open）。开局后台先查中一次随包的预热对（hybrid_pkg_warm）
+//   查随包归档在后台队列（hybrid_q，同现建）：这一对的第一次首遇照旧跳过 / 等精确管线，之后的首遇用上拉取管线
 static _Atomic uint64_t g_hy_pkg_hit, g_hy_pkg_nofile, g_hy_pkg_miss, g_hy_pkg_unz, g_hy_pkg_unz_ns, g_hy_pkg_warm_ns, g_hy_pkg_warm;   // g_hy_pkg_warm：0 没做、1 查中、2 没查中
 static NSMutableArray *g_hy_pkg_open;   // g_pbase_lock
 static NSString *hybrid_pkg_name(NvShader *vs, NvShader *fs) {
@@ -143,7 +146,46 @@ static id pull_desc4(MTLRenderPipelineDescriptor *d, NvShader *vs, NvShader *fs,
 static int hybrid_fits(MTLRenderPipelineDescriptor *d, NvShader *vs, NvShader *fs) {
     return d && fs && fs->plib && d.rasterizationEnabled && d.fragmentFunction == fs->fn && (d.vertexFunction == vs->fn || (vs->vfn && d.vertexFunction == vs->vfn)) && pull_fn(vs);
 }
+// 基底键：这对着色器 + 采样数 / a2c / a21 / 拓扑类（颜色状态不进键，按本笔特化）
+static pbase_key pbase_key_of(MTLRenderPipelineDescriptor *d, NvShader *vs, NvShader *fs) {
+    pbase_key bk; memset(&bk, 0, sizeof bk); bk.vf = (__bridge const void *)vs; bk.ff = (__bridge const void *)fs;
+    bk.samples = (uint32_t)d.rasterSampleCount; bk.a2c = d.alphaToCoverageEnabled; bk.a21 = d.alphaToOneEnabled; bk.topo = (uint32_t)d.inputPrimitiveTopology;
+    return bk;
+}
 // 顶替 k 的拉取管线：特化过就直接给；基础管线在 → 按本笔颜色状态特化（提交线程，不进着色器编译）；不在 → 后台建、这次给 nil（照旧等）
+// 预热时先取随包拉取基础管线（预热工人调，warm_task_ 的绘制行）：这对着色器、这一种采样 / 拓扑类的基础管线随包有就取进 g_pbase，首遇直接按本笔特化，
+//   不跳过也不等（查随包归档要经编译服务特化函数，几十到几百毫秒，放在首遇里不是卡就是跳过：11-25 一款动作冒险游戏查询挪到后台后约 800 次首遇改成跳过，
+//   跳过的绘制多 8 倍，角色闪白）。只查随包、不现建（没有的首遇时照旧后台建）；同一把基底键只查一次。条件同 pso_get_ 走混合管线的那一笔
+static NSMutableSet<NSData *> *g_hy_pre_tried;   // g_pbase_lock
+static _Atomic uint64_t g_hy_pre_n, g_hy_pre_hit, g_hy_pre_ns;   // 预热里查了几把基底键 / 查中几把 / 查询耗时合计
+static int hybrid_prefetch(const pso_key *k, NvShader *vs, NvShader *fs) {   // → 1 查中、0 没查中、-1 没查（已有 / 查过 / 不走混合管线）
+    if (!vs || !fs || !vs->has_pull || k->fc || k->fsfn || !hybrid_on()) return -1;
+    if (pb_prefetch_full()) return -1;   // 管线额度到预热线：不再先取（不占额度），首遇时照旧在后台建
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
+        if (!hybrid_fits(d, vs, fs)) return -1;
+        pbase_key bk = pbase_key_of(d, vs, fs);
+        NSData *tk = [NSData dataWithBytes:&bk length:sizeof bk];
+        os_unfair_lock_lock(&g_pbase_lock);
+        int skip = hm_get_id(&g_pbase, &bk) != nil || [g_hy_pre_tried containsObject:tk];
+        if (!skip) { if (!g_hy_pre_tried) g_hy_pre_tried = [NSMutableSet set]; [g_hy_pre_tried addObject:tk]; }
+        os_unfair_lock_unlock(&g_pbase_lock);
+        if (skip) return -1;
+        uint64_t t0 = bp_now(); id<MTLRenderPipelineState> pb = hybrid_pkg_base(pull_desc4(d, vs, fs, 1), vs, fs);
+        atomic_fetch_add(&g_hy_pre_n, 1); atomic_fetch_add(&g_hy_pre_ns, bp_now() - t0);
+        if (!pb) return 0;
+        atomic_fetch_add(&g_hy_pre_hit, 1);
+        os_unfair_lock_lock(&g_pbase_lock); if (!hm_get_id(&g_pbase, &bk)) pb_base_put_locked(&bk, pb); os_unfair_lock_unlock(&g_pbase_lock);
+        return 1;
+    }
+    return -1;
+}
+// 拉取基础管线的后台队列（串行、utility）：查随包归档与现建都在这里；单测 dispatch_sync 一个空块等它做完
+static dispatch_queue_t hybrid_q(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.hybrid", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+    return q;
+}
 static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) {
     __unsafe_unretained id h = hm_get_id(&g_pso_hy, k);
     if (h) return h == (id)NSNull.null ? nil : h;   // NSNull：特化失败过，这个键不再试
@@ -153,20 +195,17 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
         if (!hybrid_fits(d, vs, fs)) return nil;
         // 基底键认着色器对象（D-92BW）：原先认函数指针，预热后放掉的着色器补回后函数是新对象，旧键不再命中；放掉的旧函数地址还可能被别的新函数占去、撞出错的基底。
         //   着色器对象常驻：同一对着色器 → 同一拉取入口（pull_fn 按 vs 的键与入口名载）与同一片元主入口
-        pbase_key bk; memset(&bk, 0, sizeof bk); bk.vf = (__bridge const void *)vs; bk.ff = (__bridge const void *)fs;
-        bk.samples = (uint32_t)d.rasterSampleCount; bk.a2c = d.alphaToCoverageEnabled; bk.a21 = d.alphaToOneEnabled; bk.topo = (uint32_t)d.inputPrimitiveTopology;
-        os_unfair_lock_lock(&g_pbase_lock); id base = hm_get_id(&g_pbase, &bk); if (!base) hm_put_id(&g_pbase, &bk, NSNull.null); os_unfair_lock_unlock(&g_pbase_lock);
+        pbase_key bk = pbase_key_of(d, vs, fs);
+        os_unfair_lock_lock(&g_pbase_lock); id base = hm_get_id(&g_pbase, &bk); if (!base) hm_put_id(&g_pbase, &bk, NSNull.null); else if (base != NSNull.null) pb_base_touch_locked(&bk); os_unfair_lock_unlock(&g_pbase_lock);
         id bd = base ? nil : pull_desc4(d, vs, fs, 1);
-        if (!base) {   // 第一次：先查随包归档，命中就地用（下面照常按本笔特化）
-            id<MTLRenderPipelineState> pb = hybrid_pkg_base(bd, vs, fs);
-            if (pb) { os_unfair_lock_lock(&g_pbase_lock); hm_put_id(&g_pbase, &bk, pb); os_unfair_lock_unlock(&g_pbase_lock); base = pb; }
-        }
-        if (!base) {   // 随包没有：后台建基础管线（占位 NSNull 防重复踢；建成换成管线）
+        // 第一次：查随包归档、查不中就现建，都在后台队列（hybrid_q）做，这一笔照旧给 nil（首遇跳过 / 等精确管线）；占位 NSNull 防重复踢，好了换成管线。
+        //   查随包归档也不放提交线程：查中了 Metal 4 归档建管线仍要经编译服务特化一次函数（AGX Metal4To3 转换 createFunction → MTLCompilerScheduler 同步请求），
+        //   内存吃紧时单次 40–770 ms、线程 CPU < 2 ms（11-25 一款动作冒险游戏入水那一下：同一帧踩到十几对，整帧 0.8–1.3 s；挪到后台后那一帧 69 ms）
+        if (!base) {
             g_hy_kicked++;
-            static dispatch_queue_t q; static dispatch_once_t once;
-            dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.hybrid", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
-            dispatch_async(q, ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = [g_hy_comp newRenderPipelineStateWithDescriptor:bd compilerTaskOptions:nil error:&e];
-                if (ps) { os_unfair_lock_lock(&g_pbase_lock); hm_put_id(&g_pbase, &bk, ps); os_unfair_lock_unlock(&g_pbase_lock); g_hy_bases++; }
+            dispatch_async(hybrid_q(), ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = hybrid_pkg_base(bd, vs, fs);
+                if (!ps) ps = [g_hy_comp newRenderPipelineStateWithDescriptor:bd compilerTaskOptions:nil error:&e];
+                if (ps) { os_unfair_lock_lock(&g_pbase_lock); pb_base_put_locked(&bk, ps); os_unfair_lock_unlock(&g_pbase_lock); g_hy_bases++; }
                 else { uint64_t n = ++g_hy_base_fail; if (n <= 8) MLOG("【红】 hybrid pipelines: pulling base for vertex %s fragment %s failed: %s (that pair's first uses wait)", vs->key, fs->key, e.localizedDescription.UTF8String); } } });
             g_hy_none++; return nil;
         }

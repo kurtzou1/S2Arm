@@ -12,12 +12,14 @@
 //      精确管线（建时 RGBA32F）画对齐的 RGBA32F 副本。片元输出插值后的顶点属性：4×4 目标的像素 (1, 1) 中心在 NDC (-0.25, 0.25)，
 //      读回 half 逐位 = b400 3400 3400 3c00（-0.25, 0.25, 0.25, 1），两条管线相同
 //   ⑥ 随包拉取基础管线（hybrid_pkg_base）：本机 metal-tt 按设备描述出的归档放在 <映射表同级>/pipelines/p<sha256("<顶点键>\t<片元键>\tmain0") 前 40 位>.mtl4archive（shasum 现算）：
-//      有这一对 → 第一次首遇就拿到拉取管线、不后台踢、随包命中 +1；包里没有 → 照旧后台踢 1、「包里没有」+1；文件名对但内容是别的片元的 → 照旧后台踢 1、「有文件查不中」+1
+//      查随包归档在后台队列（hybrid_q），三种都是第一次首遇拿不到拉取管线、后台踢 1；等队列做完：有这一对 → 随包命中 +1，同一对换画布格式再首遇拿到拉取管线；
+//      包里没有 → 「包里没有」+1；文件名对但内容是别的片元的 → 「有文件查不中」+1
 //   ⑦ iPhone 包的逐对 lzfse（hybrid_pkg_open）：归档用系统 compression_tool -encode -a lzfse 压成 <名>.mtl4archive.lzfse、不放原样：
-//      只有 .lzfse → 第一次首遇就拿到拉取管线、不后台踢、随包命中 +1、「解压」+1、解压耗时 > 0，临时目录里没有留下 s2a_pb_<进程号>_* 解压副本；
-//      .lzfse 截掉后一半 → 拉取管线 0、后台踢 1、「有文件查不中」+1、「解压」+0、不崩，标准错误里一行【黄】点名这对顶点 / 片元键；
+//      只有 .lzfse → 第一次首遇拉取管线 0、后台踢 1；等队列做完随包命中 +1、「解压」+1、解压耗时 > 0，临时目录里没有留下 s2a_pb_<进程号>_* 解压副本，换画布格式再首遇拿到拉取管线；
+//      .lzfse 截掉后一半 → 拉取管线 0、后台踢 1、等队列做完「有文件查不中」+1、「解压」+0、不崩，标准错误里一行【黄】点名这对顶点 / 片元键；
 //      首查预热（hybrid_pkg_warm，测试里直接调）：随包 s2a_warm.metallib + 别的片元的归档冒名 → 「没查中」（2）、一行【黄】；换成本对小库按同一描述出、压过的归档 →
 //      「查中」（1）、耗时 > 0、不计入「解压」
+//   ⑧ 预热时先取（hybrid_prefetch）：随包有的一对先取进基底表，首遇直接拿到拉取管线、不后台踢；包里没有的一对首遇照旧后台踢 1；同一对第二次先取不再查
 //   反证：DM_PSO_HYBRID=0（子进程）→ ② 拿到的是精确管线、g_pso_pull 0
 //   ① ⑥ ⑦ 的首遇经 get_held 取：精确那条闸到这次首遇踢了基础管线或取完。反证（11-24 本机）：⑥ ⑦ 改回直接 pso_get_，并在生产 pso_get_ 踢出精确编译与再查状态之间
 //      临时插 100 ms → 5 项红，拉取 / 踢 / 命中全零，与门禁 11-19..11-21 留下的 FAIL 行逐字同形；带 get_held 插 100 / 300 ms 照旧 19 项全过
@@ -81,6 +83,15 @@ static NSString *capture_stderr(void (^fn)(void)) {
     NSString *s = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil] ?: @""; unlink(path); return s;
 }
 // 等后台建好基础管线，兜底 30 秒（原 5 秒：负载高时后台编得慢就假红）；等不到返回 0，调用处判红
+// 等后台队列（hybrid_q：查随包归档、现建基础管线）做完已排的活
+static void hy_drain(void) { dispatch_sync(hybrid_q(), ^{}); }
+// 同一对换一种画布格式（新管线键）再首遇一次：精确那条闸住（同 ②），→ 是否拿到拉取管线
+static int pulled_again(NvProg *p) {
+    uint32_t f0 = g_pass.cfmt[0]; g_pass.cfmt[0] = (uint32_t)MTLPixelFormatRGBA8Unorm;
+    g_pp_test_hold = dispatch_semaphore_create(0); id ps = pso_get_(p, nil); int pulled = ps && g_pso_pull;
+    dispatch_semaphore_signal(g_pp_test_hold); g_pp_test_hold = nil; g_pass.cfmt[0] = f0;
+    return pulled;
+}
 static int wait_bases(uint64_t want) { for (int i = 0; i < 3000 && g_hy_bases < want; i++) usleep(10000); return g_hy_bases >= want; }
 // 首遇取管线，精确那条的后台编译先闸住（g_pp_test_hold），直到这次首遇踢了基础管线（g_hy_kicked 变了：之后它要等精确那条，得放行）或取完返回才放行。
 //   不闸：pso_get_ 踢出精确编译后要再查一次状态，系统着色器缓存热时精确那条在这两步之间就编好（状态 2），混合那条路整条跳过，
@@ -203,15 +214,16 @@ static int run(int hybrid) {
         REQUIRE(pkg_make(vlib, @"main0", flib, @"fz", [g_pkg_dir stringByAppendingPathComponent:pkg_name("aaaaaaaaaaaaaaaa_b", "9999999999999999_b")]));
         id<MTLLibrary> fl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:flib] error:&e]; REQUIRE(fl);
         NvShader *fsb = shader(fl, @"fb", "eeeeeeeeeeeeeeee_b", 1), *fsz = shader(fl, @"fz", "ffffffffffffffff_b", 1), *fsy = shader(fl, @"fy", "9999999999999999_b", 1);
-        NvShader *fss[3] = {fsb, fsz, fsy}; int pulled[3]; uint64_t kicked[3], hit[3], nofile[3], miss[3];
+        NvShader *fss[3] = {fsb, fsz, fsy}; int pulled[3], again = 0; uint64_t kicked[3], hit[3], nofile[3], miss[3];
         for (int i = 0; i < 3; i++) {
             NvProg *p6 = [NvProg new]; p6->sh[0] = vs; p6->sh[1] = fss[i];
-            uint64_t st0[3], st1[3], k0 = g_hy_kicked; mtl_hybrid_pkg_stats(st0);
-            id ps = get_held(p6); pulled[i] = ps && g_pso_pull; mtl_hybrid_pkg_stats(st1);
-            kicked[i] = g_hy_kicked - k0; hit[i] = st1[0] - st0[0]; nofile[i] = st1[1] - st0[1]; miss[i] = st1[2] - st0[2];
+            uint64_t st0[7], st1[7], k0 = g_hy_kicked; mtl_hybrid_pkg_stats(st0);
+            id ps = get_held(p6); pulled[i] = ps && g_pso_pull; kicked[i] = g_hy_kicked - k0; hy_drain(); mtl_hybrid_pkg_stats(st1);
+            hit[i] = st1[0] - st0[0]; nofile[i] = st1[1] - st0[1]; miss[i] = st1[2] - st0[2];
+            if (!i) again = pulled_again(p6);
         }
-        VERIFY(pulled[0] && !kicked[0] && hit[0] == 1 && !nofile[0] && !miss[0], "⑥ 随包有这一对：第一次首遇就拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）、随包命中 +%llu（期望 1）、包里没有 +%llu、有文件查不中 +%llu（期望都 0）",
-               pulled[0], (unsigned long long)kicked[0], (unsigned long long)hit[0], (unsigned long long)nofile[0], (unsigned long long)miss[0]);
+        VERIFY(!pulled[0] && kicked[0] == 1 && hit[0] == 1 && !nofile[0] && !miss[0] && again, "⑥ 随包有这一对：第一次首遇拉取管线 %d（期望 0：后台查）、后台踢 %llu（期望 1）、随包命中 +%llu（期望 1）、换画布格式再首遇拿到拉取管线 %d（期望 1）、包里没有 +%llu、有文件查不中 +%llu（期望都 0）",
+               pulled[0], (unsigned long long)kicked[0], (unsigned long long)hit[0], again, (unsigned long long)nofile[0], (unsigned long long)miss[0]);
         VERIFY(!pulled[1] && kicked[1] == 1 && !hit[1] && nofile[1] == 1 && !miss[1], "⑥ 包里没有这一对：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、包里没有 +%llu（期望 1）、随包命中 +%llu、有文件查不中 +%llu（期望都 0）",
                pulled[1], (unsigned long long)kicked[1], (unsigned long long)nofile[1], (unsigned long long)hit[1], (unsigned long long)miss[1]);
         VERIFY(!pulled[2] && kicked[2] == 1 && !hit[2] && !nofile[2] && miss[2] == 1, "⑥ 文件在、内容是别的片元的：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、有文件查不中 +%llu（期望 1）、随包命中 +%llu、包里没有 +%llu（期望都 0）",
@@ -226,18 +238,33 @@ static int run(int hybrid) {
         NvShader *fsd = shader(fl, @"fd", "dddddddddddddddd_b", 1), *fsc = shader(fl, @"fc", "cccccccccccccccc_b", 1);
         uint64_t s0[7], s1[7], s2[7]; mtl_hybrid_pkg_stats(s0);
         NvProg *pd7 = [NvProg new]; pd7->sh[0] = vs; pd7->sh[1] = fsd;
-        uint64_t kd0 = g_hy_kicked; id psd = get_held(pd7); int pzd = psd && g_pso_pull; uint64_t kzd = g_hy_kicked - kd0; mtl_hybrid_pkg_stats(s1);
-        uint64_t hitd = s1[0] - s0[0], unzd = s1[3] - s0[3], nsd = s1[4] - s0[4];
-        VERIFY(pzd && !kzd && hitd == 1 && unzd == 1 && nsd > 0 && !tmp_left(), "⑦ 只有 .lzfse：第一次首遇就拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）、随包命中 +%llu（期望 1）、解压 +%llu（期望 1）、"
-               "解压耗时 %.3f ms（期望 > 0）、临时目录留下的解压副本 %d 份（期望 0）", pzd, (unsigned long long)kzd, (unsigned long long)hitd, (unsigned long long)unzd, nsd / 1e6, tmp_left());
+        uint64_t kd0 = g_hy_kicked; id psd = get_held(pd7); int pzd = psd && g_pso_pull; uint64_t kzd = g_hy_kicked - kd0; hy_drain(); mtl_hybrid_pkg_stats(s1);
+        uint64_t hitd = s1[0] - s0[0], unzd = s1[3] - s0[3], nsd = s1[4] - s0[4]; int againd = pulled_again(pd7);
+        VERIFY(!pzd && kzd == 1 && hitd == 1 && unzd == 1 && nsd > 0 && !tmp_left() && againd, "⑦ 只有 .lzfse：第一次首遇拉取管线 %d（期望 0：后台查）、后台踢 %llu（期望 1）、随包命中 +%llu（期望 1）、解压 +%llu（期望 1）、"
+               "解压耗时 %.3f ms（期望 > 0）、临时目录留下的解压副本 %d 份（期望 0）、换画布格式再首遇拿到拉取管线 %d（期望 1）", pzd, (unsigned long long)kzd, (unsigned long long)hitd, (unsigned long long)unzd, nsd / 1e6, tmp_left(), againd);
         NvProg *pc7 = [NvProg new]; pc7->sh[0] = vs; pc7->sh[1] = fsc;
         __block int pzc = 0; __block uint64_t kzc = 0;
-        NSString *err = capture_stderr(^{ uint64_t k0 = g_hy_kicked; id ps = get_held(pc7); pzc = ps && g_pso_pull; kzc = g_hy_kicked - k0; });
+        NSString *err = capture_stderr(^{ uint64_t k0 = g_hy_kicked; id ps = get_held(pc7); pzc = ps && g_pso_pull; kzc = g_hy_kicked - k0; hy_drain(); });
         mtl_hybrid_pkg_stats(s2);
         uint64_t missc = s2[2] - s1[2], unzc = s2[3] - s1[3];
         int yellow = [err rangeOfString:@"【黄】 hybrid pipelines: the package's pulling base of vertex aaaaaaaaaaaaaaaa_b fragment cccccccccccccccc_b did not serve"].location != NSNotFound;
         VERIFY(!pzc && kzc == 1 && missc == 1 && !unzc && yellow, "⑦ .lzfse 截断：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、有文件查不中 +%llu（期望 1）、解压 +%llu（期望 0）、【黄】一行点名这对 %d（期望 1）",
                pzc, (unsigned long long)kzc, (unsigned long long)missc, (unsigned long long)unzc, yellow);
+        // ⑧ 预热时先取（hybrid_prefetch，预热工人在绘制行建完精确管线后调）：B8 对（fb，片元键 8888…）随包有；Z8 对（fz，片元键 7777…）包里没有
+        {
+            REQUIRE(pkg_make(vlib, @"main0", flib, @"fb", [g_pkg_dir stringByAppendingPathComponent:pkg_name("aaaaaaaaaaaaaaaa_b", "8888888888888888_b")]));
+            NvShader *f8 = shader(fl, @"fb", "8888888888888888_b", 1), *z8 = shader(fl, @"fz", "7777777777777777_b", 1);
+            pso_key k8, kz; pso_key_fill(&k8, vs, f8, g_pass.cfmt, 0, 0, 1, 0); pso_key_fill(&kz, vs, z8, g_pass.cfmt, 0, 0, 1, 0);
+            uint64_t n0 = g_hy_pre_n, h0 = g_hy_pre_hit;
+            hybrid_prefetch(&k8, vs, f8); hybrid_prefetch(&k8, vs, f8); hybrid_prefetch(&kz, vs, z8);
+            uint64_t n1 = g_hy_pre_n - n0, h1 = g_hy_pre_hit - h0;
+            NvProg *p8 = [NvProg new]; p8->sh[0] = vs; p8->sh[1] = f8; NvProg *pz8 = [NvProg new]; pz8->sh[0] = vs; pz8->sh[1] = z8;
+            uint64_t k0 = g_hy_kicked; id ps8 = get_held(p8); int pull8 = ps8 && g_pso_pull; uint64_t kick8 = g_hy_kicked - k0;
+            k0 = g_hy_kicked; id psz = get_held(pz8); int pullz = psz && g_pso_pull; uint64_t kickz = g_hy_kicked - k0; hy_drain();
+            VERIFY(n1 == 2 && h1 == 1 && pull8 && !kick8 && !pullz && kickz == 1,
+                   "⑧ 预热先取：查了 %llu 把基底键（期望 2：同一对第二次不再查）、查中 %llu（期望 1）；随包有的那对首遇拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）；"
+                   "包里没有的那对首遇拉取管线 %d（期望 0）、后台踢 %llu（期望 1）", (unsigned long long)n1, (unsigned long long)h1, pull8, (unsigned long long)kick8, pullz, (unsigned long long)kickz);
+        }
         // ⑦ 首查预热：随包小库 s2a_warm.metallib；先拿 fb 那对的归档冒名（查不中），再换成本对小库按同一描述出的、压过的归档
         NSString *ws = [g_pkg_dir stringByAppendingPathComponent:@"s2a_warm.metal"], *wl = [g_pkg_dir stringByAppendingPathComponent:@"s2a_warm.metallib"], *wa = [g_pkg_dir stringByAppendingPathComponent:@"s2a_warm.mtl4archive"];
         REQUIRE([@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 s2a_warm_v(uint v [[vertex_id]]) { return float4(0, 0, 0, 1); }\nfragment float4 s2a_warm_f() { return float4(0); }\n"

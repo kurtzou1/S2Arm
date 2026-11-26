@@ -21,7 +21,7 @@
 #define QL_RING 8192                    // 30 秒窗口最多帧数（≥ 120 帧/秒 × 30 秒 = 3600）
 
 static struct {
-    int on, tier, why, cpu_bound, no_up, stick;   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回；stick：玩家本局点过再试 60 帧，不再自动降
+    int on, tier, why, cpu_bound, no_up, stick, itv;   // itv：窗口里这些帧对应的游戏自设交换间隔（0 = 还没帧）   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回；stick：玩家本局点过再试 60 帧，不再自动降
     uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0; double vsync_us;   // vsync_us：屏幕刷新一拍（0 = 不知道）   // settle_until：回前台后到这一刻之前的帧不进窗口
     uint32_t dt_us[QL_RING]; int nd;
     double l_fps, l_slow, l_gpu; int l_th;
@@ -56,6 +56,9 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     if (!q.on) return -1;
     if (!game || !dt || dt >= QL_GAP_NS) return -1;
     if (now < q.settle_until) return -1;   // 刚回前台：这几秒的帧（含后台留下的慢帧）不进窗口；GPU 起点从第一帧计时帧起
+    // 游戏改了自设交换间隔：窗口从这一帧重新攒。一个窗口只按一种间隔判——判时用的是当下的间隔，窗口里前半段若是另一种间隔（帧率补丁在局中才武装、游戏从 2 改 1），
+    //   前半段 33.3 ms 的帧按 16.7 ms 的目标全算慢帧，刚放开的 60 帧随即被判「达不到」整局关掉（11-25 一款开放世界游戏：间隔 2→1 后 15 秒窗口满，44.9 帧/秒、慢帧 32.7%，补丁全关）
+    { int iv = game_itv >= 1 ? game_itv : 1; if (iv != q.itv) { if (q.itv) { q.win_ns = 0; q.nd = 0; q.gpu0 = -1; } q.itv = iv; } }
     if (q.gpu0 < 0 && gpu_ms >= 0) { q.gpu0 = gpu_ms; q.gpu_t0 = now; }
     if (q.nd < QL_RING) q.dt_us[q.nd++] = (uint32_t)(dt / 1000);
     q.win_ns += dt;

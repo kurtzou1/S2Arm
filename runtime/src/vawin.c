@@ -1560,6 +1560,7 @@ static void pick_hole(uint64_t hi, uint64_t want, uint64_t *at, uint64_t *sz, ui
 }
 static void cmd_arena_reserve(void);
 static void snap_guard_take(void), snap_guard_drop(void);
+static int g_sg_n;   // 护栏现占几段（定义在 snap_guard_take 那里；起宿主前放掉时据它决定重选 GC 上限）
 static void vawin_reserve(void) {
     const char *e = getenv("S2A_VAWIN_NORESERVE"); g_noreserve = e && *e == '1';
     if (g_noreserve) { s2a_window_probe("构造函数（不占窗口）"); vaguard_release(); return; }
@@ -1716,7 +1717,12 @@ int s2a_window_reserve_late(void) {
     int ok = reserve_late_();
     if (g_noreserve) return ok;
     snap_retake();
+    int held = g_sg_n;
     snap_guard_drop();   // 普通局 / 恢复局都在起宿主前放（之后布局会按需 MAP_FIXED 铺别名区，不能留着自己的占位）
+    // GC 上限（gclimit.c）是 main 开头按当时的低区选的，那时护栏还占着快照那局的落点（宿主段里最大的一块）：只量到 [4 GB, 6 GB) 的约 1.4 GB，
+    //   落「不设」档（0.6.10 iPhone18,1 D-6QWZ：护栏占 0x70c0000000 +6144 MB 时量到 1447 MB，放掉后 6144 MB；不设上限的 6 局里 4 局播视频时托管 OOM）。
+    //   放掉了就按现在的低区重选；C# 运行时在这之后（自检、S2A_Init）才起，GC 初始化读到的是重选后的值
+    if (held) { void (*gc)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gc_limit_reapply"); if (gc) gc(); }
     return g_ok;
 }
 static int reserve_late_(void) {

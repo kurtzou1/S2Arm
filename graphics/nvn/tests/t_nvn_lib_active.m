@@ -1,6 +1,7 @@
 // D-92BW 着色器库按活跃集持有（nvn_mtl.m sh_release_unused / sh_hydrate_locked / shader_used / warm_shader）：含生产 nvn_mtl.m 源码（同 t_nvn_shader_flight.m 写法），
 //   库放在按格式手造的库容器里（同 t_lib_pack.m write_pack；两键单独成段 + 两键共用一个批库段），走真加载、真预热入口、真 Metal 建管线并上 GPU 画、读回像素。
 //   期望全按规则手写、不跑被测实现推：
+//   ⓪ 没设 DM_NVN_SH_RELEASE 时 Mac 默认不放（sh_release_on）：放之后映射照旧 3 页、放掉 0 个、函数都在；之后设 DM_NVN_SH_RELEASE=1，按 iOS 的默认测 ①–⑥
 //   ① 预热建了 4 个键（A 单库、B 单库、C/D 同一批库），游戏用过 A：放之前本进程映射着 3 页 .pak（A、B、批库各一段、各一页），放之后只剩 A 那 1 页（B 与批库的映射释放）；放掉的个数 = 3（B、C、D）
 //   ② 放之前用 B 建好的管线，放之后照常画（读回 0.375）
 //   ③ 游戏第一次用 B（shader_get）：同一个对象、函数补回（非空）、映射回到 2 段、用补回的函数新建管线画（0.375）、补回计数 +1
@@ -123,6 +124,14 @@ int main(void) { @autoreleasepool {
         pb = pipeline(b->fn); REQUIRE(pb);
     }
     int before = pak_maps_settle(ld, 3);
+    {   // ⓪ 默认（没设 DM_NVN_SH_RELEASE）：Mac 不放（sh_release_on），iOS 放（下面 ① 起的情形，这里只核 Mac）
+        unsetenv("DM_NVN_SH_RELEASE"); g_sh_rel = -1; uint64_t r0 = atomic_load(&g_rel_n);
+        @autoreleasepool { sh_release_unused(); }
+        int still = pak_maps_settle(ld, 3);
+        if (!TARGET_OS_IPHONE) CHECK(atomic_load(&g_rel_n) == r0 && still == 3 && b->fn && !b->skel && c->fn && d->fn,
+                                     "⓪ Mac 默认不放：放掉 %llu 个（期望 0）、映射 %d 页（期望 3）、B / C / D 函数都在", (unsigned long long)(atomic_load(&g_rel_n) - r0), still);
+        setenv("DM_NVN_SH_RELEASE", "1", 1); g_sh_rel = -1;   // 以下按 iOS 的默认（放）测
+    }
     uint64_t rel0 = atomic_load(&g_rel_n);
     @autoreleasepool { sh_release_unused(); }
     int after = pak_maps_settle(ld, 1);

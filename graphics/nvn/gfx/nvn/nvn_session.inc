@@ -43,6 +43,7 @@ static int session_wait_backend(void) {
     dispatch_group_t prefetch_done = dispatch_group_create();
     os_unfair_lock_lock(&g_shpre_mu);
     shq_mark(&g_shpre, prefetch_done); shq_mark(&g_shurg, prefetch_done);
+    for (int i = 0; i < PAIRPRE_LANES; i++) if (g_pairpre_q[i]) dispatch_group_async(prefetch_done, g_pairpre_q[i], ^{});   // 登记时先取拉取基础管线的四条道（nvn_be_pair_prefetch）：停时等预热的循环也看 g_shpre_stopping
     os_unfair_lock_unlock(&g_shpre_mu);
     if (dispatch_group_wait(prefetch_done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) return -ETIMEDOUT;
     // A guest submit returns only after publishing its encode records. No

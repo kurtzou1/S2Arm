@@ -13,7 +13,7 @@ namespace S2A.Services.Tests
     //     会话 200：in u32 功能 @0；A 缓冲 = 设备名，长度 = 字符串长（不带 0）；只回结果码
     //     会话 500：in u32 功能 @0、u64 凭据 @8；A 缓冲设备名；回复制句柄；600 同入参、只回结果码
     //   期望不跑实现即可写出：宿主只有一个声音输出，名字与 audout:u ListAudioOuts 同一来源（本用例现场从 audout:u 取，再对字面 "DeviceOut"）；
-    //   功能 1 = 输出；状态变化事件不触发。输入（功能 2，#2151）：宿主那一个收音设备，名字与 audin:u ListAudioIns 同源（字面 "BuiltInHeadset"），列 1 个、缺省就是它；
+    //   功能 1 = 输出；状态变化事件不触发。输入（功能 2，#2151）：宿主那一个收音设备，名字 "TrueRawAudioIn"（时之笛开哼唱识别时 300 发的设备名，11-25 玩家日志；原先借 audin:u 的 "BuiltInHeadset"，300 报未知设备、输入流没建、Purge 崩），列 1 个、缺省就是它；
     //   负例：未知功能 3、未知设备名、未实现的 900 号 → 未知命令结果码（模块 10 描述 221）且各报红 1 次
     public static unsafe partial class Program
     {
@@ -77,12 +77,12 @@ namespace S2A.Services.Tests
                 long redIn = Red.Total;
                 Reply lir = Call(us, lin);
                 string inName = Encoding.ASCII.GetString(new ReadOnlySpan<byte>(buf, 0x100)).Split('\0')[0];
-                Check("auddmg 0 ListVirtualDeviceNames（输入，功能 2）", "结果 0、1 个、BuiltInHeadset、红 +0", $"结果 {lir.Result}、{*(int*)lir.Data} 个、{inName}、红 +{Red.Total - redIn}");
+                Check("auddmg 0 ListVirtualDeviceNames（输入，功能 2）", "结果 0、1 个、TrueRawAudioIn、红 +0", $"结果 {lir.Result}、{*(int*)lir.Data} 个、{inName}、红 +{Red.Total - redIn}");
 
                 // 100：缺省输入设备 = 列表第一项
                 new Span<byte>(buf, 0x100).Fill(0xCC);
                 Reply dir = Call(us, WithB(Msg.Cmif(100, Fn(2)), buf, 0x100));
-                Check("auddmg 100 GetDefaultVirtualDeviceName（输入）", "结果 0、BuiltInHeadset", $"结果 {dir.Result}、{Encoding.ASCII.GetString(new ReadOnlySpan<byte>(buf, 0x100)).Split('\0')[0]}");
+                Check("auddmg 100 GetDefaultVirtualDeviceName（输入）", "结果 0、TrueRawAudioIn", $"结果 {dir.Result}、{Encoding.ASCII.GetString(new ReadOnlySpan<byte>(buf, 0x100)).Split('\0')[0]}");
 
                 // 100：缺省输出设备
                 new Span<byte>(buf, 0x100).Fill(0xCC);
@@ -95,6 +95,14 @@ namespace S2A.Services.Tests
                 int n = Encoding.ASCII.GetBytes(audoutName, new Span<byte>(buf, 0x100));
                 Msg av = Msg.Cmif(200, Fn(1)); av.A.Add(((ulong)buf, (ulong)n));
                 Check("auddmg 200 IsVirtualDeviceAvailable（本机输出名，长 = 字符串长）", "结果 0x0", $"结果 0x{Call(us, av).Result:X}");
+
+                // 200（输入，功能 2）：游戏发的输入设备名 "TrueRawAudioIn" 认得（#2151 0.6.10：300 / 401 / 700 同一道 RequireDevice，原先这里报红「不是本机虚拟设备」）
+                long redMic = Red.Total;
+                int nIn = Encoding.ASCII.GetBytes("TrueRawAudioIn", new Span<byte>(buf, 0x100));
+                Msg avIn = Msg.Cmif(200, Fn(2)); avIn.A.Add(((ulong)buf, (ulong)nIn));
+                uint avInR = Call(us, avIn).Result;
+                Check("auddmg 200 IsVirtualDeviceAvailable（输入名 TrueRawAudioIn，功能 2）", "结果 0x0、红 +0", $"结果 0x{avInR:X}、红 +{Red.Total - redMic}");
+                n = Encoding.ASCII.GetBytes(audoutName, new Span<byte>(buf, 0x100));   // 下面 500 / 600 / 负例沿用输出名
 
                 // 500 / 600：事件读端、不触发；同凭据释放成功
                 byte[] ep = new byte[0x10];

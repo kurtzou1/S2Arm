@@ -1,6 +1,10 @@
 // 快照删除（runtime/src/snapdel.c）：期望值只看文件系统——删后三个目录都不在、占的块数归零，同名目录能重新建起来再删
-// 新快照换上（s2a_snap_swap_in）：首存 / 有旧快照 / 新目录缺失三种看换上后目录里的标记；另一条线程不停查正式目录，换上 500 次期间它一次都不能不在
-//   （旧写法两次改名，两次之间正式目录不存在，进程死在这里玩家的快照就没了）
+// 新快照换上（s2a_snap_swap_in）：首存 / 有旧快照 / 新目录缺失三种看换上后目录里的标记；
+//   崩点判据：本文件替换 rename / renamex_np（snapdel.c 同一可执行文件里的调用绑到这里，转调系统的那份），对第 k 次改名刚完成的每个崩点各起一个
+//   子进程、在那一刻 _exit，父进程看磁盘：正式目录必须在、标记完整（a / b），不靠事后恢复。崩点逐个穷举，不靠随机时刻碰运气。
+//   旧写法两次改名，崩在第 1 次之后正式目录不在（只剩 .old），进程死在这里玩家的快照就没了；原子交换只有一次改名，任何崩点正式目录都在。
+//   不用「另一条线程并发 lstat 一次都不能看不到」做判据：APFS 上交换本身原子，但并发查找不保证每一刻都看得见名字（4 份并行共 16 万次交换
+//   实测 1 次 lstat 回 ENOENT、交换失败 0 次；11-25 门禁高负载下本项因此偶发红），测的不是要防的「被杀后丢快照」
 // 恢复（s2a_snap_recover）：旧版死在两次改名之间留下「正式目录不在、只有 .old」→ 改回正式目录、内容是旧的那份；两个都在 → 删 .old、正式目录不动；只有正式目录 → 不动
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,8 +12,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fts.h>
-#include <pthread.h>
-#include <stdatomic.h>
 
 void s2a_snap_rmtree(const char *path); int s2a_snap_delete(const char *dir); int s2a_snap_swap_in(const char *neu, const char *final); int s2a_snap_recover(const char *final);
 static int g_busy;   // 引擎「正在存」的替身（snapdel.c 弱引用 s2a_snap_busy，单测不链引擎）
@@ -35,8 +37,26 @@ static void make_snapshot(const char *d) {   // 仿一份快照：清单、缩�
 
 static void mark(const char *d, const char *tag) { char p[1200]; mkdir(d, 0755); snprintf(p, sizeof p, "%s/manifest.tsv", d); FILE *f = fopen(p, "w"); if (f) { fputs(tag, f); fclose(f); } }
 static int marked(const char *d, const char *tag) { char p[1200], b[32] = {0}; snprintf(p, sizeof p, "%s/manifest.tsv", d); FILE *f = fopen(p, "r"); if (!f) return 0; fgets(b, sizeof b, f); fclose(f); return !strcmp(b, tag); }
-static _Atomic int g_watch, g_missing; static const char *g_watch_dir;
-static void *watch(void *a) { (void)a; struct stat st; while (atomic_load(&g_watch)) if (lstat(g_watch_dir, &st)) atomic_fetch_add(&g_missing, 1); return NULL; }
+#include <dlfcn.h>
+#include <sys/wait.h>
+static int g_crash_at, g_renames;   // 第几次改名完成后退出（0 = 不崩）/ 本进程已完成的改名次数
+static void renamed(void) { g_renames++; if (g_crash_at && g_renames == g_crash_at) _exit(0); }
+int rename(const char *a, const char *b) {
+    static int (*real)(const char *, const char *); if (!real) real = (int (*)(const char *, const char *))dlsym(RTLD_NEXT, "rename");
+    int r = real(a, b); if (!r) renamed(); return r;
+}
+int renamex_np(const char *a, const char *b, unsigned int f) {
+    static int (*real)(const char *, const char *, unsigned int); if (!real) real = (int (*)(const char *, const char *, unsigned int))dlsym(RTLD_NEXT, "renamex_np");
+    int r = real(a, b, f); if (!r) renamed(); return r;
+}
+// 有旧快照（a）换上新快照（b），崩在第 k 次改名之后：回 0 = 正式目录在且完整；1 = 不在；2 = 在但标记不完整
+static int crash_at(const char *snap, const char *neu, const char *old, int k) {
+    s2a_snap_rmtree(snap); s2a_snap_rmtree(neu); s2a_snap_rmtree(old); mark(snap, "a"); mark(neu, "b");
+    pid_t pid = fork(); if (pid == 0) { g_renames = 0; g_crash_at = k; s2a_snap_swap_in(neu, snap); _exit(0); }
+    if (pid < 0) return 3;
+    waitpid(pid, NULL, 0);
+    return !exists(snap) ? 1 : marked(snap, "a") || marked(snap, "b") ? 0 : 2;
+}
 
 int main(void) {
     char base[] = "/tmp/t_snapdel.XXXXXX"; if (!mkdtemp(base)) { printf("✗ t_snapdel：建临时目录失败\n"); return 1; }
@@ -71,11 +91,13 @@ int main(void) {
     mark(neu, "new"); CHECK(s2a_snap_swap_in(neu, snap) == 0 && marked(snap, "new") && !exists(neu), "首存（没有旧快照）应换上、新目录名下不留东西");
     mark(neu, "new2"); CHECK(s2a_snap_swap_in(neu, snap) == 0 && marked(snap, "new2") && !exists(neu) && !exists(old), "有旧快照应换成新的、旧的删掉、不留 .old");
     CHECK(s2a_snap_swap_in(neu, snap) == -1 && marked(snap, "new2"), "新目录不在应回 -1、旧快照原样");
-    g_watch_dir = snap; atomic_store(&g_watch, 1); pthread_t th; pthread_create(&th, NULL, watch, NULL);
     int bad = 0; for (int i = 0; i < 500; i++) { mark(neu, i & 1 ? "a" : "b"); bad += s2a_snap_swap_in(neu, snap) != 0; }
-    atomic_store(&g_watch, 0); pthread_join(th, NULL);
     CHECK(bad == 0 && marked(snap, "a"), "连换 500 次都应换上、最后是第 500 份（失败 %d 次）", bad);
-    CHECK(atomic_load(&g_missing) == 0, "换上期间正式目录应一直在（另一条线程看到不在 %d 次）", atomic_load(&g_missing));
+    g_renames = 0; mark(neu, "b"); s2a_snap_swap_in(neu, snap); int n = g_renames;   // 一次换上做了几次改名 = 要穷举的崩点数
+    CHECK(n >= 1, "换上应至少改名一次（实际 %d 次）", n);
+    char why[256] = ""; for (int k = 1; k <= n; k++) { int r = crash_at(snap, neu, old, k); if (r) { snprintf(why, sizeof why, "崩在第 %d 次改名后：%s", k, r == 1 ? "正式目录不在" : r == 2 ? "标记不完整" : "fork 失败"); break; } }
+    CHECK(!why[0], "换上途中每个崩点（共 %d 个）正式目录都应在且完整（%s）", n, why[0] ? why : "都在");
+    s2a_snap_rmtree(neu); s2a_snap_rmtree(old); mark(snap, "a");
     CHECK(s2a_snap_delete(snap) == 0, "收尾删掉");
 
     // 恢复：旧版死在两次改名之间留下的现场

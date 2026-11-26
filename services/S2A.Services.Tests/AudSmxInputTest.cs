@@ -9,7 +9,7 @@ namespace S2A.Services.Tests
 {
     // audsmx:u 外部输入流（麦克风，#2151）：0400486024DEC000 开局调 PurgeInputStream 不判空，输入流开不起来即崩。
     //   报文按游戏 sdk 的 InputStreamImpl::Open / Start / Stop（0x1f66c0 / 0x1f6ce0 / 0x1f6c90）反推，同 AudSmxTest.cs 的输出流、方向相反：
-    //     auddmg 300 / 401 功能 2 + 设备名 "BuiltInHeadset"；401 档案 +0x220 = 输入设备令牌（交 CreateStream）
+    //     auddmg 300 / 401 功能 2 + 设备名 "TrueRawAudioIn"（游戏发的输入设备名，#2151）；401 档案 +0x220 = 输入设备令牌（交 CreateStream）
     //     audsmx CreateStream 标志 2（服务端写）；OpenStream 写指针初值 0、标志 0；AcquireStreamDataEvent 方式 2；auddmg 700 功能 2 / 800
     //   输入方向的环（sdk 0x2b21d0 / 0x2b4760）：B+0x1004 = 服务端写指针，B+0x44 = 客户端读指针，B+0x1040 起环，容量 = 帧数 + 1。
     //   单测宿主的声音驱动不收音（哑会话：交来的块立即写满静音），期望不跑实现即可写出：
@@ -45,7 +45,7 @@ namespace S2A.Services.Tests
                 Reply gd = Call(sm, Msg.Cmif(1, Name8("auddmg:u")));
                 Msg dm = Msg.Cmif(0, Bytes(2u, 0u, 0x1234UL, 0UL)); dm.SendPid = true;
                 uint dev = Call(gd.Move[0], dm).Move[0];
-                int inLen = Encoding.ASCII.GetBytes("BuiltInHeadset", new Span<byte>(buf, 0x100));
+                int inLen = Encoding.ASCII.GetBytes("TrueRawAudioIn", new Span<byte>(buf, 0x100));
 
                 // auddmg 300 / 401（功能 2）：单声道 / 立体声 PcmInt16、单声道 PcmFloat 支持；档案给输入令牌 2、延迟 10 ms
                 foreach ((uint f, int ch) in new[] { (2u, 1), (2u, 2), (5u, 1) })

@@ -17,6 +17,11 @@
 //   ⑬ 扫不到低区（桩为空）：不设地址额度、不放
 //   ⑭ #2218 反馈环：空洞一直 500 MB（被管线以外的吃掉），常驻 12、连采 5 次再连检查：额度一直 12（不随采样往下掉）、一条不放
 //   ⑮ 峰值 12、空洞 1 GB + 2 × 256 KB → 额度 14；常驻涨到 20 条且都在 240 帧外 → 放到 14 × 85% = 11 条（取整 11）
+//   ⑯ 拉取基础管线（g_pbase）算常驻：渲染表 6 条（第 1000–1005 帧）+ 基础管线 6 条（第 0–500 帧）+ 1 个后台在建的占位（NSNull）→ 常驻 12；
+//      检查后放到 8 条：放掉最旧的 4 条正是 0–3 号基础管线，渲染表 6 条全留、占位不算也不放；放掉的 0 号基础管线又建 → 淘汰后重建计 1
+//   ⑰ 先取基础管线到预热线就停（pb_prefetch_full）：常驻 6 → 不停；常驻 7 → 停；不记「预热停了几行」；DM_PSO_BUDGET=0 → 不停
+//   ⑱ 第一帧之前（还没发布常驻数）预热工人放进的基础管线也算：放 6 条 → 不停，放第 7 条 → 停；发布之后（常驻 7 里已含这 7 条）不重复算
+//   ⑲ 地址额度也看得到发布之前放进的基础管线：空洞 1 GB + 10 × 256 KB、常驻 0、未领 0、基础管线 3 条（还没发布）→ 地址额度 13
 #include "../gfx/nvn/nvn_mtl.m"
 static unsigned checks, failures;
 #define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "SETUP FAIL %s:%d %s\n", __FILE__, __LINE__, #c); exit(2); } } while (0)
@@ -32,10 +37,15 @@ static void fake_holes(uint64_t *t, uint64_t *l) { *t = g_fake_t; *l = g_fake_t;
 static void reset_va(uint64_t holes, int have) {   // 地址额度：不设 DM_PSO_BUDGET，换上桩
     nvn_hm_clear(&g_pso, (void (*)(void *))CFRelease); nvn_hm_clear(&g_cps, NULL); nvn_hm_clear(&g_pb_use_r, NULL); nvn_hm_clear(&g_pb_gone_r, NULL);
     g_pb_cfail = 0; unsetenv("DM_PSO_BUDGET"); g_pb_budget_init = 0; g_pb_frame = UINT64_MAX; g_pb_evicted = g_pb_rebuilt = 0; atomic_store(&g_pb_warm_stopped, 0);
-    atomic_store(&g_pb_va, 0); atomic_store(&g_pb_unclaimed, 0); atomic_store(&g_pb_live_pub, 0); atomic_store(&g_pb_peak, 0); g_fake_t = holes; g_pb_holes_tried = 1; g_pb_holes_fn = have ? fake_holes : NULL;
+    atomic_store(&g_pb_va, 0); atomic_store(&g_pb_unclaimed, 0); atomic_store(&g_pb_live_pub, 0); atomic_store(&g_pb_peak, 0);
+    nvn_hm_clear(&g_pbase, (void (*)(void *))CFRelease); nvn_hm_clear(&g_pb_use_b, NULL); nvn_hm_clear(&g_pb_gone_b, NULL); atomic_store(&g_pb_bases, 0); atomic_store(&g_pb_bases_pub, 0); g_fake_t = holes; g_pb_holes_tried = 1; g_pb_holes_fn = have ? fake_holes : NULL;
 }
+static pbase_key bkey_of(int i) { pbase_key b; memset(&b, 0, sizeof b); b.vf = (const void *)(uintptr_t)(0x1000 + i); b.ff = (const void *)(uintptr_t)0x2000; b.samples = 1; return b; }
+static void put_b(int i, uint64_t frame) { pbase_key b = bkey_of(i); atomic_store(&g_cur_frame, frame); os_unfair_lock_lock(&g_pbase_lock); pb_base_put_locked(&b, [NSObject new]); os_unfair_lock_unlock(&g_pbase_lock); }
+static int has_b(int i) { pbase_key b = bkey_of(i); id o = hm_get_id(&g_pbase, &b); return o && o != NSNull.null; }
 static void reset(const char *budget) {
     nvn_hm_clear(&g_pso, (void (*)(void *))CFRelease); nvn_hm_clear(&g_cps, NULL); nvn_hm_clear(&g_pb_use_r, NULL); nvn_hm_clear(&g_pb_gone_r, NULL);
+    nvn_hm_clear(&g_pbase, (void (*)(void *))CFRelease); nvn_hm_clear(&g_pb_use_b, NULL); nvn_hm_clear(&g_pb_gone_b, NULL); atomic_store(&g_pb_bases, 0); atomic_store(&g_pb_bases_pub, 0); atomic_store(&g_pb_live_pub, 0);
     g_pb_cfail = 0; setenv("DM_PSO_BUDGET", budget, 1); g_pb_budget_init = 0; g_pb_frame = UINT64_MAX; g_pb_evicted = g_pb_rebuilt = 0; atomic_store(&g_pb_warm_stopped, 0);
 }
 int main(void) { @autoreleasepool {
@@ -74,6 +84,41 @@ int main(void) { @autoreleasepool {
     @autoreleasepool { pb_tick(); }
     int f8 = pb_warm_full(100000);
     CHECK(g_pso.n == 12 && g_pb_evicted == 0 && !f8, "⑧ DM_PSO_BUDGET=0：不放（表里 %u 条）、预热不停（%s）", g_pso.n, f8 ? "停" : "不停");
+    // ⑯ 基础管线算常驻、按最久没用一起放
+    reset("10");
+    for (int i = 0; i < 6; i++) put_r(100 + i, 1000 + (uint64_t)i, NULL);
+    for (int i = 0; i < 6; i++) put_b(i, (uint64_t)i * 100);
+    { pbase_key b = bkey_of(99); hm_put_id(&g_pbase, &b, NSNull.null); }   // 后台在建的占位
+    uint32_t live9 = pb_live();
+    atomic_store(&g_cur_frame, 2000);
+    @autoreleasepool { pb_tick(); }
+    int bgone = 0, bkept = 0, rkept = 0; for (int i = 0; i < 4; i++) bgone += !has_b(i); for (int i = 4; i < 6; i++) bkept += has_b(i); for (int i = 0; i < 6; i++) rkept += has_r(100 + i);
+    pbase_key b99 = bkey_of(99);
+    CHECK(live9 == 12 && bgone == 4 && bkept == 2 && rkept == 6 && atomic_load(&g_pb_bases) == 2 && pb_live() == 8 && hm_get_id(&g_pbase, &b99) == NSNull.null && g_pb_evicted == 4,
+          "⑯ 基础管线算常驻：检查前常驻 %u（应 12）；0–3 号基础管线放掉 %d / 4、4–5 号留 %d / 2、渲染表留 %d / 6、基础管线计数 %u（应 2）、常驻 %u（应 8）、占位还在 %d、淘汰 %llu（应 4）",
+          live9, bgone, bkept, rkept, atomic_load(&g_pb_bases), pb_live(), hm_get_id(&g_pbase, &b99) == NSNull.null, (unsigned long long)g_pb_evicted);
+    put_b(0, 2001);
+    CHECK(g_pb_rebuilt == 1 && atomic_load(&g_pb_bases) == 3, "⑯ 放掉的 0 号基础管线又建：淘汰后重建 %llu（应 1）、基础管线计数 %u（应 3）", (unsigned long long)g_pb_rebuilt, atomic_load(&g_pb_bases));
+    // ⑰ 先取基础管线的预热线（额度 10 × 70% = 7；预热已建未领 0）
+    reset("10"); (void)pb_budget(); atomic_store(&g_pb_live_pub, 6);
+    int p6 = pb_prefetch_full(); atomic_store(&g_pb_live_pub, 7); int p7 = pb_prefetch_full();
+    uint64_t stopped = atomic_load(&g_pb_warm_stopped);
+    reset("0"); (void)pb_budget(); atomic_store(&g_pb_live_pub, 100000); int p0 = pb_prefetch_full();
+    CHECK(!p6 && p7 && !stopped && !p0, "⑰ 先取到预热线就停：常驻 6 → %s（应取）、常驻 7 → %s（应停）、预热停行计数 %llu（应 0）、不设额度 → %s（应取）",
+          p6 ? "停" : "取", p7 ? "停" : "取", (unsigned long long)stopped, p0 ? "停" : "取");
+    // ⑱ 发布之前放进的基础管线（11-25 实测：预热时先取了 3396 对，第一帧常驻 8250 条超过额度 8192）
+    reset("10"); (void)pb_budget();
+    for (int i = 0; i < 6; i++) put_b(i, 0);
+    int q6 = pb_prefetch_full(); put_b(6, 0); int q7 = pb_prefetch_full();
+    atomic_store(&g_cur_frame, 1); @autoreleasepool { pb_tick(); }   // 发布：常驻 7（全是基础管线）
+    uint32_t pub = atomic_load(&g_pb_live_pub); uint32_t bdg; uint64_t est; (void)pb_at_warm_line(0, &bdg, &est);
+    CHECK(!q6 && q7 && pub == 7 && est == 7, "⑱ 发布之前的基础管线算进预热线：6 条 → %s（应取）、7 条 → %s（应停）；发布后常驻 %u（应 7）、估计 %llu（应 7，不重复算）",
+          q6 ? "停" : "取", q7 ? "停" : "取", pub, (unsigned long long)est);
+    // ⑲ 地址额度也看得到发布之前放进的基础管线
+    reset_va((1024ull << 20) + 10 * (256ull << 10), 1);
+    for (int i = 0; i < 3; i++) put_b(i, 0);
+    uint32_t b17 = pb_budget();
+    CHECK(atomic_load(&g_pb_va) == 13 && b17 == 13, "⑲ 地址额度算上还没发布的 3 条基础管线：地址额度 %u、额度 %u（应 13 = 活着 3 + 空余 10）", atomic_load(&g_pb_va), b17);
     // ② 后半：GPU 那一拍过去后，放掉的对象真的释放
     @autoreleasepool { g_done = g_fence + 2; defer_drain(); }
     CHECK(w0 == nil || w1 == nil, "② GPU 用完后放掉的对象释放：0 号 %s、1 号 %s", w0 ? "在" : "已释放", w1 ? "在" : "已释放");

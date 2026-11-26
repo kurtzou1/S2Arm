@@ -1588,9 +1588,10 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     struct s2a_source_pin_ref pinrefs[NVN_PROGRAM_PIN_MAX];
     int npin = 0;
 #endif
+    uint8_t pre_keys[6][8]; memset(pre_keys, 0, sizeof pre_keys); (void)pre_keys;   // 各阶段的键（SetShaders 算出的或首用才定的早键），给 nvn_be_pair_prefetch
     for (int i = 0; i < n; i++) {
-        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
-        else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
+        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); memcpy(pre_keys[i], k->key[i], 8); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
+        else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) { nvn_be_shader_prefetch(early); memcpy(pre_keys[i], early, 8); } }   // S2Arm #674: stages keyed at first use
 #if !defined(__ANDROID__) && !defined(__OHOS__)
         // 首用才算键的阶段（Switch 2 一律；Switch 1 代码区还不在已登记内存池时），控制段先自持一份（ctl_intern）
         { uint32_t hl = ctl_hold_len(&sd[i], k->ok >> i & 1); if (hl) o->sd[i].control = ctl_intern(sd[i].control, hl); }
@@ -1651,6 +1652,9 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     prog_pin_set_owner(o->serial, o);             // 该 serial 的 pin 归属固定为原件，拷贝先 Bind 不抢 owner
     for (int i = 0; i < npin; i++) prog_pin_add(o->serial, o, &pinrefs[i]);
     prog_pin_release(old_serial, o);   // 新阶段已经 pin 好：旧阶段不再被当前 program 引用，源快照可淘汰
+#endif
+#if !defined(__ANDROID__) && !defined(__OHOS__)
+    nvn_be_pair_prefetch((const uint8_t (*)[8])pre_keys, n);   // 这对顶点 / 片元的随包拉取基础管线先在后台取（nvn_mtl.m），首遇直接用拉取管线画
 #endif
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
