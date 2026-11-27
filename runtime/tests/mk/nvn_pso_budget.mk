@@ -2,7 +2,7 @@
 NATIVE_TEST_OWN += nvn_pso_budget
 ifeq ($(S2A_UNAME),Darwin)
 # 管线额度：超额按最后用到的帧放掉久没用的、预热按额度停（AGX 编译变体额度）
-$(BUILD)/tests/t_nvn_pso_budget: graphics/nvn/tests/t_nvn_pso_budget.m graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/gfx/nvn/nvn_pso_budget.inc $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
+$(BUILD)/tests/t_nvn_pso_budget: graphics/nvn/tests/t_nvn_pso_budget.m graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/gfx/nvn/nvn_pso_budget.inc graphics/nvn/gfx/nvn/nvn_geometry.inc $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
 	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -o $@ graphics/nvn/tests/t_nvn_pso_budget.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \

@@ -1,0 +1,107 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.S2AUpdate.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.S2AUpdate.cs
+index 3534d9e98dc3086548a290dd70f7daeeb691e45d..5d07da00990616a25a20d6370237ba4f4188b1e0 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.S2AUpdate.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.S2AUpdate.cs
+@@ -949,6 +949,53 @@ namespace Ryujinx.Audio.Renderer.Server
+         //   PlayState/IsNew/FlushWaveBufferCount 是两写字段,用纯函数对「活」值重放 = 「Update 在拍后串行」的今天语义
+         //   (中拍把 Stopping 迁到 Stopped / 消费掉 IsNew / 清了 Flush 计数时,重放不复活它们、不二次 ResetResources /
+         //   不二次冲洗);波表槽按处方重演。
++        // 锁2a 波表单槽落账(处方①②③):生产落账与服务层单测(--audio-renderer-wave-slot-replay)共用这一份,
++        //   单测不再另拼一遍流程——另拼的副本与生产走偏时(翻转槽落重演输出还是影子槽)单测照样绿,生产的翻转分支等于没测。
++        //   liveValid = 落账时的活 isValid;slot = 解析段该槽的记录(读到的 isValid / 进槽 BufferUnmapped / 输入 / hook 起点);
++        //   snapshotSlot = 锁1 快照里的该槽(翻转重演基底);slotHookEnd = 该槽 hook 记录终点
++        internal static void S2ACommitWaveSlot(bool liveValid, ref S2AUpdateShadow.VoiceSlotRecord slot, ref WaveBuffer liveSlot, ref WaveBuffer shadowSlot,
++            WaveBuffer snapshotSlot, PoolMapper commitMapper, ref BehaviourInfo parseBehaviour, List<ErrorInfo> replayErrors, S2AHookLog hookLog, int slotHookEnd, uint processHandle)
++        {
++            if (liveValid == slot.IsValid)
++            {
++                // 未翻转:解析段结果整体落账
++                liveSlot = shadowSlot;
++            }
++            else
++            {
++                // 翻转:处方①——基底 = 锁1 快照里的该槽(含旧地址与旧 IsSendToAudioProcessor),对该基底重跑
++                // isValid 分支(用翻转后的活 isValid)与重发分支两者。不能拿解析后的影子当基底::664 条件里的
++                // IsSendToAudioProcessor 已被重发置 false,分支整跳过,A_old 的 Unmap 丢失;只对影子跑分支则
++                // ForceUnmap 拿到的是 A_new,会把 DSP 下一拍正要读的新区域退驻留。重发分支不读 isValid,其
++                // 输出 = 影子槽,重演只为 isValid 分支的 ForceUnmap(A_old) 与 :674 断言的今天触发条件
++                WaveBuffer replayBase = snapshotSlot;
++                bool bufferUnmapped = slot.BufferUnmappedIn;
++
++                replayErrors.Clear();
++
++                commitMapper.S2ASuppressAttachHooks = true;   // 处方②:重发挂接的 hook 已在日志里待重放,重演不再执行
++
++                VoiceInfo.S2AUpdateWaveBuffer(
++                    replayErrors,
++                    ref replayBase,
++                    ref slot.Input,
++                    slot.SampleFormat,
++                    liveValid,
++                    commitMapper,
++                    ref parseBehaviour,
++                    ref bufferUnmapped);
++
++                commitMapper.S2ASuppressAttachHooks = false;
++
++                // 重演的错误与解析段暂存的同输入同基底、同一条——落账从暂存表恰一次原序入队(处方③),这里丢弃。
++                // 整体替换:重发分支输出 = 影子槽,isValid 分支只多了 Unmap 钩与清址(被重发分支的重挂覆盖)
++                liveSlot = shadowSlot;
++            }
++
++            // 该槽 hook 重放(处方②:翻转槽的 Unmap 已由重演先行执行,这里按原序重放解析段记的重发 Map)
++            hookLog.Replay(slot.HookStart, slotHookEnd, processHandle);
++        }
++
+         private void S2ACommitVoices(S2AUpdateShadow shadow)
+         {
+             int voiceCount = (int)_voiceContext.GetCount();
+@@ -1037,46 +1084,8 @@ namespace Ryujinx.Audio.Renderer.Server
+                     //   在渲染拍里跑)会把它翻成 false
+                     bool liveValid = liveChannel0.IsWaveBufferValid[k];
+ 
+-                    if (liveValid == slot.IsValid)
+-                    {
+-                        // 未翻转:解析段结果整体落账
+-                        liveSlot = shadowSlot;
+-                    }
+-                    else
+-                    {
+-                        // 翻转:处方①——基底 = 锁1 快照里的该槽(含旧地址与旧 IsSendToAudioProcessor),对该基底重跑
+-                        // isValid 分支(用翻转后的活 isValid)与重发分支两者。不能拿解析后的影子当基底::664 条件里的
+-                        // IsSendToAudioProcessor 已被重发置 false,分支整跳过,A_old 的 Unmap 丢失;只对影子跑分支则
+-                        // ForceUnmap 拿到的是 A_new,会把 DSP 下一拍正要读的新区域退驻留。重发分支不读 isValid,其
+-                        // 输出 = 影子槽,重演只为 isValid 分支的 ForceUnmap(A_old) 与 :674 断言的今天触发条件
+-                        WaveBuffer replayBase = shadow.VoiceSnapshotSpan[i].WaveBuffers[k];
+-                        bool bufferUnmapped = slot.BufferUnmappedIn;
+-
+-                        _s2aReplayErrorList.Clear();
+-
+-                        PoolMapper commitMapper = GetUpdatePoolMapper();
+-
+-                        commitMapper.S2ASuppressAttachHooks = true;   // 处方②:重发挂接的 hook 已在日志里待重放,重演不再执行
+-
+-                        VoiceInfo.S2AUpdateWaveBuffer(
+-                            _s2aReplayErrorList,
+-                            ref replayBase,
+-                            ref slot.Input,
+-                            slot.SampleFormat,
+-                            liveValid,
+-                            commitMapper,
+-                            ref shadow.ParseBehaviour,
+-                            ref bufferUnmapped);
+-
+-                        commitMapper.S2ASuppressAttachHooks = false;
+-
+-                        // 重演的错误与解析段暂存的同输入同基底、同一条——落账从暂存表恰一次原序入队(处方③),这里丢弃。
+-                        // 整体替换:重发分支输出 = 影子槽,isValid 分支只多了 Unmap 钩与清址(被重发分支的重挂覆盖)
+-                        liveSlot = shadowSlot;
+-                    }
+-
+-                    // 该槽 hook 重放(处方②:翻转槽的 Unmap 已由重演先行执行,这里按原序重放解析段记的重发 Map)
+-                    shadow.HookLog.Replay(slot.HookStart, slotHookEnd, _processHandle);
++                    S2ACommitWaveSlot(liveValid, ref slot, ref liveSlot, ref shadowSlot, shadow.VoiceSnapshotSpan[i].WaveBuffers[k],
++                        GetUpdatePoolMapper(), ref shadow.ParseBehaviour, _s2aReplayErrorList, shadow.HookLog, slotHookEnd, _processHandle);
+ 
+                     // 池指针重绑(影子池表 → live 池表;快照拷里没被重挂的地址信息本来就指 live,原样即正确)
+                     shadow.S2ARebindAddressInfo(ref liveSlot.BufferAddressInfo);

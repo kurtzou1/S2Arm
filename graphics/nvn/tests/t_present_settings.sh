@@ -65,9 +65,14 @@ link=(xcrun --sdk macosx clang -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" 
     -Wl,-rpath,"$(dirname "$widen")" -framework AppKit -framework GameController -framework CoreHaptics -framework CoreBluetooth -framework IOKit -framework Metal -framework Foundation \
     -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ \
     -framework Security -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -lcompression)
-printf '%s\0' "${link[@]}" > "$out/link.args0"   # 生成器拿同一条链接行做闭包实验
+printf '%s\0' "${link[@]}" > "$out/link.args0"   # 生成器拿同一条链接行做闭包实验（不带映射：生成器自己加）
+[[ "$gen" == 1 ]] || link+=(-Wl,-map,"$out/link.map")
 "${link[@]}"
-[[ "$gen" == 1 ]] || python3 graphics/nvn/tests/t_present_settings.py dyncheck "$list" "$out/t_present_settings"
+if [[ "$gen" != 1 ]]; then
+    # 链进来的静态库成员读的源文件 / 头文件都要在清单 lib 行（11-26：#2242 改 libnvn 的 nvn2_codec.c 不在本测输入里，没触发本测，下一笔背锅）
+    python3 graphics/nvn/tests/t_present_settings.py libcheck "$list" "$out/link.map" "$root" "$nvn" "$gal" "$dsx"
+    python3 graphics/nvn/tests/t_present_settings.py dyncheck "$list" "$out/t_present_settings" "$main_obj" "${objects[@]}" "$nvn" "$gal" "$dsx"
+fi
 shasum -a 256 "$root/graphics/nvn/tests/t_present_settings.m" "$root/graphics/nvn/tests/t_present_settings.sh" "$list" \
     "${objects[@]}" "$main_obj" "$nvn" "$gal" "$dsx" "$widen" "$out/t_present_settings" > "$out/link-inputs.sha256"
 if [[ "$gen" == 1 ]]; then printf 'present settings candidate build: %s\n' "$out/t_present_settings"; exit 0; fi
@@ -154,8 +159,10 @@ for backend in mtl3 mtl4; do
                 #   门禁存下的只有红摘要。行首用「✗」：两条路径的摘要都认它——graphics/gate.sh evidence 摘 ^(✗ |不通 |FAIL) 前 20 行，
                 #   作为单测（tests/present_settings_test.sh）时 tools/gate.sh 摘 ^(不通|✗) 前 10 行；「FAIL: 」与【红】那几行名额会被编译命令文本占掉
                 printf '✗ %s（exit=%s）\n' "$name" "$status" >&2
+                /usr/bin/grep -a '^【卡】' "$runtime/run.log" 2> /dev/null | head -n 3 | cut -c1-600 | sed "s/^/✗ 卡 ${name}｜/" >&2
                 [[ ! -s "$runtime/stuck.sample" ]] || awk "$stuck_awk" "$runtime/stuck.sample" | cut -c1-220 | sed "s/^/✗ 栈 ${name}｜/" >&2
-                tail -n 6 "$runtime/run.log" 2> /dev/null | sed "s/^/✗ 尾 ${name}｜/" >&2; fi
+                # 末 6 行去掉每 10 秒一条的心跳 / 能耗（卡死格里它们占满 6 行、把卡住前的最后一步挤掉）
+                /usr/bin/grep -av '^\[s2a\] \[心跳\]\|^\[s2a\] \[能耗\]' "$runtime/run.log" 2> /dev/null | tail -n 6 | sed "s/^/✗ 尾 ${name}｜/" >&2; fi
         done
     done
 done

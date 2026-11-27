@@ -99,5 +99,8 @@ namespace Ryujinx.Audio.Renderer.Utils
         {
             _storage.Span.Clear();
         }
+
+        // S2Arm (#12/#13 拆分): 底层存储访问(EdgeMatrix 影子↔live 的整组位拷;同类内用,不外露)
+        internal Memory<byte> S2AStorage => _storage;
     }
 }

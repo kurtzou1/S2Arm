@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
           "#1952：复查时仍不在快照里、快照里有另一只占槽 0 的 → 换对象");
     check(count_in(source, ".current_listed = current && [controllers containsObject:current]") == 1,
           "#1952 接线：判活带上「在快照里」");
-    check(count_in(source, "if (current.extendedGamepad && (!mayClear || [GCController.controllers containsObject:current]))") == 1,
+    check(count_in(source, "if (pad_usable(current) && (!mayClear || [GCController.controllers containsObject:current]))") == 1,
           "#1952 接线：延迟复查时不在快照里的旧对象不再占槽 0（再连上的新对象回玩家 1）");
     // ---- #1428 接线：NS2 Pro 和系统手柄一视同仁分槽，系统手柄不再挡 NS2 Pro ----
     check(count_in(source, "_hasSystem") == 0, "#1428：不再有「有系统手柄就不连 / 停掉 NS2 Pro」的门槛（原 8 处 _hasSystem）");
@@ -90,8 +90,9 @@ int main(int argc, char **argv) {
     // ---- 接线：controller.m 真的按这套决策走 ----
     check(count_in(source, "[controllers containsObject:") == 1,
           "controller.m 的快照只经 current_listed 进决策（不在快照先延迟确认，不据它立刻清；#58 / #1952）");
-    check(count_in(source, "current.extendedGamepad != nil") == 1,
-          "controller.m 用对象自身的 extendedGamepad 判活");
+    check(count_in(source, ".current_alive = pad_usable(current)") == 1 &&
+          count_in(source, "static BOOL pad_usable(GCController *c) { return c.extendedGamepad || s2a_pad_single_joycon(c.productCategory, NO); }") == 1,
+          "controller.m 用对象自身的描述判活（扩展档，或单只一代 Joy-Con：#2244）");
     check(count_in(source, "s2a_system_action(state)") == 1,
           "controller.m 的判定走 s2a_system_action");
     check(count_in(source, "s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, NULL)") == 1,
@@ -108,8 +109,8 @@ int main(int argc, char **argv) {
     // ---- 接线：「-」/「+」不再被系统手势吃掉（Minus 延迟的真根因，与本 PR 的判活健壮性独立）----
     // 「-」用 Disabled：手势识别器完全不跑、输入直接给 app。AlwaysReceive 已废弃且语义是「同时给手势识别器」
     //   （真机现象：按 Minus 触发录屏），这里断言它一处都不许出现，防止有人改回去。
-    check(count_in(source, "preferredSystemGestureState = GCSystemGestureStateDisabled") == 2,
-          "「-」与 Home 设 Disabled（手势不跑，输入直接给 app）");
+    check(count_in(source, "preferredSystemGestureState = GCSystemGestureStateDisabled") == 3,
+          "「-」与 Home 设 Disabled（扩展档两处 + 只有通用描述的单只 Joy-Con 一处，#2244；手势不跑，输入直接给 app）");
     // #276：Home 关掉系统手势（否则系统拿去开游戏面板），并放进扩展位 bit16 供长按开局内菜单
     check(strstr(source, "pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled") != NULL, "Home 设 Disabled");
     check(strstr(source, "if (pad.buttonHome.isPressed) buttons |= 1u << 16;") != NULL, "Home 进扩展位 bit16");

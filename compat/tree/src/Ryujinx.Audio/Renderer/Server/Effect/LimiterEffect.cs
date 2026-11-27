@@ -36,6 +36,15 @@ namespace Ryujinx.Audio.Renderer.Server.Effect
 
         public override EffectType TargetEffectType => EffectType.Limiter;
 
+        // S2Arm (#12/#13 拆分): 本型的游戏侧字段影子拷贝(矩阵与基底口径见 BaseEffect.S2AShadowCopyGameFieldsFrom;
+        //   各型共享的 DSP 状态数组(Get-only 的 Memory<XxxState>)不拷、引用共享)
+        internal override void S2AShadowCopyGameFieldsFrom(BaseEffect source)
+        {
+            base.S2AShadowCopyGameFieldsFrom(source);
+
+            Parameter = ((LimiterEffect)source).Parameter;
+        }
+
         public override ulong GetWorkBuffer(int index)
         {
             return GetSingleBuffer();

@@ -626,6 +626,7 @@ namespace S2A.Services.Tests
             GuestMemoryFar();
             ShaderCodeTableTest.Run(Check);
             ShaderCodeTableDiffTest.Run(Check);
+            RomFsLanguagesTest.Run(Check);
             AccountLifetime();
             AudioLifetimeTest();
 

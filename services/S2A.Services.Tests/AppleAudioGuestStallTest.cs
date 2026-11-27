@@ -97,7 +97,7 @@ namespace S2A.Services.Tests
             Thread.Sleep(300);
             Row("④ 开闸后送数线程走完、进程还在", "不崩", "没崩", true);
 
-            var apple = (AppleHardwareDeviceSession)session;   // 平台例外：苹果音频后端单测
+            var apple = (ApplePullHardwareDeviceSession)session;   // 平台例外：苹果音频后端单测
             var wait = Stopwatch.StartNew();
             while (apple.S2APaceThreadAlive && wait.ElapsedMilliseconds < 2000) Thread.Sleep(20);
             Row("⑤ 开闸后送数线程退出、进程还在", "2 秒内退出、不崩", apple.S2APaceThreadAlive ? "2 秒还在" : $"{wait.ElapsedMilliseconds} ms 退出、没崩", !apple.S2APaceThreadAlive);

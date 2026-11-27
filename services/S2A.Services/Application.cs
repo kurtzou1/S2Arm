@@ -14,10 +14,12 @@ using Ryujinx.Horizon.Sdk.Arp;
 using Microsoft.Win32.SafeHandles;
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using ApplicationId = LibHac.Ncm.ApplicationId;
 using Path = System.IO.Path;
 
@@ -117,6 +119,9 @@ namespace S2A.Services
                 Red.Report("游戏数据缺 ctl/control.nacp", programDir);
             }
             _nacp = nacp;
+            // 程序元数据里跟存档访问权限有关的字段（NpdmFsSummary）：起局开存档被拒（2002-6400）这类单不用等原件就能对字段
+            Console.Error.WriteLine($"S2A 程序元数据：程序号 {ProgramId:X16}，NACP SaveDataOwnerId 0x{nacp.Value.SaveDataOwnerId:X16}、PresenceGroupId 0x{nacp.Value.PresenceGroupId:X16}；"
+                                    + $"{NpdmFsSummary.Aci(npdm.FsAccessControlData)}；{NpdmFsSummary.Acid(npdm.FsAccessControlDescriptor)}");
 
             // Horizon 服务（arp 等）要先就绪
             if (requireSuccess) HorizonHost.WaitServicesReady(device.System.ServiceTable, System.TimeSpan.FromSeconds(30));
@@ -140,12 +145,14 @@ namespace S2A.Services
 
             // 单一 IMG v1（v0.3.0）：有 game.img 就用它（Mac 运行目录里的是 iPhone 资源包那份的硬链接，0.6.0 一款一份资源）；旧形态（romfs.img 三件套 / romfs/ 目录）照旧支持。
             //   Mac 运行目录的界面覆盖层在 ui_overlay/romfs（iPhone 资源包是 romfs_overlay，OpenImg 缺省）
+            IStorage given = null;   // 交给游戏的本体 RomFS（下面四种来源之一），推支持语言用
             IStorage imgV1 = RomFsIndex.OpenImg(programDir, Directory.Exists(overlayDir) ? overlayDir : null);
             if (imgV1 != null)
             {
                 // programIndex 是目录槽（0 = 这个包的根程序，单独导出的程序 n 也在槽 0），不是程序身份序号：没标目标的 romfs/ Mod 给根程序，按身份序号改会错
                 imgV1 = RomFsMods.ApplyAtLaunch(imgV1, programIndex, ProgramId);   // 资源替换类 mod（RomFsMods.cs）：没有 mod 原对象返回；下面几处同
                 device.Configuration.VirtualFileSystem.SetRomFs(pid, RomFsIndex.ReadLog(imgV1, readLogAs));
+                given = imgV1;
                 Native.Mark("服务：RomFS 单一 IMG\0"u8);
             }
             // 标准 RomFS 镜像（Mac 运行版本 / 产物根里 romfs/ 不在、只有 romfs.std）：整个文件就是游戏要的 RomFS，直接交（RomFsIndex.OpenStd）；romfs/ 在照旧读目录
@@ -154,6 +161,7 @@ namespace S2A.Services
             {
                 IStorage image = RomFsMods.ApplyAtLaunch(RomFsIndex.OpenStd(std, overlayDir), programIndex, ProgramId);
                 device.Configuration.VirtualFileSystem.SetRomFs(pid, RomFsIndex.ReadLog(image, readLogAs));
+                given = image;
                 Native.Mark("服务：RomFS 标准镜像\0"u8);
             }
             IStorage imageStorage = imgV1 != null || std != null ? null : RomFsIndex.OpenImage(programDir);
@@ -163,6 +171,7 @@ namespace S2A.Services
             {
                 imageStorage = RomFsMods.ApplyAtLaunch(imageStorage, programIndex, ProgramId);
                 device.Configuration.VirtualFileSystem.SetRomFs(pid, RomFsIndex.ReadLog(imageStorage, readLogAs));
+                given = imageStorage;
                 Native.Mark("服务：RomFS 单文件镜像\0"u8);
             }
             else if (source == RomFsIndex.Source.Directory)
@@ -185,6 +194,7 @@ namespace S2A.Services
                 }
 
                 image = RomFsMods.ApplyAtLaunch(image, programIndex, ProgramId);
+                given = image;
                 device.Configuration.VirtualFileSystem.SetRomFs(pid, RomFsIndex.ReadLog(image, readLogAs));   // 镜像本身按偏移读：各数据存储会话互不共享读位置（#883），大读也不租中间数组
                 Native.Mark("服务：RomFS 目录表建\0"u8);
             }
@@ -192,6 +202,8 @@ namespace S2A.Services
             {
                 Red.Report("游戏数据缺 romfs/（也没有 romfs.std）", programDir);
             }
+
+            DeriveLanguages(given, nacp.Value);
 
             Aoc.Register(gameDir);   // DLC：aoc.tsv 里的全部登记为已拥有（有数据的挂 aoc/<idx>/，仅授权的挂载时报红）
 
@@ -220,6 +232,32 @@ namespace S2A.Services
 
             Native.Mark("服务：arp 登记\0"u8);
             Console.Error.WriteLine($"S2A 应用登记：程序号 {ProgramId:X16}、pid {pid}、{result.Name} {result.DisplayVersion}");
+        }
+
+        // D-7FZ6：控制数据是导入时合成的（显示版本 ?）或没声明已知语言 → 从 RomFS 文件路径推游戏支持的语言（RomFsLanguages），交 GetDesiredLanguage 当真表用；
+        //   推不出（没有语言槽）留 -1，选语言照旧（#465 回宿主主语言）。推出的表打一行黄字，日后与真表对账（11-26 对账：RomFS 有、NACP 没声明的会多推）
+        internal static void DeriveLanguages(IStorage romfs, in LibHac.Ns.ApplicationControlProperty nacp)
+        {
+            Ryujinx.HLE.S2AHooks.RomFsTitleLanguages = -1;
+            int flag = (int)nacp.SupportedLanguageFlag;
+            if (romfs == null || (nacp.DisplayVersionString.ToString() != "?"
+                && !Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.NoKnownLanguages(flag))) return;   // 真 NACP：用它自己的表
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            List<string> files = new();
+            try { RomFsIndex.ListFiles(new LibHac.Tools.FsSystem.RomFs.RomFsFileSystem(romfs).FileTable, "", files); }
+            catch (Exception e)   // 推不出只是不知道支持表，不拦起局
+            {
+                Console.Error.WriteLine($"[S2A 语言] 【黄】控制数据是合成的（0x{flag:X4}），列 RomFS 文件失败（{e.Message}）：支持表未知，选语言照旧按宿主主语言");
+                return;
+            }
+            int bits = RomFsLanguages.Detect(files, out int slots);
+            if (bits == 0)
+            {
+                Console.Error.WriteLine($"[S2A 语言] 【黄】控制数据是合成的（0x{flag:X4}），RomFS {files.Count} 个文件里没有语言槽：支持表未知，选语言照旧按宿主主语言（{sw.ElapsedMilliseconds} ms）");
+                return;
+            }
+            Ryujinx.HLE.S2AHooks.RomFsTitleLanguages = bits;
+            Console.Error.WriteLine($"[S2A 语言] 【黄】控制数据是合成的（0x{flag:X4}）：支持表按 RomFS 推出 0x{bits:X5}（{RomFsLanguages.Names(bits)}；语言槽 {slots} 个、文件 {files.Count} 个，{sw.ElapsedMilliseconds} ms）");
         }
 
         // 程序序号表（Ryujinx ProcessLoaderHelper.RegisterProgramMapInfo，每次加载都登记）：序号 i → 程序号 应用号 + i、主程序号 = 应用号。
@@ -568,5 +606,73 @@ namespace S2A.Services
 
         protected override Result DoOperateRange(Span<byte> outBuffer, OperationId operationId, long offset, long size, ReadOnlySpan<byte> inBuffer)
             => ResultFs.NotImplemented.Value;
+    }
+
+    // 程序元数据里跟存档 / 内容访问权限有关的字段，起局打一行（D-6BQ7 组：两款游戏起局开存档 2002-6400 PermissionDenied，诊断里没有 npdm 的访问控制段，
+    //   定因要等原件）。只记字段值（权限位、属主号、可访问性），不记任何文字内容与玩家信息。格式按公开的 NPDM 说明（switchbrew「NPDM」页 FS Access Control）：
+    //   ACI 段（FsAccessControlData）：0x0 版本、0x4 u64 权限位、0xC/0x10 内容属主信息偏移 / 长度、0x14/0x18 存档属主信息偏移 / 长度；
+    //     内容属主信息 = u32 个数 + u64 号 × 个数；存档属主信息 = u32 个数 + u8 可访问性 × 个数（1 读、2 写、3 读写）+ 补齐到 4 字节 + u64 号 × 个数
+    //   ACID 段（FsAccessControlDescriptor）：0x0 版本、0x1 内容属主个数、0x2 存档属主个数、0x4 u64 权限位、0xC/0x14 内容属主号下 / 上限、
+    //     0x1C/0x24 存档属主号下 / 上限、0x2C 起依次是内容属主号、存档属主号（u64）
+    //   段太短 / 偏移越界的照实写「段不全」，不抛
+    internal static class NpdmFsSummary
+    {
+        private const int MaxIds = 8;   // 每张表最多列这么多个，多出的写「等 N 个」
+
+        internal static string Aci(ReadOnlySpan<byte> d)
+        {
+            if (d.Length < 0x1C) return $"ACI 段不全（{d.Length} 字节）";
+            var sb = new StringBuilder();
+            sb.Append($"ACI 版本 {d[0]} 权限 0x{BinaryPrimitives.ReadUInt64LittleEndian(d[4..]):X16}");
+            uint coOff = BinaryPrimitives.ReadUInt32LittleEndian(d[0xC..]), coSize = BinaryPrimitives.ReadUInt32LittleEndian(d[0x10..]);
+            uint sdOff = BinaryPrimitives.ReadUInt32LittleEndian(d[0x14..]), sdSize = BinaryPrimitives.ReadUInt32LittleEndian(d[0x18..]);
+            sb.Append("，内容属主 ");
+            if (coSize < 4) sb.Append("无");
+            else if (coOff + (ulong)coSize > (ulong)d.Length) sb.Append("段不全");
+            else
+            {
+                uint n = BinaryPrimitives.ReadUInt32LittleEndian(d[(int)coOff..]);
+                Ids(sb, d, (int)coOff + 4, n, (int)(coOff + coSize), null, 0);
+            }
+            sb.Append("，存档属主 ");
+            if (sdSize < 4) sb.Append("无");
+            else if (sdOff + (ulong)sdSize > (ulong)d.Length) sb.Append("段不全");
+            else
+            {
+                uint n = BinaryPrimitives.ReadUInt32LittleEndian(d[(int)sdOff..]);
+                int acc = (int)sdOff + 4;
+                if (acc + (long)n > sdOff + sdSize) sb.Append($"段不全（{n} 个）");
+                else Ids(sb, d, (acc + (int)n + 3) & ~3, n, (int)(sdOff + sdSize), d, acc);   // 可访问性之后补齐到 4 字节再是号
+            }
+            return sb.ToString();
+        }
+
+        internal static string Acid(ReadOnlySpan<byte> d)
+        {
+            if (d.Length < 0x2C) return $"ACID 段不全（{d.Length} 字节）";
+            int co = d[1], sd = d[2];
+            var sb = new StringBuilder();
+            sb.Append($"ACID 版本 {d[0]} 权限 0x{BinaryPrimitives.ReadUInt64LittleEndian(d[4..]):X16}");
+            sb.Append($"，内容属主号范围 0x{BinaryPrimitives.ReadUInt64LittleEndian(d[0xC..]):X16}–0x{BinaryPrimitives.ReadUInt64LittleEndian(d[0x14..]):X16}");
+            sb.Append($"，存档属主号范围 0x{BinaryPrimitives.ReadUInt64LittleEndian(d[0x1C..]):X16}–0x{BinaryPrimitives.ReadUInt64LittleEndian(d[0x24..]):X16}");
+            sb.Append("，列出内容属主 "); Ids(sb, d, 0x2C, (uint)co, d.Length, null, 0);
+            sb.Append("，列出存档属主 "); Ids(sb, d, 0x2C + 8 * co, (uint)sd, d.Length, null, 0);
+            return sb.ToString();
+        }
+
+        // n 个 u64 号从 at 起（不得越过 end）；acc 不为空时每个号后面带可访问性（读 / 写 / 读写）
+        private static void Ids(StringBuilder sb, ReadOnlySpan<byte> d, int at, uint n, int end, ReadOnlySpan<byte> acc, int accAt)
+        {
+            if (n == 0) { sb.Append("0 个"); return; }
+            if (at + 8L * n > end) { sb.Append($"{n} 个（段不全）"); return; }
+            sb.Append($"{n} 个：");
+            for (int i = 0; i < n && i < MaxIds; i++)
+            {
+                if (i > 0) sb.Append('、');
+                sb.Append($"0x{BinaryPrimitives.ReadUInt64LittleEndian(d[(at + 8 * i)..]):X16}");
+                if (!acc.IsEmpty) { byte a = acc[accAt + i]; sb.Append(a == 1 ? "（读）" : a == 2 ? "（写）" : a == 3 ? "（读写）" : $"（{a}）"); }
+            }
+            if (n > MaxIds) sb.Append($" 等 {n} 个");
+        }
     }
 }

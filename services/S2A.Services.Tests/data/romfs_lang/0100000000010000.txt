@@ -1,0 +1,14 @@
+LocalizedData/CNzh/LayoutData/FontData.szs
+LocalizedData/EUde/LayoutData/FontData.szs
+LocalizedData/EUen/LayoutData/FontData.szs
+LocalizedData/EUes/LayoutData/FontData.szs
+LocalizedData/EUfr/LayoutData/FontData.szs
+LocalizedData/EUit/LayoutData/FontData.szs
+LocalizedData/EUnl/LayoutData/FontData.szs
+LocalizedData/EUru/LayoutData/FontData.szs
+LocalizedData/JPja/LayoutData/FontData.szs
+LocalizedData/KRko/LayoutData/FontData.szs
+LocalizedData/TWzh/LayoutData/FontData.szs
+LocalizedData/USen/LayoutData/FontData.szs
+LocalizedData/USes/LayoutData/FontData.szs
+LocalizedData/USfr/LayoutData/FontData.szs

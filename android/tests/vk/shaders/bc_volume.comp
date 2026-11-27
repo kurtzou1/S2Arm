@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+#version 450
+
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) uniform sampler3D volume;
+layout(std430, set = 0, binding = 1) writeonly buffer Samples {
+    vec4 texels[];
+};
+layout(push_constant) uniform Dispatch {
+    uint mip;
+    uint start;
+} selected;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    // 每次派发统一取一个 mip，避开 llvmpipe 512-bit 下跨 mip 分歧的 texelFetch 错读。
+    int mip = int(selected.mip);
+    uvec3 size = uvec3(textureSize(volume, mip));
+    if (index >= size.x * size.y * size.z) return;
+    uvec3 xyz = uvec3(index % size.x, (index / size.x) % size.y, index / (size.x * size.y));
+#ifdef S2A_BC_TEST_WRONG_SLICE
+    xyz.z = (xyz.z + 1u) % size.z;
+#endif
+    texels[selected.start + index] = texelFetch(volume, ivec3(xyz), mip);
+}

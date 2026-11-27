@@ -324,6 +324,23 @@ raise SystemExit(main.main())
             code2, why2 = errors.classify_failure("ipa", None, ["light.log：rc=1；没有别的原因"])
             self.assertEqual(code2, "app_control_blocked", why2)
 
+    def test_windows_metal_missing_beats_missing_prebuilt(self):
+        # #2278 / D-HA5D（Windows 0.6.10）：编着色器库前 metal.exe 读不到版本（退出 0xC0000135，缺 DLL），同时随包 rcodesign 大小不对 → 原先归 app_control_blocked，
+        #   玩家看到「被 Windows 拦下」，关了防护、管理员运行都没用。Metal 编译器是玩家自己装的、不在随包清单里：日志结论 win_metal_missing 胜出，rcodesign 记进说明。
+        #   期望按构造手写；反证：只有随包件缺（日志没有 metal 字样）→ 照旧 app_control_blocked
+        import errors
+        tools = self.root / "Prepare"; (tools / "signing").mkdir(parents=True)
+        (tools / "signing" / "rcodesign.exe").write_bytes(b"ab")          # 清单记 4 字节
+        (tools / "prepare.json").write_text(json.dumps({"schema": 1, "source": "x", "files": {"signing/rcodesign.exe": [4, "0" * 64]}}))
+        line = ("[直连库] 🔴 出库前核工具 / 链号失败：dmsh_chain.py 退出码 1：[RED] translation chain tools do not match the lock file: "
+                "metal_macosx: lock Apple metal version 32023.883 (metalfe-32023.883) / actual missing (no version output: exit code 0xc0000135)")
+        with patch.dict(os.environ, {"S2A_PREBUILT_TOOLS": str(tools)}):
+            code, why = errors.classify_failure("direct", None, [line])
+            self.assertEqual(code, "win_metal_missing", why)
+            self.assertIn("rcodesign.exe", why)
+            code2, why2 = errors.classify_failure("direct", None, ["direct_lib.log：rc=1；没有别的原因"])
+            self.assertEqual(code2, "app_control_blocked", why2)
+
     def test_graphics_api_verdict_beats_missing_prebuilt(self):
         # D-TW4Z（Windows 0.6.9）：日志写着「unsupported graphics API: unknown」（gfx_api.py 读游戏程序的结论，不经随包工具），
         #   同时随包 rcodesign 记成缺 → 原先归 app_control_blocked。期望手写：归 graphics_api_unsupported，说明里写清 rcodesign 缺的是哪种

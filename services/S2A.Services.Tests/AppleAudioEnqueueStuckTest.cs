@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
-using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
 using Ryujinx.Audio.Backends.Common;
 using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
@@ -11,11 +11,13 @@ using System.Threading;
 
 namespace S2A.Services.Tests
 {
-    // #1598 Mac 无声：输出队列卡死时，一次交设备（AudioQueueEnqueueBuffer）卡几百毫秒到几秒，渲染一拍里的「DSP」跟着拖到 2–7 秒、随后停流全无声；
+    // #1598 Mac 无声：输出器件卡死时，一次交设备（拉取档 = 设备 render 回调）卡几百毫秒到几秒，渲染一拍里的「DSP」跟着拖到 2–7 秒、随后停流全无声；
     //   原兜底只看「设备 1 秒没回调且在途有数据」，生产方被交设备拖住时接不住，只有切窗口走解冻路径重启队列才恢复。
-    //   真声卡（本机 AudioQueue），测试钩子 S2A_AUDIO_TEST_ENQ_STALL_AT=1:600 让开播后第 1 秒的一次交设备在计时窗口里睡 600 ms。期望按语义手算：
-    // ① 钩子到点生效（打一行「测试钩子…交设备卡 600 ms」）
-    // ② 看门狗（每 250 ms 一拍）在钩子后 3 秒内按「交设备卡了 ≥ 250 ms」重启输出队列：打「兜底：一次交设备…卡了 6xx ms」，重新开播 rc=0
+    //   真声卡（本机拉取会话），测试钩子 S2A_AUDIO_TEST_ENQ_STALL_AT=1:600 让开播后第 1 秒的一次回调在计时窗口里睡 600 ms。期望按语义手算：
+    //   拉取档下卡在回调里的 600 ms 同时就是「设备 600 ms 没有回调」——统一停交还机制（VirtualAfterMs = 200 ms）先接住；#1598 的单次卡死判定
+    //   （EnqueueStuckMs = 250 ms）仍在,接「已返回但单次 ≥ 250 ms」的慢回调;卡在回调里的从外面看不出和停播的区别,由统一机制兜：
+    // ① 钩子到点生效（打一行「测试钩子…回调卡 600 ms」）
+    // ② 看门狗（每 250 ms 一拍）按「器件 … ms 没有回调」改走无设备播放、VirtualProbeMs（500 ms）后试回设备重启：一行「试回设备…重新开播 rc=0」
     // ③ 重启后设备照常播：之后播完的帧数涨到 ≥ 24000（0.5 秒声音；排着 4 秒声音，不缺数据）
     //   等法（11-22 门禁偶发红：本机负载高时 1.5 秒里只播完 19165 帧，负载 40 时 33.6k、空闲时更多）：按条件等「播完涨到 24000」，
     //   10 秒为卡死上限——判的是「重启后在播」，不是「1.5 秒内播多快」。队列卡死不播时计数不涨，10 秒后照样红。
@@ -62,7 +64,7 @@ namespace S2A.Services.Tests
             string Line(string s) { foreach (string l in log.ToString().Split('\n')) if (l.Contains(s)) return l.Trim(); return "—"; }
 
             var reader = new ToneReader();
-            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
             IHardwareDeviceSession session = driver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, null, SampleFormat.PcmInt16, 48000, 2);
             session.Start();
 
@@ -77,9 +79,9 @@ namespace S2A.Services.Tests
             bool hook = WaitLog("测试钩子", 10000);
             Row("① 钩子到点生效", "10 秒内一行「交设备卡 600 ms」", hook ? Line("测试钩子") : "没生效", hook && Line("测试钩子").Contains("卡 600 ms"));
 
-            bool healed = WaitLog("一次交设备（AudioQueueEnqueueBuffer）卡了", 10000);
-            string hl = Line("一次交设备（AudioQueueEnqueueBuffer）卡了");
-            Row("② 看门狗按交设备卡死重启输出队列", "10 秒内、重新开播 rc=0", healed ? hl : "没重启", healed && hl.Contains("重新开播 rc=0"));
+            bool healed = WaitLog("没有回调", 10000) && WaitLog("试回设备", 10000);
+            string hl = Line("试回设备");
+            Row("② 看门狗按停交还兜底重启输出器件", "10 秒内改走无设备播放、试回设备，重新开播 rc=0", healed ? hl : "没重启", healed && hl.Contains("重新开播 rc=0"));
 
             ulong p0 = session.GetPlayedSampleCount(), played = 0;
             var sw3 = Stopwatch.StartNew();

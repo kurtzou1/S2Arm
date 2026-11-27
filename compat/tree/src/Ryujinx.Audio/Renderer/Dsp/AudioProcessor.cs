@@ -325,6 +325,32 @@ namespace Ryujinx.Audio.Renderer.Dsp
                 PerformanceCounter.ElapsedTicks + (untilNs - nowNs) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
         }
 
+        // S2Arm (#2157 评审 #15,玩家 #1308 诊断 D-BEKN): 配速水位的地板 = 自己的 30 ms(S2A_AUDIO_DEPTH_MS),抬到输出设备
+        //   的 IO 周期所要求的水位——固定 30 ms 在 IO 周期 4096 帧(≈85 ms)的设备上,一次回调要 4096 帧、在途只有
+        //   30 ms,每拍欠载出爆音;会话侧(IS2AIOAwareDepth)按「IO 周期 + 1/4 周期 + 1024 帧、上限环容量」报水位,
+        //   这里取大。旧会话不实现 / 读不到 = ≤0,不抬高,行为不变
+        private long S2ADepthTargetFrames()
+        {
+            long target = S2ADepthFrames;
+
+            for (int i = 0; i < OutputDevices.Length; i++)
+            {
+                if (OutputDevices[i] is not HardwareDeviceImpl d)
+                {
+                    continue;
+                }
+
+                long io = d.S2AIODepthFrames;
+
+                if (io > target)
+                {
+                    target = io;
+                }
+            }
+
+            return target;
+        }
+
         // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
         private bool S2ADepthWait(long increment, long timeNow)
         {
@@ -345,7 +371,8 @@ namespace Ryujinx.Audio.Renderer.Dsp
             }
 
             long period = Constants.TargetSampleCount;
-            long depthNs = S2ADepthFrames * 1_000_000_000L / Constants.TargetSampleRate;
+            long depthFrames = S2ADepthTargetFrames();
+            long depthNs = depthFrames * 1_000_000_000L / Constants.TargetSampleRate;
 
             // What a long stall left unrendered is a gap already heard: owe at most 8 periods, never more
             _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
@@ -360,7 +387,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
             while (true)
             {
-                bool below = buffered < S2ADepthFrames;
+                bool below = buffered < depthFrames;
                 long capAt = _s2aVirt - depthNs - increment;   // rendering earlier than this runs ahead of the wall clock by more than the depth
 
                 if (below && timeNow >= capAt)
@@ -368,7 +395,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
                     break;
                 }
 
-                if (buffered < S2ADepthFrames / 2 && _s2aCatchUp > 0)
+                if (buffered < depthFrames / 2 && _s2aCatchUp > 0)
                 {
                     catchUp = true;
 
@@ -376,7 +403,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
                 }
 
                 // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)
-                if ((timeNow >= _s2aVirt && buffered < S2ADepthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
+                if ((timeNow >= _s2aVirt && buffered < depthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
                 {
                     break;
                 }
@@ -389,10 +416,10 @@ namespace Ryujinx.Audio.Renderer.Dsp
                 }
                 else
                 {
-                    wake = Math.Min(wake, timeNow + (buffered - S2ADepthFrames + 1) * 1_000_000_000L / Constants.TargetSampleRate);
+                    wake = Math.Min(wake, timeNow + (buffered - depthFrames + 1) * 1_000_000_000L / Constants.TargetSampleRate);
                 }
 
-                if (buffered < S2ADepthFrames + 2 * period)
+                if (buffered < depthFrames + 2 * period)
                 {
                     wake = Math.Min(wake, _s2aVirt);
                 }

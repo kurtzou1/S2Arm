@@ -3,6 +3,7 @@ using Ryujinx.Audio.Renderer.Parameter;
 using Ryujinx.Audio.Renderer.Utils;
 using Ryujinx.Common.Logging;
 using System;
+using System.Diagnostics;
 using static Ryujinx.Audio.Renderer.Common.BehaviourParameter;
 
 using CpuAddress = System.UInt64;
@@ -10,12 +11,83 @@ using DspAddress = System.UInt64;
 
 namespace Ryujinx.Audio.Renderer.Server.MemoryPool
 {
+    // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): guest 驻留 hook 的录制日志。影子解析段(锁外)里本类换到
+    //   录制模式:本该在这里发生的 Map/Unmap(AudioProcessorMemoryManager → S2AAudioPoolResident.Hook)不立即执行,
+    //   按发生原序记进日志,锁2a 落账段(锁内)重放——unmap 在锁外执行会把 DSP 正在读的区域退驻留
+    //   (S2AWiredBuffer.cs:61-66 防的正是这个);Map 也就序成今天时序。容量一次配足、每更新复用(零稳态分配),
+    //   Record 的越界丢记只会发生在容量算错时(按池数/声音数/效果数/汇数公式推的上界),Debug.Assert 兜底报红。
+    public sealed class S2AHookLog
+    {
+        public struct Entry
+        {
+            public bool Map;        // true = Map(驻留),false = Unmap(退驻留)
+            public CpuAddress Address;
+            public ulong Size;
+        }
+
+        private readonly Entry[] _entries;
+
+        public int Count { get; private set; }
+
+        public S2AHookLog(int capacity)
+        {
+            _entries = new Entry[capacity];
+        }
+
+        public void Clear()
+        {
+            Count = 0;
+        }
+
+        public void Record(bool map, CpuAddress address, ulong size)
+        {
+            Debug.Assert(Count < _entries.Length, "S2AHookLog 容量不足(上界公式漏了哪种挂接?)");
+
+            if (Count < _entries.Length)
+            {
+                _entries[Count++] = new Entry { Map = map, Address = address, Size = size };
+            }
+        }
+
+        // 落账段重放 [start, end) 原序执行;handle 与录制时同源(调用方 = 渲染器,hook 只看地址/尺寸/方向)
+        public void Replay(int start, int end, uint processHandle)
+        {
+            if (end > Count)
+            {
+                end = Count;
+            }
+
+            for (int i = start; i < end; i++)
+            {
+                ref Entry entry = ref _entries[i];
+
+                if (entry.Map)
+                {
+                    AudioProcessorMemoryManager.Map(processHandle, entry.Address, entry.Size);
+                }
+                else
+                {
+                    AudioProcessorMemoryManager.Unmap(processHandle, entry.Address, entry.Size);
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Memory pool mapping helper.
     /// </summary>
     public class PoolMapper
     {
         const uint CurrentProcessPseudoHandle = 0xFFFF8001;
+
+        // S2Arm (#12/#13 拆分): 影子解析段(锁外)的录制日志;null = 不录制,Map/Unmap 当场执行(与上游一致)。
+        //   池表解析(FindMemoryPool)在影子池表(锁1 快照拷贝)上做:池表字段只有游戏线程写,锁外解析无撕裂。
+        internal S2AHookLog S2ALog;
+
+        // S2Arm (#12/#13 拆分 · 处方②): 波表翻转重演(锁2a)时抑制重发挂接的 hook——那两次 Map 已在解析段记进
+        //   日志、紧接着按原序重放,重演里再执行就是双倍;重演的 ForceUnmap(Unmap(A_old))不抑制,它必须立即执行、
+        //   排在该槽重发 Map 之前(今天的时序)。落账后复位
+        internal bool S2ASuppressAttachHooks;
 
         /// <summary>
         /// The result of <see cref="Update(ref MemoryPoolInfo, ref MemoryPoolInParameter, ref MemoryPoolOutStatus)"/>.
@@ -141,7 +213,21 @@ namespace Ryujinx.Audio.Renderer.Server.MemoryPool
         /// <returns>Returns the DSP address mapped.</returns>
         public DspAddress Map(ref MemoryPoolInfo memoryPool)
         {
-            DspAddress result = AudioProcessorMemoryManager.Map(GetProcessHandle(ref memoryPool), memoryPool.CpuAddress, memoryPool.Size);
+            CpuAddress cpuAddress = memoryPool.CpuAddress;
+            ulong size = memoryPool.Size;
+
+            // S2Arm (#12/#13 拆分): 录制模式只记 hook、不执行;返回值与 DspAddress 置位走 Map 的确定结果(地址原样),
+            //   影子池表落账时一并拷回
+            if (S2ALog != null)
+            {
+                S2ALog.Record(map: true, cpuAddress, size);
+
+                memoryPool.DspAddress = cpuAddress;
+
+                return cpuAddress;
+            }
+
+            DspAddress result = AudioProcessorMemoryManager.Map(GetProcessHandle(ref memoryPool), cpuAddress, size);
 
             if (result != 0)
             {
@@ -163,7 +249,15 @@ namespace Ryujinx.Audio.Renderer.Server.MemoryPool
                 return false;
             }
 
-            AudioProcessorMemoryManager.Unmap(GetProcessHandle(ref memoryPool), memoryPool.CpuAddress, memoryPool.Size);
+            if (S2ALog != null)
+            {
+                // S2Arm (#12/#13 拆分): 记 hook 不执行,落账段重放;池表状态照写在影子上,落账拷回
+                S2ALog.Record(map: false, memoryPool.CpuAddress, memoryPool.Size);
+            }
+            else
+            {
+                AudioProcessorMemoryManager.Unmap(GetProcessHandle(ref memoryPool), memoryPool.CpuAddress, memoryPool.Size);
+            }
 
             memoryPool.SetCpuAddress(0, 0);
             memoryPool.DspAddress = 0;
@@ -205,12 +299,27 @@ namespace Ryujinx.Audio.Renderer.Server.MemoryPool
 
                 if (!memoryPool.IsEmpty)
                 {
-                    AudioProcessorMemoryManager.Unmap(_processHandle, memoryPool[0].CpuAddress, memoryPool[0].Size);
+                    if (S2ALog != null)
+                    {
+                        // S2Arm (#12/#13 拆分): 记 hook 不执行(解析段在锁外,unmap 落账段才执行);解析用的是影子池表
+                        S2ALog.Record(map: false, memoryPool[0].CpuAddress, memoryPool[0].Size);
+                    }
+                    else
+                    {
+                        AudioProcessorMemoryManager.Unmap(_processHandle, memoryPool[0].CpuAddress, memoryPool[0].Size);
+                    }
 
                     return;
                 }
 
-                AudioProcessorMemoryManager.Unmap(_processHandle, addressInfo.CpuAddress, 0);
+                if (S2ALog != null)
+                {
+                    S2ALog.Record(map: false, addressInfo.CpuAddress, 0);
+                }
+                else
+                {
+                    AudioProcessorMemoryManager.Unmap(_processHandle, addressInfo.CpuAddress, 0);
+                }
             }
         }
 
@@ -333,11 +442,28 @@ namespace Ryujinx.Audio.Renderer.Server.MemoryPool
 
             if (_isForceMapEnabled)
             {
-                DspAddress dspAddress = AudioProcessorMemoryManager.Map(_processHandle, addressInfo.CpuAddress, addressInfo.Size);
+                if (S2ASuppressAttachHooks)
+                {
+                    // S2Arm (#12/#13 拆分 · 处方②): 波表翻转重演——重发挂接的 hook 已在日志里待重放,这里只做状态
+                    addressInfo.ForceMappedDspAddress = addressInfo.CpuAddress;
+                }
+                // S2Arm (#12/#13 拆分): 录制模式记双 Map(今天本样:AssignDspAddress 强制映射路径对同一区域 Map 两次,
+                //   落账段按原序重放两次),ForceMappedDspAddress 走 Map 的确定结果(地址原样)
+                else if (S2ALog != null)
+                {
+                    S2ALog.Record(map: true, addressInfo.CpuAddress, addressInfo.Size);
+                    S2ALog.Record(map: true, addressInfo.CpuAddress, addressInfo.Size);
 
-                addressInfo.ForceMappedDspAddress = dspAddress;
+                    addressInfo.ForceMappedDspAddress = addressInfo.CpuAddress;
+                }
+                else
+                {
+                    DspAddress dspAddress = AudioProcessorMemoryManager.Map(_processHandle, addressInfo.CpuAddress, addressInfo.Size);
 
-                AudioProcessorMemoryManager.Map(_processHandle, addressInfo.CpuAddress, addressInfo.Size);
+                    addressInfo.ForceMappedDspAddress = dspAddress;
+
+                    AudioProcessorMemoryManager.Map(_processHandle, addressInfo.CpuAddress, addressInfo.Size);
+                }
             }
             else
             {

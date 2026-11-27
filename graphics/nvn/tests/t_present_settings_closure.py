@@ -14,7 +14,8 @@
      a. 全量里某个符号由候选 X 提供、闭包里换了提供者（库里的弱兜底定义）或没了 → X 进根；
      b. 闭包程序里的字符串点到候选 X 定义的全局符号（dlsym(RTLD_DEFAULT, "…") 这类运行期自查）→ X 进根；
      c. 闭包程序比全量多出运行期查找（dynamically looked up）的符号 → 提供它的候选进根。
-  4. 清单 = 闭包源文件 + 它们与 t_present_settings.m 编译实读的仓库头文件（-MD）+ 闭包程序的运行期查找符号（dyn 行，构建核对用）。
+  4. 清单 = 闭包源文件 + 它们与 t_present_settings.m 编译实读的仓库头文件（-MD）+ 链进来的静态库成员的源文件与实读头文件（lib 行，DWARF 行号表；
+     门禁输入用，11-26 #2242 改 libnvn 成员没触发本测）+ 闭包程序的运行期查找符号（dyn 行，构建核对用）。
   5. 用正式模式按新清单重建一遍：链接、头文件核对、运行期查找核对都过，且与全量的提供者对照一致，才写。"""
 import os
 import re
@@ -194,13 +195,18 @@ def main(argv):
                     rel2 = rp[len(os.path.realpath(ROOT)) + 1:]
                     if not rel2.startswith("build/") and rel2 not in closure and rel2 != tps.MAIN:
                         hdrs.add(rel2)
+        libs = [a for a in args if os.path.basename(a) in ("libnvn.a", "libnxgal.a", "libdsx.a")]
+        lfiles, blind = tps.pulled_files(mapf, ROOT, libs)
+        if blind:
+            sys.exit(f"【红】链进来的库成员对不上源文件，lib 行算不出：{' '.join(blind[:10])}")
+        libl = sorted(lfiles - set(closure) - hdrs - {tps.MAIN})
         dyn = sorted(tps.dynamic(exe))
         body = ["# 上屏设置矩阵的链接清单：由 graphics/nvn/tests/t_present_settings_closure.py 按链接器实算生成，不要手改（改了也会被构建核对拦住）。",
                 "# 构建（t_present_settings.sh）只编、只链 src 行；门禁按本清单的路径算 present_settings_test / present_settings_env_test 的输入。",
                 f"# 候选 {len(cands)} 个源文件，闭包 {len(closure)} 个。"]
-        body += [f"src {c}" for c in closure] + [f"hdr {h}" for h in sorted(hdrs)] + [f"dyn {s}" for s in dyn]
+        body += [f"src {c}" for c in closure] + [f"hdr {h}" for h in sorted(hdrs)] + [f"lib {x}" for x in libl] + [f"dyn {s}" for s in dyn]
         text = "\n".join(body) + "\n"
-        print(f"候选 {len(cands)} → 闭包 {len(closure)} 个源文件（{rounds} 轮），头文件 {len(hdrs)}，运行期查找 {len(dyn)}")
+        print(f"候选 {len(cands)} → 闭包 {len(closure)} 个源文件（{rounds} 轮），头文件 {len(hdrs)}，库成员文件 {len(libl)}，运行期查找 {len(dyn)}")
         for o in sorted(roots):
             if why.get(o, "").startswith(("提供", "程序")):
                 print(f"  补根 {objof[o]}：{why[o]}")

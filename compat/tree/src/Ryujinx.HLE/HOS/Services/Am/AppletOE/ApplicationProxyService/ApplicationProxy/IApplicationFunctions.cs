@@ -148,7 +148,14 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             // S2Arm: Switch 2 游戏不知道支持哪些语言（导出目录一律没有控制分区，导入时合成；或支持位为 0）→ 直接回宿主主语言（玩家显式指定的优先），不写死英语。
             //   0.2.3 起合成件只声明美式英语 / 位为 0 回美式英语（#401），所有 Switch 2 游戏在中文系统下都成了英文（#465，程序号 0400486024DEC000 原先跟系统语言显示）。
             //   只对 Switch 2（程序号 04 开头）：Switch 1 的合成件（#401 NUP 没带控制分区）保持下面的英语退路，游戏不支持宿主语言时会黑屏
-            if (Switch2LanguagesUnknown(process.ProgramId, supportedLanguages, process.ApplicationControlProperties.DisplayVersionString.ToString()))
+            // S2Arm D-7FZ6：合成件的支持表由 RomFS 推出了（services RomFsLanguages）且玩家没显式指定游戏语言 → 当真表用，走下面的五步退路；
+            //   原样交宿主主语言时，游戏不支持的语言（0400486024DEC000 + 泰语系统）首帧前读空指针崩。推不出照旧下面这条（#465）
+            if (UseRomFsLanguages(supportedLanguages, process.ApplicationControlProperties.DisplayVersionString.ToString(), S2AHooks.RomFsTitleLanguages, S2AHooks.ExplicitSystemLanguage))
+            {
+                Logger.Info?.Print(LogClass.ServiceAm, $"[S2A 语言] 控制数据是合成的（0x{supportedLanguages:X4}），支持表按 RomFS 推出 0x{S2AHooks.RomFsTitleLanguages:X5}");
+                supportedLanguages = S2AHooks.RomFsTitleLanguages;
+            }
+            else if (Switch2LanguagesUnknown(process.ProgramId, supportedLanguages, process.ApplicationControlProperties.DisplayVersionString.ToString()))
             {
                 Logger.Info?.Print(LogClass.ServiceAm, $"[S2A 语言] 宿主主语言 {context.Device.System.State.DesiredTitleLanguage}，Switch 2 游戏支持表未知（控制数据是合成的或没声明，0x{supportedLanguages:X4}），按宿主主语言");
                 context.ResponseData.Write(desiredLanguageCode);
@@ -204,6 +211,12 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         // S2Arm: Switch 2 游戏（程序号 04 开头）且支持哪些语言未知：支持位（0..15）全为 0，或控制数据是导入时合成的（pack/ns2_dump.py synth_nacp 把显示版本写成 "?"，真游戏不会是这个值）
         internal static bool Switch2LanguagesUnknown(ulong programId, int supportedLanguages, string displayVersion) =>
             (programId >> 56) == 0x04 && (NoKnownLanguages(supportedLanguages) || displayVersion == "?");
+
+        // S2Arm D-7FZ6: the control data is synthesized (display version "?", pack/ns2_dump.py synth_nacp) or declares no known language, services derived a
+        //   table from the RomFS (romFsLanguages > 0) and the player did not choose a language: use the derived table. Applies to every program (an 01 Switch 2 base +
+        //   update synthesized at import, #617, too); a real NACP keeps its own table
+        internal static bool UseRomFsLanguages(int supportedLanguages, string displayVersion, int romFsLanguages, bool explicitSystemLanguage) =>
+            romFsLanguages > 0 && !explicitSystemLanguage && (displayVersion == "?" || NoKnownLanguages(supportedLanguages));
 
         // S2Arm: 支持位里一个已知语言（0 美式英语 … 15 巴西葡语、16 波兰语、17 泰语）都没有。原先用「最低位 > 巴西葡语」或低 16 位判，
         //   只支持波兰语 / 泰语的款被当成没有语言（审计 P2-275）

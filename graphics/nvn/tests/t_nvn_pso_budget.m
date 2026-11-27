@@ -22,6 +22,9 @@
 //   ⑰ 先取基础管线到预热线就停（pb_prefetch_full）：常驻 6 → 不停；常驻 7 → 停；不记「预热停了几行」；DM_PSO_BUDGET=0 → 不停
 //   ⑱ 第一帧之前（还没发布常驻数）预热工人放进的基础管线也算：放 6 条 → 不停，放第 7 条 → 停；发布之后（常驻 7 里已含这 7 条）不重复算
 //   ⑲ 地址额度也看得到发布之前放进的基础管线：空洞 1 GB + 10 × 256 KB、常驻 0、未领 0、基础管线 3 条（还没发布）→ 地址额度 13
+//   ⑳ 网格管线（g_pso_mtk）算常驻：渲染表 6 条（第 1000–1005 帧）+ 网格管线 6 条（第 0–500 帧）+ 1 个在建占位 + 1 条拒建记录（NSNull）→ 常驻 12；
+//      检查后放到 8 条：放掉的 4 条正是 0–3 号网格管线，渲染表 6 条全留、占位与拒建记录不算也不放；放掉的同时从名字表、首画记录里去掉（对象等 GPU 那拍后释放）；
+//      放掉的 0 号又建 → 网格条数 3、淘汰后重建计 1
 #include "../gfx/nvn/nvn_mtl.m"
 static unsigned checks, failures;
 #define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "SETUP FAIL %s:%d %s\n", __FILE__, __LINE__, #c); exit(2); } } while (0)
@@ -42,6 +45,8 @@ static void reset_va(uint64_t holes, int have) {   // 地址额度：不设 DM_P
 }
 static pbase_key bkey_of(int i) { pbase_key b; memset(&b, 0, sizeof b); b.vf = (const void *)(uintptr_t)(0x1000 + i); b.ff = (const void *)(uintptr_t)0x2000; b.samples = 1; return b; }
 static void put_b(int i, uint64_t frame) { pbase_key b = bkey_of(i); atomic_store(&g_cur_frame, frame); os_unfair_lock_lock(&g_pbase_lock); pb_base_put_locked(&b, [NSObject new]); os_unfair_lock_unlock(&g_pbase_lock); }
+static mtk_key key_m(int i) { mtk_key m; memset(&m, 0, sizeof m); m.k = key_of(1000 + i); m.ts = (const void *)(uintptr_t)0x77; return m; }
+static int has_m(int i) { mtk_key m = key_m(i); return hm_get_id(&g_pso_mtk, &m) != nil; }
 static int has_b(int i) { pbase_key b = bkey_of(i); id o = hm_get_id(&g_pbase, &b); return o && o != NSNull.null; }
 static void reset(const char *budget) {
     nvn_hm_clear(&g_pso, (void (*)(void *))CFRelease); nvn_hm_clear(&g_cps, NULL); nvn_hm_clear(&g_pb_use_r, NULL); nvn_hm_clear(&g_pb_gone_r, NULL);
@@ -164,6 +169,34 @@ int main(void) { @autoreleasepool {
     atomic_store(&g_cur_frame, 12000);
     @autoreleasepool { pb_tick(); }
     CHECK(pb_budget() >= 14 && g_pso.n == 11 && g_pb_evicted == 9, "⑮ 峰值 12 + 余量 2：额度 %u（应 14）、常驻 20 放后表里 %u（应 11）、淘汰 %llu（应 9）", pb_budget(), g_pso.n, (unsigned long long)g_pb_evicted);
+    // ⑳ 网格管线算常驻、超额一起放
+    reset("10");
+    for (int i = 0; i < 6; i++) put_r(100 + i, 1000 + (uint64_t)i, NULL);
+    __weak id wm0 = nil; id kept_m4 = nil;
+    os_unfair_lock_lock(&g_pso_mtk_lock);
+    nvn_hm_clear(&g_pso_mtk, hm_rel); nvn_hm_clear(&g_pb_use_m, NULL); nvn_hm_clear(&g_pb_gone_m, NULL); atomic_store(&g_pb_mtk, 0);
+    g_mtk_names = [NSMapTable strongToStrongObjectsMapTable]; g_mtk_drawn = [NSMutableSet set];
+    if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new];
+    for (int i = 0; i < 8; i++) {
+        mtk_key mk = key_m(i); atomic_store(&g_cur_frame, (uint64_t)i * 100);
+        id o = i < 6 ? [NSObject new] : i == 6 ? g_pso_mtk_building : NSNull.null;
+        mtk_put_locked(&mk, o);
+        if (i < 6) { [g_mtk_names setObject:@"m" forKey:o]; [g_mtk_drawn addObject:o]; }
+        if (i == 0) wm0 = o; if (i == 4) kept_m4 = o;
+    }
+    os_unfair_lock_unlock(&g_pso_mtk_lock);
+    uint32_t live0 = pb_live(), nm0 = atomic_load(&g_pb_mtk);
+    atomic_store(&g_cur_frame, 2000);
+    @autoreleasepool { pb_tick(); }
+    int mgone_m = 0, rkept_m = 0; for (int i = 0; i < 4; i++) mgone_m += !has_m(i); for (int i = 0; i < 6; i++) rkept_m += has_r(100 + i);
+    CHECK(live0 == 12 && nm0 == 6 && mgone_m == 4 && has_m(4) && has_m(5) && has_m(6) && has_m(7) && rkept_m == 6 && atomic_load(&g_pb_mtk) == 2 && g_pb_evicted == 4,
+          "⑳ 网格管线算常驻：放前常驻 %u（应 12）、网格 %u（应 6）；放掉 0–3 号网格 %d / 4、4–5 号与占位 / 拒建留下 %s、渲染表留 %d / 6、网格剩 %u（应 2）、淘汰 %llu（应 4）",
+          live0, nm0, mgone_m, has_m(4) && has_m(5) && has_m(6) && has_m(7) ? "是" : "否", rkept_m, atomic_load(&g_pb_mtk), (unsigned long long)g_pb_evicted);
+    CHECK(g_mtk_names.count == 2 && g_mtk_drawn.count == 2 && [g_mtk_names objectForKey:kept_m4] && wm0 != nil,
+          "⑳ 放掉的网格管线从名字表 / 首画记录去掉：名字表 %lu 条（应 2）、首画 %lu 条（应 2）、留下的 4 号还在名字表 %s；0 号对象等 GPU 那拍再放（现在 %s）",
+          (unsigned long)g_mtk_names.count, (unsigned long)g_mtk_drawn.count, [g_mtk_names objectForKey:kept_m4] ? "是" : "否", wm0 ? "还在" : "已释放");
+    { mtk_key mk = key_m(0); os_unfair_lock_lock(&g_pso_mtk_lock); mtk_put_locked(&mk, [NSObject new]); os_unfair_lock_unlock(&g_pso_mtk_lock); }
+    CHECK(atomic_load(&g_pb_mtk) == 3 && g_pb_rebuilt == 1, "⑳ 放掉的 0 号网格管线又建：网格 %u（应 3）、淘汰后重建 %llu（应 1）", atomic_load(&g_pb_mtk), (unsigned long long)g_pb_rebuilt);
     printf("%s t_nvn_pso_budget：%u 项，%u 项不符\n", failures ? "✗" : "✓", checks, failures);
     return failures ? 1 : 0;
 } }

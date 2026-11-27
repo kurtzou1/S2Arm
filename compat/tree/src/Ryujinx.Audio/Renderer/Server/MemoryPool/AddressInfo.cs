@@ -115,6 +115,10 @@ namespace Ryujinx.Audio.Renderer.Server.MemoryPool
         /// </summary>
         /// <param name="markUsed">If true, mark the <see cref="MemoryPoolInfo"/> as used.</param>
         /// <returns>Returns the DSP address associated to the <see cref="AddressInfo"/>.</returns>
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 影子槽里的池指针指着影子池表(原生块,指针稳定),
+        //   落账按「指针 − 影子池表基址」算下标、在 live 池表上重绑(两边池表同布局)
+        internal readonly unsafe nint S2AMemoryPoolPointer => (nint)_memoryPools;
         public readonly DspAddress GetReference(bool markUsed)
         {
             if (!HasMappedMemoryPool())

@@ -751,7 +751,9 @@ def missing_prebuilt(env=None):
     return gone
 
 
-UNRELATED_TO_PREBUILT = ("disk_full", "graphics_api_unsupported")   # 日志里有这些确凿结论时，随包件缺不抢归因（classify_failure）
+# 日志里有这些确凿结论时，随包件缺不抢归因（classify_failure）。win_metal_missing：Metal 编译器是玩家自己装的苹果 Metal Developer Tools，不在随包清单里，
+#   随包件缺解释不了它起不来（#2278 / D-HA5D Windows 0.6.10：metal.exe 退出 0xC0000135，同时随包 rcodesign 记成缺 → 原先归 app_control_blocked，玩家关了防护照样失败）
+UNRELATED_TO_PREBUILT = ("disk_full", "graphics_api_unsupported", "win_metal_missing")
 
 
 def prebuilt_reason(rel, env=None):

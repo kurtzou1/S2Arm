@@ -36,6 +36,15 @@ namespace Ryujinx.Audio.Renderer.Server
 
         private readonly ref UpdateDataHeader OutputHeader => ref _outputHeader;
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 声音段由 S2AUpdateShadow 的解析驱动逐槽驱动(波表重演要
+        //   逐槽记录 isValid 与 hook 起点,处方①③),从这里借走输入读取器与输出游标——其余段照旧走本类方法,
+        //   读取器位置由驱动推进后交还,段序与消费核算不变
+        internal SequenceReader<byte> S2AInputReader => _inputReader;
+        internal void S2ASetInputReader(SequenceReader<byte> value) => _inputReader = value;
+        internal Memory<byte> S2AOutput => _output;
+        internal void S2ASetOutput(Memory<byte> value) => _output = value;
+        internal ref UpdateDataHeader S2AOutputHeader => ref _outputHeader;
+
         public StateUpdater(ReadOnlySequence<byte> input, Memory<byte> output, uint processHandle, BehaviourInfo behaviourInfo)
         {
             _inputReader = new SequenceReader<byte>(input);
@@ -306,21 +315,7 @@ namespace Ryujinx.Audio.Renderer.Server
         {
             effect.ForceUnmapBuffers(mapper);
 
-            effect = parameter.Type switch
-            {
-                EffectType.Invalid => new BaseEffect(),
-                EffectType.BufferMix => new BufferMixEffect(),
-                EffectType.AuxiliaryBuffer => new AuxiliaryBufferEffect(),
-                EffectType.Delay => new DelayEffect(),
-                EffectType.Reverb => new ReverbEffect(),
-                EffectType.Reverb3d => new Reverb3dEffect(),
-                EffectType.BiquadFilter when _behaviourInfo.IsBiquadFilterParameterFloatSupported() => new BiquadFilterEffect(2),
-                EffectType.BiquadFilter => new BiquadFilterEffect(1),
-                EffectType.Limiter => new LimiterEffect(),
-                EffectType.CaptureBuffer => new CaptureBufferEffect(),
-                EffectType.Compressor => new CompressorEffect(),
-                _ => throw new NotImplementedException($"EffectType {parameter.Type} not implemented!"),
-            };
+            effect = BaseEffect.S2ACreate(parameter.Type, _behaviourInfo.IsBiquadFilterParameterFloatSupported());
         }
 
         public ResultCode UpdateEffects(EffectContext context, bool isAudioRendererActive, PoolMapper mapper)
@@ -566,13 +561,7 @@ namespace Ryujinx.Audio.Renderer.Server
         {
             sink.CleanUp();
 
-            sink = parameter.Type switch
-            {
-                SinkType.Invalid => new BaseSink(),
-                SinkType.CircularBuffer => new CircularBufferSink(),
-                SinkType.Device => new DeviceSink(),
-                _ => throw new NotImplementedException($"SinkType {parameter.Type} not implemented!"),
-            };
+            sink = BaseSink.S2ACreate(parameter.Type);
         }
 
         public ResultCode UpdateSinks(SinkContext context, PoolMapper mapper)

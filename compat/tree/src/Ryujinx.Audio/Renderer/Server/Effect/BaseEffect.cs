@@ -242,9 +242,9 @@ namespace Ryujinx.Audio.Renderer.Server.Effect
         }
 
         /// <summary>
-        /// Get the <see cref="PerformanceDetailType"/> associated to the <see cref="Type"/> of this effect.
+        /// Get the <see cref="PerformanceDetailType"/> associated to the <see cref="Type"/> of this <see cref="BaseEffect"/>.
         /// </summary>
-        /// <returns>The <see cref="PerformanceDetailType"/> associated to the <see cref="Type"/> of this effect.</returns>
+        /// <returns>The <see cref="PerformanceDetailType"/> associated to the <see cref="Type"/> of this <see cref="BaseEffect"/>.</returns>
         public PerformanceDetailType GetPerformanceDetailType()
         {
             return Type switch
@@ -260,6 +260,55 @@ namespace Ryujinx.Audio.Renderer.Server.Effect
                 EffectType.Compressor => PerformanceDetailType.Compressor,
                 _ => throw new NotImplementedException($"{Type}"),
             };
+        }
+
+        // S2Arm (#12/#13 拆分): 按型建实例(= StateUpdater.ResetEffect 原来的 new switch,一处共用:
+        //   解析段对影子实例做型变重置、影子构建时按 live 型补建影子实例)
+        internal static BaseEffect S2ACreate(EffectType type, bool biquadFilterParameterFloatSupported)
+        {
+            return type switch
+            {
+                EffectType.Invalid => new BaseEffect(),
+                EffectType.BufferMix => new BufferMixEffect(),
+                EffectType.AuxiliaryBuffer => new AuxiliaryBufferEffect(),
+                EffectType.Delay => new DelayEffect(),
+                EffectType.Reverb => new ReverbEffect(),
+                EffectType.Reverb3d => new Reverb3dEffect(),
+                EffectType.BiquadFilter when biquadFilterParameterFloatSupported => new BiquadFilterEffect(2),
+                EffectType.BiquadFilter => new BiquadFilterEffect(1),
+                EffectType.Limiter => new LimiterEffect(),
+                EffectType.CaptureBuffer => new CaptureBufferEffect(),
+                EffectType.Compressor => new CompressorEffect(),
+                _ => throw new NotImplementedException($"EffectType {type} not implemented!"),
+            };
+        }
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 效果实例的游戏侧字段影子拷贝。方向两用:锁1 把 live 拷进
+        //   影子(解析段的基底),锁2a 把影子拷回 live(落账)。只发生在同型实例之间(S2AUpdateShadow 保证);
+        //   型变不拷贝、走整实例替换(ResetEffect 的语义,见 S2AUpdateShadow 的效果落账)。
+        //   字段矩阵:游戏写的(Type/IsEnabled/BufferUnmapped/UsageState 的 New 置位/MixId/ProcessingOrder/WorkBuffers
+        //   挂接)与拍写的(UpdateForCommandGeneration 的 UsageState New→Enabled/Disabled 迁移、各型 Parameter.Status)
+        //   都拷——基底取锁1 快照,与波表重演基底(处方①)同口径:这两个拍写字段落账成快照值,落在「Update 在快照点
+        //   串行、拍在落账后重做同一迁移」的今天可能序上。DSP 状态(Memory<XxxState>,Get-only)不拷、引用共享:
+        //   效果 Update 不写它,DSP 在锁外独写。
+        //   子类 override 必须先调 base.S2AShadowCopyGameFieldsFrom。
+        internal virtual void S2AShadowCopyGameFieldsFrom(BaseEffect source)
+        {
+            Type = source.Type;
+            IsEnabled = source.IsEnabled;
+            BufferUnmapped = source.BufferUnmapped;
+            UsageState = source.UsageState;
+            MixId = source.MixId;
+            ProcessingOrder = source.ProcessingOrder;
+            WorkBuffers[0] = source.WorkBuffers[0];
+            WorkBuffers[1] = source.WorkBuffers[1];
+        }
+
+        // S2Arm (#12/#13 拆分): 工缓(挂接缓冲的地址信息)池指针重绑——影子槽里的指针指影子池表,落账重绑到 live
+        internal void S2ARebindWorkBuffers(S2AUpdateShadow shadow)
+        {
+            shadow.S2ARebindAddressInfo(ref WorkBuffers[0]);
+            shadow.S2ARebindAddressInfo(ref WorkBuffers[1]);
         }
     }
 }

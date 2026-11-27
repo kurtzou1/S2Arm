@@ -3444,6 +3444,37 @@ void nvn_be_drain(void) { if (mtl_gpu_halted()) { MLOG("GPU 安全停中：后�
 static int g_red_once[216];   // RED_ONCE keys 0..215 (215: #674 programmable blending, the blend state for slot 27 could not be staged in the frame arena (enc_r_slot27), the draw keeps the bit map only; 214: 画法拷贝的源级别 / 层超出源贴图（copy_t2t_draw）；213: 同一张贴图挂在两个颜色槽、后一个槽经影子画（rtdup_attach），同一遍里两个槽写了同一通道：遍末按后一个槽并回，两槽之间的先后不保留; 211–212: PR3c 出图 PSO 多槽 — 211 PQ 层目标（RGB10A2Unorm）的出图管线建不出：HDR 槽回退 SDR 基线（红一次 + 死槽负缓存，不 MDIE——基线槽照旧 MDIE，B4 不放宽 SDR 现状）；212 上屏目标像素格式超过 4 种（gal_present.m 同数四槽），本格式本帧不出图；207–208: nvn_present_fsr.inc FSR 1 on the present — 207 the shaders / pipelines could not be made, 208 a slot's textures / buffers / argument tables could not be allocated; either way the present goes on bilinear; 206: a BC texture drawn as blocks on a GPU without BC, its shadow / staging / decode not made, bcdec_attach / bcdec_flush; 205: texture upload / pool-storage synchronization; 202–204: nvn_stex.inc 放置式稀疏贴图块管理 — CPU 写的 / GPU 写的稀疏贴图同步失败（没堆页 / 暂存），稀疏贴图不做 tex_upgrade 整张复制; 198–201: nvn_sparse_tex.inc Metal sparse textures — heap / texture not made, page / level deswizzle failed, map / upload command buffer failed; 195–197: nvn_tensor.inc tensor_fix_in, the tensor stand-in's fixed-size input; 194: #798 a texel buffer's aligned lead view could not be made, tbl_view; 193: a texture outside any memory pool with an unmapped storage tail, #b5a081; 188–192: internal resolution — 188 a draw / dispatch still held scaled image-slot storages after the retry limit, rs_pre_draw / rs_pre_images; 189 a storage past the device texture limit, rs_rescale / tex_widen; 190 a CPU readback of an enlarged storage not scaled back linearly, nvn_be_read_texels; 191 an image-slot storage that could not go back to its own size; 192 a screenshot of the enlarged window texture not scaled back; 187: a multisample count the GPU does not support, stepped down, mtl_samples_supported (#903); 186: a packaged texture's storage runs past the end of its memory pool, pkg_upload_ (#819); 183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: a storage buffer address pushed into an NVN2 push slot the pools do not hold (SBUFQ; until 11-07 a not-loaded color attachment written); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133; 209–210: a vertex stream the draw reads past its bound range not limited — the range is over the staging size / a GPU write on the stream is queued in this submission, bind_vbufs vbuf_limit; 207–208: nvn_present_fsr.inc FSR 1 on the present — 207 the shaders / pipelines could not be made, 208 a slot's textures / buffers / argument tables could not be allocated; either way the present goes on bilinear; 206: a BC texture drawn as blocks on a GPU without BC, its shadow / staging / decode not made, bcdec_attach / bcdec_flush; 205: texture upload / pool-storage synchronization; 202–204: nvn_stex.inc 放置式稀疏贴图块管理 — CPU 写的 / GPU 写的稀疏贴图同步失败（没堆页 / 暂存），稀疏贴图不做 tex_upgrade 整张复制; 198–201: nvn_sparse_tex.inc Metal sparse textures — heap / texture not made, page / level deswizzle failed, map / upload command buffer failed; 195–197: nvn_tensor.inc tensor_fix_in, the tensor stand-in's fixed-size input; 194: #798 a texel buffer's aligned lead view could not be made, tbl_view; 193: a texture outside any memory pool with an unmapped storage tail, #b5a081; 188–192: internal resolution — 188 a draw / dispatch still held scaled image-slot storages after the retry limit, rs_pre_draw / rs_pre_images; 189 a storage past the device texture limit, rs_rescale / tex_widen; 190 a CPU readback of an enlarged storage not scaled back linearly, nvn_be_read_texels; 191 an image-slot storage that could not go back to its own size; 192 a screenshot of the enlarged window texture not scaled back; 187: a multisample count the GPU does not support, stepped down, mtl_samples_supported (#903); 186: a packaged texture's storage runs past the end of its memory pool, pkg_upload_ (#819); 183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: a storage buffer address pushed into an NVN2 push slot the pools do not hold (SBUFQ; until 11-07 a not-loaded color attachment written); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133
 // The key must be a constant inside the table: a key past the end wrote into the statics next to it (11-05: nvn_tensor.inc used 160 / 161 with 147 slots)
 #define RED_ONCE(k, ...) do { _Static_assert((k) >= 0 && (k) < (int)(sizeof g_red_once / sizeof g_red_once[0]), "RED_ONCE key outside g_red_once"); if (!g_red_once[k]++) MLOG("【红】 " __VA_ARGS__); } while (0)
+
+// 建 Metal 贴图视图的唯一出口（带层 / 级别范围的那种）：范围伸出源贴图时 newTextureView 在 Metal 校验上整进程 abort
+//   （D-4T8M「newSliceRange.location + length (2) must be <= (1)」；D-K6Y5 / D-N9VB / D-XR64 iPhone 上一款游戏（01008DB008C2C000 / 0100ABF008968000）「(3) must be <= (2)」，渲染提交线程）。
+//   越界不建、回 nil（各调用方本来就按「建不了视图」处理：空槽 / 不画 / 退回原图，Ryujinx 对建不了的视图也是不绑），打一行红字写清是哪个函数、源贴图形状与要的范围
+static NSUInteger mtl_view_slices(id<MTLTexture> t) {   // 视图的 slices 按源贴图的这一维计：2D 数组 = 层数，立方体 = 6 面，立方体数组 = 6 × 个数，其余 = 1
+    switch (t.textureType) {
+        case MTLTextureType2DArray: case MTLTextureType2DMultisampleArray: case MTLTextureType1DArray: return t.arrayLength;
+        case MTLTextureTypeCube: return 6;
+        case MTLTextureTypeCubeArray: return t.arrayLength * 6;
+        default: return 1;
+    }
+}
+static int mtl_view_range_ok(id<MTLTexture> b, NSRange lv, NSRange sl, const char *fn) {
+    if (!b) return 0;
+    NSUInteger ns = mtl_view_slices(b);
+    if (lv.length && sl.length && NSMaxRange(lv) <= b.mipmapLevelCount && NSMaxRange(sl) <= ns) return 1;
+    static _Atomic int reds;
+    if (atomic_fetch_add(&reds, 1) < 16)
+        MLOG("【红】 texture view outside its source (%s): levels %lu+%lu of %lu, slices %lu+%lu of %lu (source Metal type %lu, %lux%lu format %lu): not made (Metal would abort the process), the caller takes it as no view",
+             fn, (unsigned long)lv.location, (unsigned long)lv.length, (unsigned long)b.mipmapLevelCount, (unsigned long)sl.location, (unsigned long)sl.length, (unsigned long)ns,
+             (unsigned long)b.textureType, (unsigned long)b.width, (unsigned long)b.height, (unsigned long)b.pixelFormat);
+    return 0;
+}
+static id<MTLTexture> mtl_view_(id<MTLTexture> b, MTLPixelFormat pf, MTLTextureType tt, NSRange lv, NSRange sl, const char *fn) {
+    return mtl_view_range_ok(b, lv, sl, fn) ? [b newTextureViewWithPixelFormat:pf textureType:tt levels:lv slices:sl] : nil;
+}
+static id<MTLTexture> mtl_view_sw_(id<MTLTexture> b, MTLPixelFormat pf, MTLTextureType tt, NSRange lv, NSRange sl, MTLTextureSwizzleChannels sw, const char *fn) {
+    return mtl_view_range_ok(b, lv, sl, fn) ? [b newTextureViewWithPixelFormat:pf textureType:tt levels:lv slices:sl swizzle:sw] : nil;
+}
+#define mtl_view(b, pf, tt, lv, sl) mtl_view_((b), (pf), (tt), (lv), (sl), __func__)
+#define mtl_view_sw(b, pf, tt, lv, sl, sw) mtl_view_sw_((b), (pf), (tt), (lv), (sl), (sw), __func__)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
 #define VB_SLOT(st) ((st) < 14 ? 16 + (st) : (st))
@@ -4149,7 +4180,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         g_ser_gen++;
         pthread_mutex_unlock(&g_smu);
         if (view) {
-            id<MTLTexture> nv = [upgraded newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType levels:NSMakeRange(0, upgraded.mipmapLevelCount) slices:NSMakeRange(0, upgraded.arrayLength) swizzle:view.swizzle];
+            id<MTLTexture> nv = mtl_view_sw(upgraded, view.pixelFormat, view.textureType, NSMakeRange(0, upgraded.mipmapLevelCount), NSMakeRange(0, upgraded.arrayLength), view.swizzle);
             static int nview; if (nview++ < 4) MLOG("sRGB / linear view ser=%llu made again on its upgraded parent (%d so far)", (unsigned long long)t->serial, nview);
             if (nv) { srgb_twin_mark(nv); tex_put(t->serial, nv); upgraded_view = nv; } else RED_ONCE(170, "cannot make the sRGB / linear view ser=%llu again on its upgraded parent: it keeps the old storage", (unsigned long long)t->serial);
         } else if (!named) tex_put(t->serial, upgraded);
@@ -5158,7 +5189,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 if (rc) { enc_ok = 0; break; }
                 if (gdec) {   // decompression job: dispatched at flush, after the deswizzles (up_flush)
                     MTLPixelFormat vf = mt.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : mt.pixelFormat;
-                    id<MTLTexture> v = [mt newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(l, 1) slices:NSMakeRange(y, 1)];
+                    id<MTLTexture> v = mtl_view(mt, vf, MTLTextureType2D, NSMakeRange(l, 1), NSMakeRange(y, 1));
                     size_t qoff; id<MTLBuffer> q = up_param_alloc(&qoff);
                     if (!v) { enc_ok = 0; break; }
                     uint32_t *pp = (uint32_t *)((uint8_t *)q.contents + qoff); pp[0] = (uint32_t)(stg_off + off); pp[1] = (uint32_t)pitch; pp[2] = w; pp[3] = h; pp[4] = (uint32_t)bcd_fmt(t->d.format); pp[5] = 0;
@@ -6303,7 +6334,7 @@ static void sparse_view(NvPkg *pk, const tex_t *t) {
     else r = 0;
     if (r == n) r = n - 1;   // nothing mapped: the smallest level (reads 0)
     if (pk->view) defer_obj_unref(pk->view);   // a view shares its texture's allocation: drop only the reference, the residency set keeps the texture
-    pk->view = r ? [pk->tex newTextureViewWithPixelFormat:pk->tex.pixelFormat textureType:pk->tex.textureType levels:NSMakeRange(r, n - r) slices:NSMakeRange(0, 1)] : nil;
+    pk->view = r ? mtl_view(pk->tex, pk->tex.pixelFormat, pk->tex.textureType, NSMakeRange(r, n - r), NSMakeRange(0, 1)) : nil;
     if (r != (unsigned)pk->vbase) { static int nl; if (nl++ < 6) MLOG("sparse texture ser=%llu %ux%u: sampled from level %u of %u (finer levels not mapped)", (unsigned long long)t->serial, t->d.width, t->d.height, r, n); }
     pk->vbase = (int)r;
 }
@@ -6579,7 +6610,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             MTLTextureDescriptor *d = tex_desc(t, 0);
             if (!d || d.sampleCount > 1 || (d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray)) break;
             if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
-            v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
+            v = mtl_view_sw(b, d.pixelFormat, b.textureType, NSMakeRange(0, b.mipmapLevelCount), NSMakeRange(0, b.arrayLength), b.swizzle);
             if (v) { pthread_mutex_lock(&g_smu); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
                 static int nv; if (nv++ < 4) MLOG("texture ser=%llu format %#x over the storage of its sRGB / linear twin (format %#x): made a view of it (%d so far)", (unsigned long long)t->serial, t->d.format, tw[j], nv); }
         }
@@ -7296,7 +7327,7 @@ static void bcdec_flush(const bcrt_t *e, NSUInteger row) {
     if (failed) return;
     if (!at) { at = rec_table(tab_new(2, 1, 0, &err)); if (!at) { failed = 1; MLOG("【红】 BC blocks drawn on a GPU without BC: cannot create the decode argument table: %s", err.localizedDescription.UTF8String); return; } }
     MTLPixelFormat vf = e->base.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : e->base.pixelFormat;
-    id<MTLTexture> v = [e->base newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(e->level, 1) slices:NSMakeRange(e->slice, 1)];
+    id<MTLTexture> v = mtl_view(e->base, vf, MTLTextureType2D, NSMakeRange(e->level, 1), NSMakeRange(e->slice, 1));
     id<MTLBuffer> pb = nil; size_t po = arena_alloc(32, &pb);
     if (!v || !pb) { RED_ONCE(206, "BC blocks drawn on a GPU without BC: cannot create the decode view / parameters"); return; }
     uint32_t *pp = (uint32_t *)((uint8_t *)pb.contents + po); pp[0] = 0; pp[1] = (uint32_t)row; pp[2] = (uint32_t)e->w; pp[3] = (uint32_t)e->h; pp[4] = e->dec; pp[5] = 0;
@@ -9866,8 +9897,8 @@ static void *tex_by_id_ptr(int tid) {   // Caller holds g_rmu
                                 tid, (int)r.v.target, (unsigned long)base.textureType, (unsigned long)s0, (unsigned long)ns, (unsigned long)total); return NULL; } }
         vc_key k; memset(&k, 0, sizeof k); k.pf = pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)l0; k.nl = (uint32_t)nl; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns; memcpy(k.sw, sw, 4);
         if (!(v = vc_get(rp->t.serial, &k, base))) {
-            v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
-                        : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
+            v = need_sw ? mtl_view_sw(base, (MTLPixelFormat)pf, tt, NSMakeRange(l0, nl), NSMakeRange(s0, ns), MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3]))
+                        : mtl_view(base, (MTLPixelFormat)pf, tt, NSMakeRange(l0, nl), NSMakeRange(s0, ns));
             if (!v) { RED_ONCE(11, "cannot create texture view id %d", tid); v = base; }
             else vc_put(rp->t.serial, rp->t.pool, &k, v);
         }
@@ -9920,7 +9951,7 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, in
     // (a mip- or layer-offset view read through a type-compatible view would otherwise take the parent's first levels and layers). l0 / s0 are 0 and base is t when t is not a view
     id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
     NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
-    id<MTLTexture> v = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
+    id<MTLTexture> v = mtl_view_sw(base, t.pixelFormat, want, NSMakeRange(l0, t.mipmapLevelCount), NSMakeRange(s0, ns), t.swizzle);
     if (!v) { RED_ONCE(77, "cannot create a type-compatible texture view: %lu → %lu (texture ID %d)", (unsigned long)have, (unsigned long)want, tid); return nil; }
     r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl; r->alt_copy = 0; r->alt_made = 0;
     *rid = r->alt_rid; return v;
@@ -9993,8 +10024,8 @@ static id<MTLTexture> tex_alpha_red(int tid, id<MTLTexture> t, uint64_t *rid) {
     treg_drop_ar(r);
     NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
     NSUInteger ns = t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-    id<MTLTexture> v = [base newTextureViewWithPixelFormat:pf textureType:t.textureType levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)
-                                                   swizzle:MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed)];
+    id<MTLTexture> v = mtl_view_sw(base, pf, t.textureType, NSMakeRange(l0, t.mipmapLevelCount), NSMakeRange(s0, ns),
+                                   MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleZero, MTLTextureSwizzleZero, MTLTextureSwizzleRed));
     if (!v) { RED_ONCE(82, "cannot create the alpha-from-red view (texture ID %d format %lu)", tid, (unsigned long)pf); return nil; }
     { static int once; if (!once++) MLOG("single-channel texture alpha from red: first case texture ID %d %lux%lu", tid, (unsigned long)t.width, (unsigned long)t.height); }
     r->ar = (void *)CFBridgingRetain(v); r->ar_of = (__bridge void *)t; r->ar_rid = v.gpuResourceID._impl;
@@ -10080,7 +10111,7 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, uint64_t *rid)
     } else {
         NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
         NSUInteger ns = t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-        v = [base newTextureViewWithPixelFormat:pf textureType:t.textureType levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)];
+        v = mtl_view(base, pf, t.textureType, NSMakeRange(l0, t.mipmapLevelCount), NSMakeRange(s0, ns));
     }
     if (!v) { RED_ONCE(107, "cannot create the image view of class %s (texture ID %d, Metal format %lu)", dpf == NVN_DPF_FLOAT ? "float" : u ? "uint" : "int", tid, (unsigned long)t.pixelFormat); return nil; }
     { static int once; if (cls && !once++) MLOG("image read in another class than its texture: first case texture ID %d Metal format %lu → %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
@@ -10109,7 +10140,7 @@ static id<MTLTexture> tex_float_fit(int tid, id<MTLTexture> t, uint64_t *rid) {
     } else {
         NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
         NSUInteger ns = t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-        v = [base newTextureViewWithPixelFormat:pf textureType:t.textureType levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
+        v = mtl_view_sw(base, pf, t.textureType, NSMakeRange(l0, t.mipmapLevelCount), NSMakeRange(s0, ns), t.swizzle);
     }
     if (!v) { RED_ONCE(103, "cannot create the float view of an integer texture (texture ID %d, Metal format %lu)", tid, (unsigned long)t.pixelFormat); return nil; }
     { static int once; if (!once++) MLOG("integer texture sampled as float: first case texture ID %d Metal format %lu read through format %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
@@ -13303,6 +13334,20 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int rw, int base, __unsafe_
     g_ptab[ti].bound_fence = g_fence + 1;
     *out = g_ptab[ti].buf; return g_ptab[ti].gpu;
 }
+// pool_gpu would only look its table up: no table to make or grow, no retired-while-pinned entries, no dirty / unwritten / seen / left-out work pending.
+//   Then the pool addresses in an argument block encoded earlier in this pass are still right and the patch path (encode_args_) may keep them without calling
+//   pool_gpu. Mirrors the steps at the top of pool_gpu one for one (their own early returns); a step added there needs its condition here.
+//   The same pass also means the same submission, so bound_fence (set when the block was encoded) still covers this draw
+static int pool_gpu_settled(void) {
+    if (!atomic_load_explicit(&g_ptab_any, memory_order_relaxed)) return 0;
+    for (int k = 0; k < POOL_TABS; k++) if (g_ptab[k].used && (g_ptab[k].samp ? g_nsreg : g_ntreg) - g_ptab[k].base > (int)g_ptab[k].n) return 0;
+    if (atomic_load_explicit(&g_pin_has_new, memory_order_acquire)) return 0;
+    if (g_pdirty[0].n || g_pdirty[1].n) return 0;
+    if (g_punwritten.n && g_ser_gen != g_punwritten_ser) return 0;   // pool_unwritten_scan
+    if (g_seen_buf && (g_seen_sub != g_sub_serial || nvn_dirty_now() != g_seen_dirty || g_ser_gen != g_seen_ser)) return 0;   // pool_seen_scan
+    if (g_pleft.n && atomic_load(&g_cur_frame) != g_left_frame) return 0;   // pool_left_scan
+    return 1;
+}
 // New session (nvn_be_shutdown_session, the GPU idle): the tables and their pins go, before the owners below remove what they hold from the residency set
 static void pool_session_reset(void) {
     for (int k = 0; k < POOL_TABS; k++) { pool_tab *t = &g_ptab[k]; if (!t->used) continue;
@@ -14145,7 +14190,7 @@ static int args_ubo_patchable(NvShader *sh) {
     for (int i = 0; i < sh->rf.nb && ok; i++) switch (sh->rf.b[i].kind) {
         case NVN_RB_CBUF: case NVN_RB_UBOLEN: cb = 1; break;
         case NVN_RB_SAMP: case NVN_RB_SAMPT: case NVN_RB_SAMPI: case NVN_RB_TEX: case NVN_RB_IMG: case NVN_RB_TBUF: case NVN_RB_SBUFP: case NVN_RB_SUPPORT: case NVN_RB_C1:
-        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_GEOMETRY: break;
+        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_GEOMETRY: case NVN_RB_PUSH: case NVN_RB_TEXP: case NVN_RB_SAMPP: break;
         default: ok = 0;
     }
     sh->ab_patch = ok && cb ? 1 : 2;
@@ -14241,7 +14286,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         g_stat_args_reuse++;
         return 1;
     }
-    if (reusable && args_ubo_patchable(sh)) {   // only what the uniform slots point at changed since this block: copy it, write the uniform slots and the bounds table again
+    if (reusable && args_ubo_patchable(sh) && (!sh->rf.pool || pool_gpu_settled())) {   // only what the uniform slots point at changed since this block: copy it, write the uniform slots and the bounds table again
         NSUInteger len = sh->arg_len; __unsafe_unretained id<MTLBuffer> ab; size_t off = arena_alloc_u(len, &ab);
         // The block's addresses are taken now: cbuf_slot (ubd_shadow / ubp_get) and len_fill below allocate from the arena too, and when that starts a new block,
         //   g_cur_arena->gpu + off named the new block at this block's offset (the table written here, the GPU pointed elsewhere: GPU page faults; same fix as nxnative 44d67fbe)
@@ -15028,8 +15073,11 @@ static int state_op(uint32_t op, const void *a, uint32_t size) {
         case OP_PUSH_CONST: case OP_PUSH_CONST_PTR: { const p_push_const *pc = a; int c = pc->compute ? 1 : 0;
             const void *src = op == OP_PUSH_CONST ? (const void *)(pc + 1) : (const void *)(uintptr_t)((const p_push_const_ptr *)a)->data;
             if (pc->offset + pc->size > NVN2_PUSH_BYTES || !src) break;
-            memcpy(S.push[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] + pc->offset, src, pc->size); S.push_ver[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] = ++g_push_seq;
-            if (c) g_args_dirty[5] = 1; else memset(g_args_dirty, 1, 5);
+            uint8_t *dst = S.push[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] + pc->offset;
+            if (memcmp(dst, src, pc->size)) {
+                memcpy(dst, src, pc->size); S.push_ver[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] = ++g_push_seq;
+                if (c) g_args_dirty[5] = 1; else memset(g_args_dirty, 1, 5);
+            }
             break; }
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex);
             if (b != (tex ? S.tex_base : S.samp_base)) { if (tex) S.tex_base = b; else S.samp_base = b; args_dirty_all(); }
@@ -16478,7 +16526,7 @@ void ms_after(void) {
         uint32_t w = (uint32_t)MAX(t.width >> g_ms_lv[i], 1ul), h = (uint32_t)MAX(t.height >> g_ms_lv[i], 1ul), tw = (w + 15) / 16, th = (h + 15) / 16, need = 16 + tw * th * 16;
         if (s->n >= MS_MAXE || s->used + need > MS_BUF) { s->full = 1; continue; }
         id<MTLTexture> v = t;
-        if (t.textureType != MTLTextureType2D || g_ms_lv[i] || g_ms_sl[i]) v = [t newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(g_ms_lv[i], 1) slices:NSMakeRange(g_ms_sl[i], 1)];
+        if (t.textureType != MTLTextureType2D || g_ms_lv[i] || g_ms_sl[i]) v = mtl_view(t, pf, MTLTextureType2D, NSMakeRange(g_ms_lv[i], 1), NSMakeRange(g_ms_sl[i], 1));
         if (!v) continue;
         uint32_t *o = (uint32_t *)((uint8_t *)s->b.contents + s->used); o[0] = w; o[1] = h; o[2] = tw; o[3] = 0;
         ms_ent *e = &s->e[s->n++]; e->pass_idx = g_stat_pass - g_ms_first; e->ser = g_ms_aser[i]; e->att = i; e->pdist = pdist; e->fmt = (int)pf; e->w = w; e->h = h; e->off = s->used; s->used += need;
@@ -16539,7 +16587,7 @@ static id<MTLTexture> fb_narrow_view(id<MTLTexture> base, id<MTLTexture> t, MTLT
     static __strong id<MTLTexture> pool[8]; static __unsafe_unretained id<MTLTexture> pbase[8]; static NSUInteger pkey[8][4]; static MTLPixelFormat ppf[8]; static MTLTextureSwizzleChannels psw[8]; static int next;
     MTLTextureSwizzleChannels sw = t.swizzle; MTLPixelFormat pf = t.pixelFormat; MTLTextureType tt = vt; NSUInteger ns = nsl ? nsl : t.textureType == MTLTextureType2DArray ? t.arrayLength : 1;
     for (int i = 0; i < 8; i++) if (pool[i] && pbase[i] == base && pkey[i][0] == tl && pkey[i][1] == n && pkey[i][2] == slice && pkey[i][3] == (ns << 4 | tt) && ppf[i] == pf && !memcmp(&psw[i], &sw, sizeof sw)) return pool[i];
-    id<MTLTexture> v = [base newTextureViewWithPixelFormat:pf textureType:tt levels:NSMakeRange(tl, n) slices:NSMakeRange(slice, ns) swizzle:sw]; if (!v) return nil;
+    id<MTLTexture> v = mtl_view_sw(base, pf, tt, NSMakeRange(tl, n), NSMakeRange(slice, ns), sw); if (!v) return nil;
     if (pool[next]) defer_obj_unref(pool[next]); pool[next] = v; pbase[next] = base; pkey[next][0] = tl; pkey[next][1] = n; pkey[next][2] = slice; pkey[next][3] = ns << 4 | tt; ppf[next] = pf; psw[next] = sw; next = (next + 1) & 7;
     return v;
 }
@@ -18255,7 +18303,7 @@ static void draw_tex(const p_draw_tex *t) {
                          t->src[0], t->src[1], t->src[2], t->src[3], gw, gh);
     if (!tx || !sp) return;   // the lookups said why (texture / sampler ID not registered)
     int own_view = tx.textureType == MTLTextureType2DArray;   // layer 0 as a 2D view (made here, kept until the submission has run)
-    if (own_view) tx = [tx newTextureViewWithPixelFormat:tx.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, tx.mipmapLevelCount) slices:NSMakeRange(0, 1)];
+    if (own_view) tx = mtl_view(tx, tx.pixelFormat, MTLTextureType2D, NSMakeRange(0, tx.mipmapLevelCount), NSMakeRange(0, 1));
     if (!tx || tx.textureType != MTLTextureType2D || fmt_int_or_ds(tx.pixelFormat)) {
         if (!once[1]++) MLOG("【红】 DrawTexture: source texture %d (type %lu, format %lu) is not a 2D colour texture with float reads: not drawn (first case)", tid, (unsigned long)tx.textureType, (unsigned long)tx.pixelFormat);
         return; }
@@ -19082,7 +19130,7 @@ static id<MTLBuffer> rs_read_down(id<MTLTexture> mt, unsigned level, unsigned la
     if (!tmp || !out) return nil;
     id<MTLCommandBuffer> cb = q_cb();
     for (int z = 0; z < nz; z++) {
-        id<MTLTexture> sv = [mt newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(level, 1) slices:NSMakeRange(layer0 + (unsigned)r->zoffset + (unsigned)z, 1)];
+        id<MTLTexture> sv = mtl_view(mt, pf, MTLTextureType2D, NSMakeRange(level, 1), NSMakeRange(layer0 + (unsigned)r->zoffset + (unsigned)z, 1));
         if (!sv) return nil;
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
         rp.colorAttachments[0].texture = tmp; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -19335,7 +19383,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         pso = [NSMutableDictionary dictionary];
     }
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
-    id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
+    id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? mtl_view(s, MTLPixelFormatX32_Stencil8, MTLTextureType2D, NSMakeRange(sl, 1), NSMakeRange(ss + sr->zoffset, 1)) : nil;
     int scopy = stv0 != nil;
     NSNumber *pk = @((d.pixelFormat * 8 + kind) * 2 + scopy);
     id<MTLRenderPipelineState> ps = pso[pk];
@@ -19357,7 +19405,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     if (d3 && (unsigned)(dr->zoffset + nz) > ddepth) { g_t2t_draw_why = "3D 目标的深度片超出范围"; return 0; }
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {
-        id<MTLTexture> sv = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)];
+        id<MTLTexture> sv = mtl_view(s, s.pixelFormat, MTLTextureType2D, NSMakeRange(sl, 1), NSMakeRange(ss + sr->zoffset + z, 1));
         id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
         if (!sv || !pb) { RED_ONCE(84, "format-converting / scaling texture copy: cannot create the source view / argument block"); return z > 0; }
         float *p = (float *)((uint8_t *)pb.contents + po); p[0] = sr->xoffset; p[1] = sr->yoffset; p[2] = (float)sr->width / dr->width; p[3] = (float)sr->height / dr->height;
@@ -19368,7 +19416,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
         int whole = !cx0 && !cy0 && (unsigned)cx1 == dw && (unsigned)cy1 == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
         a.texture = d; a.level = dl; if (d3) a.depthPlane = dr->zoffset + z; else a.slice = ds + dr->zoffset + z; a.loadAction = whole ? MTLLoadActionDontCare : MTLLoadActionLoad; a.storeAction = MTLStoreActionStore;
-        id<MTLTexture> stv = scopy ? (z ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)] : stv0) : nil;
+        id<MTLTexture> stv = scopy ? (z ? mtl_view(s, MTLPixelFormatX32_Stencil8, MTLTextureType2D, NSMakeRange(sl, 1), NSMakeRange(ss + sr->zoffset + z, 1)) : stv0) : nil;
         if (stencil) { MTLRenderPassStencilAttachmentDescriptor *st = rp.stencilAttachment; st.texture = d; st.level = dl; st.slice = a.slice; st.loadAction = scopy ? (whole ? MTLLoadActionDontCare : MTLLoadActionLoad) : MTLLoadActionClear; st.clearStencil = 0; st.storeAction = MTLStoreActionStore; }
         ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
         if (depth) [en setDepthStencilState:scopy ? dss_s : dss];
@@ -20890,7 +20938,7 @@ static void td_dump(void) {
             strlcat(rp_, ".raw", sizeof rp_);
             FILE *f = fopen(rp_, "wb"); if (f) { fprintf(f, "%lu %lu %lu %zu\n", (unsigned long)rw, (unsigned long)rh, (unsigned long)t.pixelFormat, rw * bpp); fwrite(rb.contents, 1, rw * rh * bpp, f); fclose(f); }
         }
-        id<MTLTexture> v = [t newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(lv, 1) slices:NSMakeRange(sl, 1)];
+        id<MTLTexture> v = mtl_view(t, t.pixelFormat, MTLTextureType2D, NSMakeRange(lv, 1), NSMakeRange(sl, 1));
         NSUInteger w = MAX(t.width >> lv, 1u), h = MAX(t.height >> lv, 1u);
         MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;
@@ -20937,7 +20985,7 @@ static void td_dump(void) {
     // 采样到的 BC 贴图（td_note_bc）：第 0 级第 0 层，缩到 ≤512 存 <TEXDUMP 路径 %d=0>_vbc_<序号>.png；日志逐张记来历
     for (NSArray *e in g_td_bc) {
         id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue];
-        id<MTLTexture> v = [t newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+        id<MTLTexture> v = mtl_view(t, t.pixelFormat, MTLTextureType2D, NSMakeRange(0, 1), NSMakeRange(0, 1));
         NSUInteger w = t.width, h = t.height, m = MAX(w, h); if (m > 512) { w = MAX(w * 512 / m, 1u); h = MAX(h * 512 / m, 1u); }
         MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;

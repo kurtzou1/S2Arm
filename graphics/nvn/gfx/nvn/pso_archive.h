@@ -365,8 +365,10 @@ static void par_flush_bg(void) {
 static _Atomic uint64_t g_par_dedup, g_par_dedup_ns;   // 等了别人在编的同一条：次数、总等待
 // 只读计数（单测按事件判、不量墙钟，t_nvn_pso_inflight）：进入「等别人在编的同键」的次数；编完时慢编译定时器还没到的次数。不改行为
 static _Atomic uint64_t g_par_wait_enter, g_par_slow_fast;
+static void pb_footprint_line(uint64_t built, uint64_t hit, uint64_t compiled);   // nvn_pso_budget.inc：每 256 条一行常驻条数与占用（D-EH7W）
 static void par_count(int hit) {
     uint64_t h = hit ? atomic_fetch_add(&g_par_hits, 1) + 1 : atomic_load(&g_par_hits), m = hit ? atomic_load(&g_par_misses) : atomic_fetch_add(&g_par_misses, 1) + 1;
+    if (!((h + m) & 255)) pb_footprint_line(h + m, h, m);
     if (!((h + m) & (h + m - 1)) && h + m >= 256) MLOG("pipeline archive: %llu builds, %llu from the archive, %llu compiled; %llu written this run, %llu stale files rewritten; %llu waited for the same key another thread was building (%.1f ms in all)",
                                                       (unsigned long long)(h + m), (unsigned long long)h, (unsigned long long)m, (unsigned long long)atomic_load(&g_par_written), (unsigned long long)atomic_load(&g_par_stale),
                                                       (unsigned long long)atomic_load(&g_par_dedup), atomic_load(&g_par_dedup_ns) / 1e6);

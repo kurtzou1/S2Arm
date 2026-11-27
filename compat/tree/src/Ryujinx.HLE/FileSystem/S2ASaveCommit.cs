@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Path = LibHac.Fs.Path;
 
@@ -181,6 +182,17 @@ namespace Ryujinx.HLE.FileSystem
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _dirLocks = new(StringComparer.Ordinal);
         private static int _commits;
         private int _openWritable;   // files open for writing: a commit with one open is refused, as LibHac's journaled commit does
+        // S2Arm: 开着的写模式文件（路径 → 打开次数，按打开时是不是即时存档重放分开记）：提交 / 回滚因「写模式文件没关」被拒时点名是哪些、谁开的。
+        //   D-ZDDH（11-26，01004D300C5AE000 恢复局）：恢复成功、重放 0 异常，4 分钟后游戏第一次提交回 2002-6457——重放后多出一个没人关的写模式文件，日志里看不出是哪个
+        private readonly Dictionary<string, int> _openPaths = new(StringComparer.Ordinal);
+        private string OpenWritableList()
+        {
+            lock (_openPaths) { var sb = new StringBuilder(); foreach (var kv in _openPaths) sb.Append(sb.Length > 0 ? "；" : "").Append(kv.Key).Append(" ×").Append(kv.Value); return sb.ToString(); }
+        }
+        private void NoteOpenWritable(string key, int delta)
+        {
+            lock (_openPaths) { int n = _openPaths.GetValueOrDefault(key) + delta; if (n > 0) _openPaths[key] = n; else _openPaths.Remove(key); }
+        }
         // 上次提交（或挂载、回滚）以来游戏对每个文件的最后一次写入：偏移 + 头 64 字节，按游戏的实际调用记（WritableFile）。提交前把这些文件刷到盘再克隆，
         //   克隆后逐个核对新版本里这段字节就是游戏写的；对不上就不提交（已提交版本不动、报红）。一款游戏（iPhone）写成功的 2 字节存档被提交成了 2 个零字节，
         //   下次起局读它抛异常中止：提交永远不能把游戏写进去的数据换成别的
@@ -418,6 +430,7 @@ namespace Ryujinx.HLE.FileSystem
         {
             if (Volatile.Read(ref _openWritable) > 0)
             {
+                Logger.Error?.Print(LogClass.ServiceFs, $"【红】存档提交被拒：还开着 {Volatile.Read(ref _openWritable)} 个写模式文件（{OpenWritableList()}）");
                 return ResultFs.WriteModeFileNotClosed.Log();
             }
 
@@ -781,6 +794,7 @@ namespace Ryujinx.HLE.FileSystem
             {
                 if (Volatile.Read(ref _openWritable) > 0)
                 {
+                    Logger.Error?.Print(LogClass.ServiceFs, $"【红】存档回滚被拒：还开着 {Volatile.Read(ref _openWritable)} 个写模式文件（{OpenWritableList()}）");
                     return ResultFs.WriteModeFileNotClosed.Log();   // 同提交：换走工作目录后，开着的描述符还指在换出的旧树上，再写就丢
                 }
 
@@ -893,7 +907,9 @@ namespace Ryujinx.HLE.FileSystem
             }
 
             Interlocked.Increment(ref _openWritable);
-            outFile.Reset(new WritableFile(ref file.Ref, this, path.ToString()));
+            string key = (S2AHooks.SnapReplaying ? "重放时开：" : "") + path.ToString();
+            NoteOpenWritable(key, 1);
+            outFile.Reset(new WritableFile(ref file.Ref, this, path.ToString(), key));
 
             return Result.Success;
         }
@@ -903,14 +919,15 @@ namespace Ryujinx.HLE.FileSystem
             private UniqueRef<IFile> _file;
             private S2ASaveTransaction _owner;
             private readonly S2ASaveTransaction _txn;
-            private readonly string _path;
+            private readonly string _path, _openKey;
 
-            public WritableFile(ref UniqueRef<IFile> file, S2ASaveTransaction owner, string path)
+            public WritableFile(ref UniqueRef<IFile> file, S2ASaveTransaction owner, string path, string openKey)
             {
                 _file = new UniqueRef<IFile>(ref file);
                 _owner = owner;
                 _txn = owner;
                 _path = path;
+                _openKey = openKey;
             }
 
             protected override Result DoRead(out long bytesRead, long offset, Span<byte> destination, in ReadOption option) => _file.Get.Read(out bytesRead, offset, destination, in option);
@@ -964,6 +981,7 @@ namespace Ryujinx.HLE.FileSystem
                 if (_owner != null)
                 {
                     Interlocked.Decrement(ref _owner._openWritable);
+                    _owner.NoteOpenWritable(_openKey, -1);
                     _owner = null;
                 }
 

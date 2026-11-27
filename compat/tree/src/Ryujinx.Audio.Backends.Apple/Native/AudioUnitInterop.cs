@@ -18,6 +18,12 @@ namespace Ryujinx.Audio.Backends.Apple.Native   // 平台例外：Apple 后端�
         public const uint kAudioUnitSubType_SpatialMixer = 0x3364656D;    // '3dem'
         public const uint kAudioUnitManufacturer_Apple = 0x6170706C;     // 'appl'
 
+        // S2Arm（#2157 只留一种传输，AudioUnit 拉取取代 AudioQueue）：输出器件——macOS 用 DefaultOutput（AUHAL 特化、
+        //   跟随用户默认输出设备，与 AudioQueue 的缺省绑定语义一致），iOS/tvOS 直接走 RemoteIO
+        public const uint kAudioUnitType_Output = 0x61756F75;            // 'auou'
+        public const uint kAudioUnitSubType_DefaultOutput = 0x64656620; // 'def '
+        public const uint kAudioUnitSubType_RemoteIO = 0x72696F63;       // 'rioc'
+
         [StructLayout(LayoutKind.Sequential)]
         public struct AudioComponentDescription
         {
@@ -42,6 +48,12 @@ namespace Ryujinx.Audio.Backends.Apple.Native   // 平台例外：Apple 后端�
         public const uint kAudioUnitScope_Global = 0;
         public const uint kAudioUnitScope_Input = 1;
         public const uint kAudioUnitScope_Output = 2;
+
+        // S2Arm（#2157 只留一种传输）：输出器件属性（AudioUnitProperties.h:2522-2529；RemoteIO 输出总线缺省即开——
+        //   输出单元缺省 output-only，不用 EnableIO；CurrentDevice / StartTimestampsAtZero 留作显式选设备用）
+        public const uint kAudioOutputUnitProperty_CurrentDevice = 2000;
+        public const uint kAudioOutputUnitProperty_EnableIO = 2003;
+        public const uint kAudioOutputUnitProperty_StartTimestampsAtZero = 2007;
 
         // AUSpatializationAlgorithm：UseOutputType——按 SpatialMixerOutputType 定渲染路径
         public const uint kSpatializationAlgorithm_UseOutputType = 7;
@@ -99,5 +111,13 @@ namespace Ryujinx.Audio.Backends.Apple.Native   // 平台例外：Apple 后端�
 
         [DllImport(Lib)]
         public static extern int AudioUnitRender(nint inUnit, ref uint ioActionFlags, ref AudioTimeStamp inTimeStamp, uint inOutputBusNumber, uint inNumberFrames, nint ioData);
+
+        // S2Arm（#2157 只留一种传输）：开播 / 停播输出器件（AudioOutputUnit.h:24/27；
+        //   停播后回调停、环内样本保留，Start 自然续播——播放信用地板直接是已渲染量，不需要重学交还相位）
+        [DllImport(Lib)]
+        public static extern int AudioOutputUnitStart(nint inUnit);
+
+        [DllImport(Lib)]
+        public static extern int AudioOutputUnitStop(nint inUnit);
     }
 }

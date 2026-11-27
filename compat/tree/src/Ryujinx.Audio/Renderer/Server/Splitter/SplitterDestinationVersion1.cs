@@ -137,6 +137,30 @@ namespace Ryujinx.Audio.Renderer.Server.Splitter
             NeedToUpdateInternalState = true;
         }
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 目的地游戏字段落账拷贝(影子→live)。字段矩阵:
+        //   游戏每更新都写的(DestinationId/音量/IsUsed)整拷;游戏只在 ResetPrevVolume
+        //   路径写的(_previousMix、NeedToUpdateInternalState 清位)按「影子相对锁1 基底(sourceBase)的增量」落——
+        //   没写过就保留 live,中拍的标记/内态刷新不抹;拍写的(_isPreviousBiquadFilterEnabled)
+        //   不拷。链表指针 _next 不拷,由链头重建(SplitterContext.S2ACommitFrom)
+        internal void S2ACommitGameFieldsFrom(in SplitterDestinationVersion1 source, in SplitterDestinationVersion1 sourceBase)
+        {
+            DestinationId = source.DestinationId;
+
+            source.MixBufferVolume.CopyTo(MixBufferVolume);
+
+            IsUsed = source.IsUsed;
+
+            if (source.NeedToUpdateInternalState != sourceBase.NeedToUpdateInternalState)
+            {
+                NeedToUpdateInternalState = source.NeedToUpdateInternalState;
+            }
+
+            if (!source.PreviousMixBufferVolume.SequenceEqual(sourceBase.PreviousMixBufferVolume))
+            {
+                source.PreviousMixBufferVolume.CopyTo(PreviousMixBufferVolume);
+            }
+        }
+
         /// <summary>
         /// Return true if the <see cref="SplitterDestinationVersion1"/> is used and has a destination.
         /// </summary>
@@ -197,6 +221,17 @@ namespace Ryujinx.Audio.Renderer.Server.Splitter
         /// <summary>
         /// Remove the link to the next element.
         /// </summary>
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 锁1 快照拷贝的重绑(理由见 SplitterState.S2ARebindSnapshotPointers:
+        //   拷来的 _next 指着 live,影子段 ClearLinks 顺着写会指进 live;按下标平移重绑到影子数组)
+        internal unsafe void S2ARebindSnapshotPointers(SplitterDestinationVersion1* liveBase, SplitterDestinationVersion1* shadowBase)
+        {
+            if (_next != null)
+            {
+                _next = shadowBase + (_next - liveBase);
+            }
+        }
+
         public void Unlink()
         {
             unsafe

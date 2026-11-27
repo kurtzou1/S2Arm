@@ -206,6 +206,9 @@ namespace Ryujinx.Audio.Renderer.Server
             _flags = flags;
         }
 
+        // S2Arm (#12/#13 拆分): 旗标读取——影子解析用私有拷贝,落账把新旗标拷回 live
+        internal ulong S2AFlags => _flags;
+
         /// <summary>
         /// Check if a given revision is valid/supported.
         /// </summary>

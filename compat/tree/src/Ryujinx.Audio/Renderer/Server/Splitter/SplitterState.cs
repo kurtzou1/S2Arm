@@ -99,6 +99,40 @@ namespace Ryujinx.Audio.Renderer.Server.Splitter
             HasNewConnection = false;
         }
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 分频器游戏字段落账拷贝(影子→live)。字段(Id/SampleRate/
+        //   DestinationCount/HasNewConnection)都是游戏写、拍只读,整拷;链头与 _next 不拷——影子链指向影子目的地
+        //   数组,直接拷指针会让 live 指进影子块,这里按影子链的目的地 id 序在 live 数组上原样重建(链结构只有
+        //   游戏段写,重建 = 今天语义)
+        internal void S2ACommitGameFieldsFrom(in SplitterState source, SplitterContext liveContext)
+        {
+            SampleRate = source.SampleRate;
+            DestinationCount = source.DestinationCount;
+            HasNewConnection = source.HasNewConnection;
+
+            ClearLinks();
+
+            if (source.DestinationCount > 0)
+            {
+                SplitterDestination sourceDestination = source.Destination;
+
+                SplitterDestination liveDestination = liveContext.GetDestination(sourceDestination.Id);
+
+                SetDestination(liveDestination);
+
+                SplitterDestination tail = liveDestination;
+
+                for (int i = 1; i < source.DestinationCount; i++)
+                {
+                    sourceDestination = sourceDestination.Next;
+
+                    SplitterDestination nextLive = liveContext.GetDestination(sourceDestination.Id);
+
+                    tail.Link(nextLive);
+                    tail = nextLive;
+                }
+            }
+        }
+
         /// <summary>
         /// Utility function to apply an action to all <see cref="Destination"/>.
         /// </summary>
@@ -177,6 +211,26 @@ namespace Ryujinx.Audio.Renderer.Server.Splitter
             {
                 SampleRate = parameter.SampleRate;
                 HasNewConnection = true;
+            }
+        }
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 锁1 快照拷贝的重绑。从 live 整拷来的链头指着 live 目的地
+        //   数组,而影子解析段的 ClearLinks/Link 会顺着链头把 _next 写下去——指针指进 live 就是锁外改活状态(渲染拍
+        //   正在读链)。两边数组同布局(live=工作缓冲原生块,影子=影子原生块),按下标平移重绑到影子数组
+        internal unsafe void S2ARebindSnapshotPointers(
+            SplitterDestinationVersion1* liveBaseV1,
+            SplitterDestinationVersion2* liveBaseV2,
+            SplitterDestinationVersion1* shadowBaseV1,
+            SplitterDestinationVersion2* shadowBaseV2)
+        {
+            if (_destinationDataV1 != null)
+            {
+                _destinationDataV1 = shadowBaseV1 + (_destinationDataV1 - liveBaseV1);
+            }
+
+            if (_destinationDataV2 != null)
+            {
+                _destinationDataV2 = shadowBaseV2 + (_destinationDataV2 - liveBaseV2);
             }
         }
 

@@ -24,6 +24,8 @@
 //      游戏照常运行（M1 Pro 时之笛不设额度一局低区 21 MB 正常退出），设了反而预热停在 70%、读区域那帧多现建 80 条、长约 470 ms
 //   ⑥ 混合管线的拉取基础管线（g_pbase，nvn_hybrid.inc）也是活着的管线：计入常驻条数，超额时与三张表一起按最久没用先放（在 g_pbase_lock 下）；
 //      放掉的那一对下次首遇照旧在后台重建。预热时 / 登记时先取基础管线到预热线就停（pb_prefetch_full），不为先取占掉游戏首遇要用的额度
+//   ⑦ 网格管线（g_pso_mtk，nvn_geometry.inc）同样计入常驻条数、超额时一起按最久没用先放（在 g_pso_mtk_lock 下；在建占位、拒建记录不算也不放）。
+//      放掉时一并从首画记录 g_mtk_drawn 与名字表 g_mtk_names 里去掉（两处都强引用管线，不去掉对象放不掉）；下次首遇照旧在后台重建
 // 由 nvn_mtl.m 在 g_cps / g_cps_se 之后包含；渲染那半在 pso_get_vs_ptr 之前已前向声明（pb_touch_r / pb_tick）
 #define PB_KEEP_FRAMES 240   // 这么多帧内用过的不放（约 4–8 秒；在途命令缓冲最多几帧）
 #define PB_LOW_PCT 85        // 超额时放到额度的这个比例
@@ -33,6 +35,9 @@
 // 机型 → 额度（条）。按机型实测（真机逐级实验：额度跟常驻条数 / 装过的总量 / 归档体积哪个有关、各机型阈值、淘汰后首遇长帧按 #2044 口径），
 //   实测后在这里加行，前缀匹配（hw.machine / Mac hw.model），先列的先匹配。实测前缺省 0 = 不设额度（行为同改前）：拍一个数会让预热清单大的游戏
 //   （0100F2C0115B6000 2.6 万行）提前停预热、首遇变多，没有读数撑不能上；实验用 DM_PSO_BUDGET=<条数> 指定
+//   D-EH7W（11-26，iPhone 17 Pro Max 真机）：「AGX: exceeded compiled variants footprint limit」按本局累计建过的条数算（档案取出的也算），不按常驻——
+//   预热建好即丢（常驻 100、已释放 13567 条）照样在累计 13312–13568 之间报，与全建全留同点；放掉的变体驱动不回收，所以按常驻设额度挡不住这句，
+//   淘汰后重建反而让累计涨得更快。这句本身不致命（之后又建约 1 万条 0 失败、建造速度与内存斜率不变）；同期玩家卡的崩溃是低区地址耗尽（⑤ 管）
 static const struct { const char *prefix; uint32_t budget; } pb_table[] = {
     {"", 0},   // 缺省：实测前不设
 };
@@ -100,21 +105,26 @@ static uint32_t g_pb_cfail;   // 计算表里的失败记录（NSNull）条数�
 static void pb_cfail_note(void) { g_pb_cfail++; }
 // ⑥ g_pbase 的用到帧 / 放掉过的键（g_pbase_lock 下）；g_pb_bases = 里面真管线的条数（不含 NSNull 占位 / 失败）
 static nvn_hmap g_pb_use_b = {.klen = sizeof(pbase_key)}, g_pb_gone_b = {.klen = sizeof(pbase_key)};
-_Static_assert(sizeof(pbase_key) <= sizeof(pso_key) && sizeof(cps_se_key) <= sizeof(pso_key), "pb_tick copies keys into pso_key-sized slots");
+#define PB_KMAX sizeof(mtk_key)   // pb_tick 拷键的槽宽：各表键里最长的
+_Static_assert(sizeof(pbase_key) <= PB_KMAX && sizeof(cps_se_key) <= PB_KMAX && sizeof(pso_key) <= PB_KMAX, "pb_tick copies keys into PB_KMAX-sized slots");
 static void pb_base_put_locked(const pbase_key *bk, id ps) {
     id old = hm_get_id(&g_pbase, bk);
     if (!old || old == NSNull.null) atomic_fetch_add(&g_pb_bases, 1);
     hm_put_id(&g_pbase, bk, ps); pb_built(&g_pb_use_b, &g_pb_gone_b, bk);
 }
 static void pb_base_touch_locked(const pbase_key *bk) { pb_touch(&g_pb_use_b, bk); }
-static uint32_t pb_live(void) { return g_pso.n + g_cps.n + g_cps_se.n - g_pb_cfail + atomic_load(&g_pb_bases); }
+// ⑦ g_pso_mtk 的用到帧 / 放掉过的键（g_pso_mtk_lock 下；mtk_put_locked / mtk_pso 调）
+static nvn_hmap g_pb_use_m = {.klen = sizeof(mtk_key)}, g_pb_gone_m = {.klen = sizeof(mtk_key)};
+static void pb_built_m(const mtk_key *k) { pb_built(&g_pb_use_m, &g_pb_gone_m, k); }
+static void pb_touch_m(const mtk_key *k) { pb_touch(&g_pb_use_m, k); }
+static uint32_t pb_live(void) { return g_pso.n + g_cps.n + g_cps_se.n - g_pb_cfail + atomic_load(&g_pb_bases) + atomic_load(&g_pb_mtk); }
 static void pb_live_publish(uint32_t live) { atomic_store(&g_pb_bases_pub, atomic_load(&g_pb_bases)); atomic_store(&g_pb_live_pub, live); }
 // 一张表里挑可放的：最后用到早于 now − PB_KEEP_FRAMES 的（没记过用到的也算：只当 0 帧），按帧从旧到新
 typedef struct { uint64_t at; nvn_hmap *tab, *use, *gone; uint32_t slot; } pb_cand;
 static int pb_cand_cmp(const void *a, const void *b) { uint64_t x = ((const pb_cand *)a)->at, y = ((const pb_cand *)b)->at; return x < y ? -1 : x > y; }
 static void pb_collect(nvn_hmap *tab, nvn_hmap *use, nvn_hmap *gone, uint64_t now, pb_cand **v, size_t *n, size_t *cap) {
     for (uint32_t i = 0; i < tab->cap; i++) {
-        if (!tab->vals[i] || tab->vals[i] == (__bridge void *)NSNull.null) continue;   // NSNull：失败记录，不是管线
+        if (!tab->vals[i] || tab->vals[i] == (__bridge void *)NSNull.null || tab->vals[i] == (__bridge void *)g_pso_mtk_building) continue;   // NSNull：失败记录；网格表的在建占位：都不是管线
         const void *k = tab->keys + (size_t)i * tab->klen; uintptr_t u = (uintptr_t)nvn_hm_get(use, k); uint64_t at = u ? u - 1 : 0;
         if (at + PB_KEEP_FRAMES > now) continue;
         if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = realloc(*v, *cap * sizeof **v); }
@@ -132,23 +142,27 @@ static void pb_tick(void) {
     uint32_t low = (uint32_t)((uint64_t)budget * PB_LOW_PCT / 100), drop = live - low;
     pb_cand *v = NULL; size_t n = 0, cap = 0;
     os_unfair_lock_lock(&g_pbase_lock);   // ⑥：后台会往 g_pbase 里放（会挪槽号），挑与放都在锁里
+    os_unfair_lock_lock(&g_pso_mtk_lock);   // ⑦：网格表同理（后台建好就放）；取锁顺序 g_pbase_lock → g_pso_mtk_lock，两边别处都不嵌套取另一把
+    pb_collect(&g_pso_mtk, &g_pb_use_m, &g_pb_gone_m, now, &v, &n, &cap);
     pb_collect(&g_pbase, &g_pb_use_b, &g_pb_gone_b, now, &v, &n, &cap);
     pb_collect(&g_pso, &g_pb_use_r, &g_pb_gone_r, now, &v, &n, &cap);
     pb_collect(&g_cps, &g_pb_use_c, &g_pb_gone_c, now, &v, &n, &cap);
     pb_collect(&g_cps_se, &g_pb_use_s, &g_pb_gone_s, now, &v, &n, &cap);
     qsort(v, n, sizeof *v, pb_cand_cmp);
     // 先拷键再删：删除会挪动表里后面的条目（开放寻址），槽号只在删之前有效
-    size_t take = n < drop ? n : drop; uint8_t *keys = take ? malloc(take * sizeof(pso_key)) : NULL;
-    for (size_t i = 0; i < take; i++) memcpy(keys + i * sizeof(pso_key), v[i].tab->keys + (size_t)v[i].slot * v[i].tab->klen, v[i].tab->klen);
+    size_t take = n < drop ? n : drop; uint8_t *keys = take ? malloc(take * PB_KMAX) : NULL;
+    for (size_t i = 0; i < take; i++) memcpy(keys + i * PB_KMAX, v[i].tab->keys + (size_t)v[i].slot * v[i].tab->klen, v[i].tab->klen);
     for (size_t i = 0; i < take; i++) {
-        const void *k = keys + i * sizeof(pso_key);
+        const void *k = keys + i * PB_KMAX;
         void *obj = nvn_hm_del(v[i].tab, k); nvn_hm_del(v[i].use, k);
         if (!obj) continue;
         nvn_hm_put(v[i].gone, k, (void *)1);
         if (v[i].tab == &g_pbase) atomic_fetch_sub(&g_pb_bases, 1);
+        if (v[i].tab == &g_pso_mtk) { atomic_fetch_sub(&g_pb_mtk, 1); id o = (__bridge id)obj; [g_mtk_names removeObjectForKey:o]; [g_mtk_drawn removeObject:o]; }   // ⑦：这两处也强引用它
         defer_obj_release((__bridge_transfer id)obj);   // 表里持的那一份：等 GPU 用完再放（在途命令缓冲可能还引用它）
         g_pb_evicted++;
     }
+    os_unfair_lock_unlock(&g_pso_mtk_lock);
     os_unfair_lock_unlock(&g_pbase_lock);
     free(keys); free(v);
     uint32_t after = pb_live(); pb_live_publish(after);
@@ -156,6 +170,17 @@ static void pb_tick(void) {
         MLOG("pipeline budget: %u resident over the budget %u at frame %llu: released %zu not used in the last %d frames (%zu could be), now %u; so far released %llu, built again after release %llu, prewarm lines stopped by the budget %llu",
              live, budget, (unsigned long long)now, take, PB_KEEP_FRAMES, n, after, (unsigned long long)g_pb_evicted, (unsigned long long)g_pb_rebuilt, (unsigned long long)atomic_load(&g_pb_warm_stopped));
     if (take < drop) { static int warned; if (!warned++) MLOG("【黄】 pipeline budget: %u resident, all but %zu used in the last %d frames: nothing more to release (the game uses more pipelines at once than the budget)", after, n, PB_KEEP_FRAMES); }
+}
+// 管线占用诊断（D-EH7W，11-26）：累计建造每满 256 条打一行——常驻条数（同预热线的估计：已发布常驻 + 预热已建未领 + 发布后新放的基础管线）、
+//   进程物理占用、Metal 已分配量。驱动报的「AGX: exceeded compiled variants footprint limit」字面是占用量，没有公开接口直接读，
+//   这两个是能拿到的最接近的量：撞线那行之前最后一行的读数，看跨款是条数稳定还是占用稳定，定额度按哪个口径
+static void pb_footprint_line(uint64_t built, uint64_t hit, uint64_t compiled) {
+    // 分项打：表里（提交线程每帧发布）、预热已建未领（预热计数现算；g_pb_unclaimed 只在预热线程判线时才更新，首帧后会过时）、发布后新放的拉取基础管线
+    uint64_t tab = atomic_load(&g_pb_live_pub), warm = atomic_load(&g_warm_rps) + atomic_load(&g_warm_cps), claimed = g_warm_claim_rps + g_warm_claim_cps;
+    uint64_t unclaimed = warm > claimed ? warm - claimed : 0, bases = pb_bases_since_pub();
+    MLOG("pipeline footprint: %llu built (%llu from the archive, %llu compiled), %llu resident (tables %llu + prewarm unclaimed %llu + new pull bases %llu), budget %u, process footprint %llu MB, Metal allocated %llu MB",
+         (unsigned long long)built, (unsigned long long)hit, (unsigned long long)compiled, (unsigned long long)(tab + unclaimed + bases), (unsigned long long)tab, (unsigned long long)unclaimed,
+         (unsigned long long)bases, pb_budget(), (unsigned long long)bg_fp_mb(), (unsigned long long)(g_dev.currentAllocatedSize >> 20));
 }
 // 预热线程：再建一条会不会超过预热线（常驻 + 预热已建还没被领走的）
 static int pb_at_warm_line(uint64_t built_unclaimed, uint32_t *budget, uint64_t *est) {

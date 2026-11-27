@@ -49,6 +49,19 @@ namespace Ryujinx.Audio.Renderer.Server.Sink
 
         public override SinkType TargetSinkType => SinkType.Device;
 
+        // S2Arm (#12/#13 拆分): 本型的游戏侧字段影子拷贝(矩阵见 BaseSink.S2AShadowCopyGameFieldsFrom)。
+        //   UpsamplerInfo 是拍写的(CommandGenerator 按需 Allocate),不拷、落账保留活值;DownMixCoefficients
+        //   数组两边各一份(构造时定长 4),落账按元素拷
+        internal override void S2AShadowCopyGameFieldsFrom(BaseSink source)
+        {
+            base.S2AShadowCopyGameFieldsFrom(source);
+
+            DeviceSink ds = (DeviceSink)source;
+
+            Parameter = ds.Parameter;
+            ds.DownMixCoefficients.AsSpan().CopyTo(DownMixCoefficients.AsSpan());
+        }
+
         public override void Update(out BehaviourParameter.ErrorInfo errorInfo, in SinkInParameter parameter, ref SinkOutStatus outStatus, PoolMapper mapper)
         {
             Debug.Assert(IsTypeValid(in parameter));

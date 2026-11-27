@@ -1,0 +1,70 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/ApplePullHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/ApplePullHardwareDeviceSession.cs
+index 0811c2ecb97fd652a4991a4ab129ada3f2d74ec9..f0a9999bc75926dcb9ec754457e4077e251f9018 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/ApplePullHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/ApplePullHardwareDeviceSession.cs
+@@ -7,9 +7,9 @@ using System.Runtime.InteropServices;
+ using System.Threading;
+ using System.Runtime.Versioning;
+ using Ryujinx.Audio.Backends.Apple.Native;   // 平台例外：Apple 后端平台实现内部引用本平台 Native 布局类型
+-using static Ryujinx.Audio.Backends.Apple.Native.AudioToolbox;
++using static Ryujinx.Audio.Backends.Apple.Native.AudioToolbox;   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+ 
+-namespace Ryujinx.Audio.Backends.Apple
++namespace Ryujinx.Audio.Backends.Apple   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+ {
+     // S2Arm (#2157 只留一种传输，AudioUnit 拉取取代 AudioQueue): 全树唯一的输出会话——设备 render 回调按节拍从一个
+     //   主机侧 SPSC 拉取环直接拉 PCM，环由送数（pace）线程从 AudioSampleQueue 填充并完成下混 / 音量 / 诊断，欠载帧在
+@@ -68,7 +68,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _renderMaxTicks;          // 单次回调耗时的最大值(对齐 #1598「单次卡 ≥250 ms」的判定语义,非累计;看门狗 Exchange 取走清零)
+         private long _callbackDepth;           // 在飞回调计数(Dispose/恢复的「Stop 后回调计数静止确认」兜底,§5.5)
+ 
+-        private readonly AppleHardwareDeviceDriver _driver;
++        private readonly AppleHardwareDeviceDriver _driver;   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+         // S2Arm: queued buffers as (identifier, sample count) in a ring under _queueLock(平移 AppleHardwareDeviceSession.cs:38-45)
+         private (ulong DriverIdentifier, ulong SampleCount)[] _queued = new (ulong, ulong)[16];
+         private int _queuedHead;
+@@ -208,7 +208,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private static void S2AApplyPaceQos()
+         {
+-            if (OperatingSystem.IsMacOS())
++            if (OperatingSystem.IsMacOS())   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+             {
+                 try { pthread_set_qos_class_self_np(0x21, 0); } catch { /* 少见:按原样 */ }
+             }
+@@ -225,7 +225,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         }
+ 
+         public ApplePullHardwareDeviceSession(
+-            AppleHardwareDeviceDriver driver,
++            AppleHardwareDeviceDriver driver,   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+             IVirtualMemoryManager memoryManager,
+             SampleFormat requestedSampleFormat,
+             uint requestedSampleRate,
+@@ -772,7 +772,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 Volatile.Write(ref _lastRenderTicks, Stopwatch.GetTimestamp());
+ 
+                 Console.Error.WriteLine($"[声] {(red ? "【红】" : "")}输出 #{_diag.Index}：{why}（在途 {inFlightFrames} 帧{(wasVirtual ? $"；结束无设备播放，期间按采样率交还 {virtualFrames} 帧" : "")}）→ {(rebuild ? "重建" : "重启")}输出器件（第 {++_heals} 次）：" +
+-                    $"{((OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()) ? $"重新激活音频会话 {(active ? "成功" : "失败")}、" : "")}停器件 rc={stopRc}、收回 {reclaimed / _bytesPerFrame} 帧" +
++                    $"{((OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()) ? $"重新激活音频会话 {(active ? "成功" : "失败")}、" : "")}停器件 rc={stopRc}、收回 {reclaimed / _bytesPerFrame} 帧" +   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+                     $"{(rebuild ? $"、重建器件 rc={newRc}" : "")}、重新开播 rc={startRc}{(startRc == 0 ? "" : "（没开播：游戏停着或开播失败，下一笔声音到时再试）")}");
+ 
+                 // 开播失败(系统中断还在、路由还没切好……):不论原因回到无设备播放,别让游戏等交还(见 VirtualAfterMs;
+@@ -878,7 +878,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             S2ALogOutputDevice();
+ 
+             // input scope element 0 的流格式 = 设备字节格式(折后 2ch,同 CreateQueue 的 :812-814 口径)
+-            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, (uint)_deviceChannelCount);
++            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, (uint)_deviceChannelCount);   // 平台例外：Apple 后端平台实现（拉取会话，#2157）
+ 
+             result = AudioUnitInterop.AudioUnitSetProperty(_unit, AudioUnitInterop.kAudioUnitProperty_StreamFormat, AudioUnitInterop.kAudioUnitScope_Input, 0,
+                 &format, (uint)sizeof(AudioStreamBasicDescription));
+@@ -1009,7 +1009,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 return _testDeviceFrames;
+             }
+ 
+-            if (!OperatingSystem.IsMacOS())   // 平台例外:HAL 设备属性只有 macOS
++            if (!OperatingSystem.IsMacOS())   // 平台例外：HAL 设备属性只有 macOS
+             {
+                 return 0;
+             }

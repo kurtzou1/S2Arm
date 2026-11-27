@@ -1,6 +1,7 @@
 using Ryujinx.Audio.Renderer.Common;
 using Ryujinx.Audio.Renderer.Parameter;
 using Ryujinx.Audio.Renderer.Server.MemoryPool;
+using System;
 using System.Diagnostics;
 using static Ryujinx.Audio.Renderer.Common.BehaviourParameter;
 
@@ -97,6 +98,31 @@ namespace Ryujinx.Audio.Renderer.Server.Sink
             Debug.Assert(IsTypeValid(in parameter));
 
             errorInfo = new ErrorInfo();
+        }
+
+        // S2Arm (#12/#13 拆分): 按型建实例(= StateUpdater.ResetSink 原来的 new switch,一处共用)
+        internal static BaseSink S2ACreate(SinkType type)
+        {
+            return type switch
+            {
+                SinkType.Invalid => new BaseSink(),
+                SinkType.CircularBuffer => new CircularBufferSink(),
+                SinkType.Device => new DeviceSink(),
+                _ => throw new NotImplementedException($"SinkType {type} not implemented!"),
+            };
+        }
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 汇实例的游戏侧字段影子拷贝(方向两用:锁1 live→影子作解析
+        //   基底、锁2a 影子→live 落账)。字段矩阵:游戏写的(Type/IsUsed/ShouldSkip/NodeId)拷;拍写的(环形汇的
+        //   _lastWrittenOffset/_oldWrittenOffset/CurrentWriteOffset,UpdateForCommandGeneration 推进;器件汇的
+        //   UpsamplerInfo,CommandGenerator 按需 Allocate)不拷、落账保留活值——拷基底的落账只会把拍刚推进的写
+        //   偏移回卷一拍。子类 override 必须先调 base.S2AShadowCopyGameFieldsFrom。
+        internal virtual void S2AShadowCopyGameFieldsFrom(BaseSink source)
+        {
+            Type = source.Type;
+            IsUsed = source.IsUsed;
+            ShouldSkip = source.ShouldSkip;
+            NodeId = source.NodeId;
         }
     }
 }

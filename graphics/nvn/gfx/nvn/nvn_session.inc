@@ -157,7 +157,7 @@ static int nvn_be_shutdown_session_body(void) {
     // the compiled shader cache (its keys are content hashes).
     nvn_hm_clear(&g_pso, hm_rel); nvn_hm_clear(&g_cps, hm_rel);
     if (g_mtk_group) dispatch_group_wait(g_mtk_group, DISPATCH_TIME_FOREVER);   // task / mesh pipelines (nvn_geometry.inc mtk_pso): the background builds write the map
-    os_unfair_lock_lock(&g_pso_mtk_lock); nvn_hm_clear(&g_pso_mtk, hm_rel); os_unfair_lock_unlock(&g_pso_mtk_lock);
+    os_unfair_lock_lock(&g_pso_mtk_lock); nvn_hm_clear(&g_pso_mtk, hm_rel); atomic_store(&g_pb_mtk, 0); os_unfair_lock_unlock(&g_pso_mtk_lock);   // g_pb_mtk: 网格管线条数（管线额度 ⑦）
     nvn_hm_clear(&g_pso_fail, hm_rel); nvn_hm_clear(&g_pso_retry, hm_rel);
     ir_clear(); nvn_hm_clear(&g_rt_seen, NULL); nvn_hm_clear(&g_rt_seen_mem, NULL); nvn_hm_clear(&g_rt_fresh, NULL);
     g_rt_history_frame = 0; g_rt_history_valid = 0;

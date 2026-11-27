@@ -199,6 +199,24 @@ namespace Ryujinx.Audio.Renderer.Server.Mix
             }
         }
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 影子混音段→live 的整组落账(混音结构体、排序索引、邻接矩阵)。
+        //   解析段(锁外)在影子 MixContext 上跑 UpdateMixes(含 Sort),落账段整组搬回;NodeStates 是 Sort 的内部
+        //   草稿、只有游戏段用(影子自己的那份即可),不搬。混音字段没有拍写侧(CommandGenerator 只读),整拷
+        internal void S2ACommitFrom(MixContext shadow)
+        {
+            shadow._mixes.Span.CopyTo(_mixes.Span);
+            shadow._sortedMixes.Span.CopyTo(_sortedMixes.Span);
+            shadow.EdgeMatrix.S2ACopyTo(EdgeMatrix);
+        }
+
+        // S2Arm (#12/#13 拆分): 锁1 快照方向(live→影子):整组拷进影子,解析段在影子上跑混音段
+        internal void S2ASnapshotTo(MixContext shadow)
+        {
+            _mixes.Span.CopyTo(shadow._mixes.Span);
+            _sortedMixes.Span.CopyTo(shadow._sortedMixes.Span);
+            EdgeMatrix.S2ACopyTo(shadow.EdgeMatrix);
+        }
+
         /// <summary>
         /// Sort the mixes using distance from the final mix.
         /// </summary>

@@ -44,6 +44,19 @@ namespace Ryujinx.Audio.Renderer.Server.Sink
 
         public override SinkType TargetSinkType => SinkType.CircularBuffer;
 
+        // S2Arm (#12/#13 拆分): 本型的游戏侧字段影子拷贝(矩阵见 BaseSink.S2AShadowCopyGameFieldsFrom)。
+        //   写偏移三件(_lastWrittenOffset/_oldWrittenOffset/CurrentWriteOffset)是拍写的,不拷、落账保留活值;
+        //   锁1 拷进影子只为解析段读 outStatus.LastWrittenOffset(基底=锁1 快照,响应字节口径)
+        internal override void S2AShadowCopyGameFieldsFrom(BaseSink source)
+        {
+            base.S2AShadowCopyGameFieldsFrom(source);
+
+            CircularBufferSink cbs = (CircularBufferSink)source;
+
+            Parameter = cbs.Parameter;
+            CircularBufferAddressInfo = cbs.CircularBufferAddressInfo;
+        }
+
         public override void Update(out BehaviourParameter.ErrorInfo errorInfo, in SinkInParameter parameter, ref SinkOutStatus outStatus, PoolMapper mapper)
         {
             errorInfo = new BehaviourParameter.ErrorInfo();

@@ -29,7 +29,7 @@ namespace S2A.Services.Tests
         private static readonly DeviceTypesProbeCallback _deviceTypesProbeCallback = static (_, _, _) => { };
 
         [DynamicDependency(DynamicallyAccessedMemberTypes.NonPublicFields,
-            "Ryujinx.Audio.Backends.Apple.AppleHardwareDeviceSession", "Ryujinx.Audio.Backends.Apple")]   // 平台例外：本用例只测 Apple 音频后端的会话接线（#189 后续），只在 macOS 上跑
+            "Ryujinx.Audio.Backends.Apple.ApplePullHardwareDeviceSession", "Ryujinx.Audio.Backends.Apple")]   // 平台例外：本用例只测 Apple 音频后端的会话接线（#189 后续），只在 macOS 上跑
         // 本线程 CPU 时间（纳秒）：CLOCK_THREAD_CPUTIME_ID = 16（<time.h>），按线程计，被抢占的时间不算
         [DllImport("/usr/lib/libSystem.dylib")]   // 平台例外：苹果音频后端单测，只在 macOS 跑
         private static extern ulong clock_gettime_nsec_np(int clock);
@@ -254,10 +254,10 @@ namespace S2A.Services.Tests
                 Environment.SetEnvironmentVariable("S2A_AUDIO_OUT", null);
 
                 // ⑤ 会话路径接线（反射 _processor / _deviceChannelCount；会话只建不播，不出声）
-                FieldInfo processorField = typeof(AppleHardwareDeviceSession).GetField("_processor", BindingFlags.NonPublic | BindingFlags.Instance)   // 平台例外：本用例只测 Apple 音频后端的会话接线（#189 后续），只在 macOS 上跑
-                    ?? throw new InvalidOperationException("找不到 AppleHardwareDeviceSession._processor");   // 平台例外：同上，只在 macOS 上跑
-                FieldInfo deviceChannelsField = typeof(AppleHardwareDeviceSession).GetField("_deviceChannelCount", BindingFlags.NonPublic | BindingFlags.Instance)   // 平台例外：同上，只在 macOS 上跑
-                    ?? throw new InvalidOperationException("找不到 AppleHardwareDeviceSession._deviceChannelCount");   // 平台例外：同上，只在 macOS 上跑
+                FieldInfo processorField = typeof(ApplePullHardwareDeviceSession).GetField("_processor", BindingFlags.NonPublic | BindingFlags.Instance)   // 平台例外：本用例只测 Apple 音频后端的会话接线（#189 后续），只在 macOS 上跑
+                    ?? throw new InvalidOperationException("找不到 ApplePullHardwareDeviceSession._processor");   // 平台例外：同上，只在 macOS 上跑
+                FieldInfo deviceChannelsField = typeof(ApplePullHardwareDeviceSession).GetField("_deviceChannelCount", BindingFlags.NonPublic | BindingFlags.Instance)   // 平台例外：同上，只在 macOS 上跑
+                    ?? throw new InvalidOperationException("找不到 ApplePullHardwareDeviceSession._deviceChannelCount");   // 平台例外：同上，只在 macOS 上跑
 
                 (AppleOutputMode? Mode, int DeviceChannels) Session(AppleAudioDeviceType? type, string vs, SampleFormat sampleFormat)
                 {

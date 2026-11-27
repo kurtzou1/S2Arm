@@ -19,7 +19,7 @@ namespace Ryujinx.Audio.Backends.Apple
     {
         private readonly ManualResetEvent _updateRequiredEvent;
         private readonly ManualResetEvent _pauseEvent;
-        private readonly ConcurrentDictionary<AppleHardwareDeviceSession, byte> _sessions;
+        private readonly ConcurrentDictionary<ApplePullHardwareDeviceSession, byte> _sessions;   // S2Arm (#2157 只留一种传输): 输出只有拉取会话一种(收音会话见 #2151)
         private readonly bool _supportSurroundConfiguration;
         private readonly object _sessionLock = new();
         private bool _disposed;
@@ -30,7 +30,7 @@ namespace Ryujinx.Audio.Backends.Apple
         {
             _updateRequiredEvent = new ManualResetEvent(false);
             _pauseEvent = new ManualResetEvent(true);
-            _sessions = new ConcurrentDictionary<AppleHardwareDeviceSession, byte>();
+            _sessions = new ConcurrentDictionary<ApplePullHardwareDeviceSession, byte>();
 
             // S2A：能耗单变量开关（缺省全关，行为不变；同旧库 front_ios.m；10-20 动森新架构整机功率约为旧库 2 倍）：
             //   S2A_AUDIO_CH2=1 不试建 5.1、只报 2 声道（游戏自己出立体声，混音与系统降混都按 2 声道）
@@ -82,8 +82,8 @@ namespace Ryujinx.Audio.Backends.Apple
             }
         }
 
-        // S2Arm (10-23 声音停了自愈): iOS 上重新激活音频会话（系统打断 / 路由切换后队列要在激活的会话上才能再开播）。
-        //   AppleHardwareDeviceSession 的停播看门狗调；非 iOS 返回 true 不做事。objc 指针首次取后缓存，之后调用不分配
+        // S2Arm (10-23 声音停了自愈): iOS 上重新激活音频会话（系统打断 / 路由切换后器件要在激活的会话上才能再开播）。
+        //   ApplePullHardwareDeviceSession 的停播看门狗调；非 iOS 返回 true 不做事。objc 指针首次取后缓存，之后调用不分配
         private static nint _avSession, _selSetActive, _msgSend;
 
         internal unsafe bool S2AReactivateSession()
@@ -140,7 +140,7 @@ namespace Ryujinx.Audio.Backends.Apple
         //     2 声道内置扬声器上 6 声道队列照样试建成功，读 kAudioQueueDeviceProperty_NumberChannels，与 HAL
         //     一致：DisplayPort 显示器 6、内置扬声器 2）：≥6 直通、<6 报 2 下混，永不虚拟环绕。未显式选择走这支
         //     是保住 5.1 设备玩家的缺省直通（评审 11-16：缺省不能把接 HDMI / DisplayPort 5.1 的玩家降成立体声）。
-        //     真 5.1 设备的运行期 6 声道队列声明布局在会话侧（AppleHardwareDeviceSession.CreateQueue）。
+        //     真 5.1 设备的运行期 6 声道队列声明布局在会话侧（ApplePullHardwareDeviceSession.CreateUnit）。
         //   例外：S2A_AUDIO_OUT=sys / matrix 显式下混（内部 A/B）照报 5.1——渲染器的回落下混不归一化（六路全
         //     0.9 折到 2.399、3484/4800 采样削波），显式下混让 6 声道混音进会话、由系统 AudioConverter 归一化折叠
         //     （不削波）；S2A_AUDIO_CH2 / STEREO 仍在构造函数里优先强制立体声
@@ -336,15 +336,26 @@ namespace Ryujinx.Audio.Backends.Apple
                     return new AppleHardwareDeviceSessionInput(this, memoryManager, sampleFormat, sampleRate, channelCount);   // 平台例外：Apple 后端平台实现（收音会话，#2151）
                 }
 
-                AppleHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
+                // S2Arm (#2157 只留一种传输，AudioQueue 输出会话已删): 输出只有 AudioUnit 拉取一种——macOS AUHAL(DefaultOutput)、
+                //   iOS/tvOS RemoteIO。无回退:拉取会话建不起来(native 6ch、iOS 首版、任一步 rc≠0)时它自己抛,这里红字一行后
+                //   原样重抛,OpenAudioOut 以可见错误失败(不再有「退 AudioQueue」路径)
+                try
+                {
+                    ApplePullHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
 
-                _sessions.TryAdd(session, 0);
+                    _sessions.TryAdd(session, 0);
 
-                return session;
+                    return session;
+                }
+                catch (Exception e)
+                {
+                    Console.Error.WriteLine($"[声] 【红】拉取会话建不起来（{e.Message}）：不再有 AudioQueue 回退,OpenAudioOut 以可见错误失败");
+                    throw;
+                }
             }
         }
 
-        internal bool Unregister(AppleHardwareDeviceSession session)
+        internal bool Unregister(ApplePullHardwareDeviceSession session)
             => _sessions.TryRemove(session, out _);
 
         internal static AudioStreamBasicDescription GetAudioFormat(SampleFormat sampleFormat, uint sampleRate,
@@ -405,7 +416,7 @@ namespace Ryujinx.Audio.Backends.Apple
                 {
                     if (_disposed) return;
                     bool paceAlive = false;
-                    foreach (AppleHardwareDeviceSession session in _sessions.Keys)
+                    foreach (ApplePullHardwareDeviceSession session in _sessions.Keys)
                     {
                         session.Dispose();
                         paceAlive |= session.S2APaceThreadAlive;

@@ -230,6 +230,14 @@ namespace Ryujinx.Audio.Renderer.Server
             }
         }
 
+        // S2Arm(renderer-load 组诊断):渲染拍等游戏 Update 持锁的画像。口径:工作线程循环体每执行一次记一拍;
+        //   一拍等锁 = 该拍内各会话 SendCommands() 进渲染器 _lock 的等待合计(AudioRenderSystem.S2ARenderLockWaitTicks,
+        //   每拍循环首归零),归零前在下面三个量上取最大 / 累加 / 计数。宿主(renderer-load 组)开局 Exchange 清零、
+        //   收官读取换算 lockWaitMaxMs / lockWaitAvgMs。渲染线程写、宿主线程读,一律走 Interlocked / Volatile(诊断量,撕裂无害)
+        public static long S2ARenderLockWaitMaxTicks;    // 每拍等锁合计的最大值
+        public static long S2ARenderLockWaitTotalTicks;  // 全程各拍等锁合计的累加
+        public static long S2ARenderPeriodCount;         // 拍数(循环体执行次数)
+
         /// <summary>
         /// Worker main function. This is used to dispatch audio renderer commands to the <see cref="AudioProcessor"/>.
         /// </summary>
@@ -251,6 +259,26 @@ namespace Ryujinx.Audio.Renderer.Server
                 Ryujinx.Common.S2AThreadAlloc.Tick("声音渲染调度"); // S2Arm: per-thread allocation accounting
 
                 long s2aT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+                // S2Arm(renderer-load 组诊断):上一拍的等锁合计在归零前取最大 / 累加 / 计数(口径见上面三个静态量)
+                long s2aWaitPeriod = AudioRenderSystem.S2ARenderLockWaitTicks;
+                long s2aWaitMax = Volatile.Read(ref S2ARenderLockWaitMaxTicks);
+
+                while (s2aWaitPeriod > s2aWaitMax)
+                {
+                    long s2aSeen = Interlocked.CompareExchange(ref S2ARenderLockWaitMaxTicks, s2aWaitPeriod, s2aWaitMax);
+
+                    if (s2aSeen == s2aWaitMax)
+                    {
+                        break;
+                    }
+
+                    s2aWaitMax = s2aSeen;
+                }
+
+                Interlocked.Add(ref S2ARenderLockWaitTotalTicks, s2aWaitPeriod);
+                Interlocked.Increment(ref S2ARenderPeriodCount);
+
                 AudioRenderSystem.S2ARenderLockWaitTicks = 0;
                 Volatile.Write(ref AudioRenderSystem.S2AUpdateHoldMaxTicks, 0);
 
@@ -280,7 +308,9 @@ namespace Ryujinx.Audio.Renderer.Server
 
         // S2Arm (11-13 断音): a period that took > 10 ms on this thread (the output holds ~30 ms): where it went. Session lock, building
         //   the command lists (of which: waiting for a renderer lock the game's RequestUpdate holds; longest Update hold that ended in the
-        //   period), the DSP itself. At most 40 lines a run
+        //   period), the DSP itself. At most 40 lines a run.
+        //   #12/#13 相位插桩补充:上面那个最长持锁数字在 > 0 时后带 [分段摘要]——AudioRenderSystem.S2AUpdatePhaseSummary
+        //   (锁内口径、每拍清零的归档时序见彼处注释)
         private static int s_s2aSlowLines;
 
         //   faults / pageins: whole-process fault and page-in counts during the DSP pass (#1240: a DSP pass of 0.3–2 s with no lock wait and no
@@ -303,7 +333,7 @@ namespace Ryujinx.Audio.Renderer.Server
             }
 
             Console.Error.WriteLine($"[声] 渲染一拍用了 {total * 1000.0 / f:F1} ms：等会话锁 {sessionWait * 1000.0 / f:F1} ms、生成命令 {cmd * 1000.0 / f:F1} ms" +
-                                    $"（其中等游戏 Update 占着的锁 {AudioRenderSystem.S2ARenderLockWaitTicks * 1000.0 / f:F1} ms；这一拍里游戏 Update 最长持锁 {hold * 1000.0 / f:F1} ms）、DSP {dsp * 1000.0 / f:F1} ms（这段里全进程缺页 {faults} 次、读盘换入 {pageins} 次）");
+                                    $"（其中等游戏 Update 占着的锁 {AudioRenderSystem.S2ARenderLockWaitTicks * 1000.0 / f:F1} ms；这一拍里游戏 Update 最长持锁 {hold * 1000.0 / f:F1} ms{(hold > 0 ? $"[{AudioRenderSystem.S2AUpdatePhaseSummary(f)}]" : "")}）、DSP {dsp * 1000.0 / f:F1} ms（这段里全进程缺页 {faults} 次、读盘换入 {pageins} 次）");
         }
 
         /// <summary>

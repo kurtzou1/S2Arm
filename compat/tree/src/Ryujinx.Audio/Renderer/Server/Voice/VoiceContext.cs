@@ -86,6 +86,9 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
             return SpanIOHelper.GetMemory(_voiceStatesCpu, id, _voiceCount);
         }
 
+        // S2Arm (#12/#13 拆分): 影子上下文共享 live 的 DSP 侧状态存储(解析段不写它,DSP 在锁外独写)
+        internal Memory<VoiceState> S2AVoiceStatesDsp => _voiceStatesDsp;
+
         /// <summary>
         /// Get a <see cref="Memory{VoiceState}"/> at the given <paramref name="id"/>.
         /// </summary>

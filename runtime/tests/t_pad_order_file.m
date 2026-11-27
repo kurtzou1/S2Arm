@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
             check(ar.location != NSNotFound && pin.location != NSNotFound && plan.location != NSNotFound && ar.location < pin.location && pin.location < plan.location, what);
             if ([src containsString:@"selectSystemLocked"]) {   // iOS：没有表时玩家 1 的判活 / 换手柄照改前（s2a_system_action），按表改派只在有表时走
                 snprintf(what, sizeof what, "%s 按表改派玩家 1 只在有表时（g_order_loaded && …）", argv[i]);
-                check([src containsString:@"if (g_order_loaded && foreground && current.extendedGamepad && slot0 != current)"], what);
+                check([src containsString:@"if (g_order_loaded && foreground && pad_usable(current) && slot0 != current)"], what);
             }
         }
     }

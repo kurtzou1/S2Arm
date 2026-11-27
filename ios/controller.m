@@ -16,6 +16,7 @@
 #include "ea_rumble.h"   // GameSir G8+ MFi 有线：手柄马达走配件协议（#462）
 #include "keyboard.h"     // iPad 外接键盘（#1869）：键态由 keyboard.m 交来，这里照 Mac 选源
 #include "keyboard_map.h"
+#include "pad_profile.h"   // 只有通用物理描述的手柄（#2244 单只一代 Joy-Con）：认单只、按标准键名采样
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <stdatomic.h>
@@ -522,7 +523,29 @@ static void prepare_pad(GCController *next, dispatch_queue_t queue) {
         if (pad.buttonOptions) pad.buttonOptions.preferredSystemGestureState = GCSystemGestureStateDisabled;
         // Home 同理（#276）：系统默认拿去开游戏面板 / 回主屏，关掉手势后输入给 App，长按 1.5 秒开局内设置（同长按「+」、四指长按）
         if (pad.buttonHome) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
+        if (!pad) for (NSString *n in @[GCInputButtonOptions, GCInputButtonHome]) next.physicalInputProfile.buttons[n].preferredSystemGestureState = GCSystemGestureStateDisabled;   // 单只（#2244）同理
     }
+}
+// 能当一位玩家的系统手柄（#2244）：带扩展档的，或单只一代 Joy-Con（ios/pad_profile.h；两只单只各占一格、各当一位玩家，iOS 里配成一对的带扩展档、照旧一位）。
+//   Siri Remote 等别的只有 micro 档的设备不收
+static BOOL pad_usable(GCController *c) { return c.extendedGamepad || s2a_pad_single_joycon(c.productCategory, NO); }
+static void sample_pad(GCController *c, uint32_t *out_buttons, int32_t axes[4]) {
+    if (c.extendedGamepad) { sample_extended(c.extendedGamepad, out_buttons, axes); return; }
+    s2a_pad_profile_sample(c.physicalInputProfile, c.productCategory, out_buttons, axes);
+    s2a_pad_map(s2a_ios_pad_map_config(), out_buttons, axes);   // 改键同扩展手柄（#1606 ④）
+    static NSHashTable<GCController *> *named;   // 首次采样打一行全部键名（单只没有实物核过真实键名，靠这一行核）
+    if (!named) named = [NSHashTable weakObjectsHashTable];
+    if (![named containsObject:c]) { [named addObject:c]; LOG("系统手柄：%s（%s）只有通用描述，%s", c.vendorName.UTF8String ?: "?", c.productCategory.UTF8String ?: "?", s2a_pad_profile_names(c.physicalInputProfile).UTF8String); }
+}
+// 装 / 摘回调（只在 inputQueue 上调）：扩展档挂 valueChangedHandler，只有通用描述的挂 physicalInputProfile.valueDidChangeHandler；h 为 nil = 摘
+static void pad_set_handler(GCController *c, void (^h)(GCController *)) {
+    if (!c) return;
+    __weak GCController *wc = c;
+    if (c.extendedGamepad) {
+        c.extendedGamepad.valueChangedHandler = !h ? nil : ^(GCExtendedGamepad *pad, GCControllerElement *element) { (void)pad; (void)element; GCController *x = wc; if (x) h(x); };
+        return;
+    }
+    c.physicalInputProfile.valueDidChangeHandler = !h ? nil : ^(GCPhysicalInputProfile *profile, GCControllerElement *element) { (void)profile; (void)element; GCController *x = wc; if (x) h(x); };
 }
 
 // NS2 Pro 换槽（持 g_feedback_mu）：离开的位置清零——槽 0 交回 pad.c（BLE 源断开），槽 1–3 原子量写零；
@@ -728,9 +751,9 @@ static void pad_face_sync(void) {
     _touchEnabled(_foreground && !external && !keyboard);
     s2a_ios_mouse_sync();   // 虚拟按键回来了：鼠标视角不该再锁着
 }
-- (void)publishSystem:(GCExtendedGamepad *)pad {
+- (void)publishSystem:(GCController *)pad {
     uint32_t buttons, kb_buttons; int32_t axes[4], kb_sticks[4];
-    sample_extended(pad, &buttons, axes);
+    sample_pad(pad, &buttons, axes);
     kb_snapshot(&kb_buttons, kb_sticks);
     s2a_kbd_merge(&buttons, axes, kb_buttons, kb_sticks);   // 同 Mac 槽 0：第一只手柄 + 键盘
     s2a_pad_update(S2A_PAD_SYSTEM, 1, buttons, axes);
@@ -738,7 +761,7 @@ static void pad_face_sync(void) {
 }
 // 键盘这一份变了（只在 inputQueue 上跑，keyboard.m 经 s2a_ios_keyboard_publish 调）：照 Mac 选源。pressed = 这次有新按下的键（抬键不触发接管）
 - (void)keyboardChanged:(BOOL)pressed {
-    if (_system.extendedGamepad) { [self publishSystem:_system.extendedGamepad]; return; }   // 系统手柄当玩家 1：并进它
+    if (pad_usable(_system)) { [self publishSystem:_system]; return; }   // 系统手柄当玩家 1：并进它
     pthread_mutex_lock(&g_feedback_mu);
     BOOL ble = atomic_load(&g_adapter_enabled) && ble_is_p1();
     if (ble) {   // NS2 Pro 当玩家 1：照它上一帧并一份重发
@@ -798,13 +821,13 @@ static void pad_face_sync(void) {
 - (void)publishSlot:(int)slot {
     if (_slotId[slot] == &g_ble_slot_tag) return;   // NS2 Pro 的槽：ble_input 直接写（#1428）
     uint32_t buttons = 0; int32_t axes[4] = {0};
-    GCExtendedGamepad *pad = _slotOwner[slot].extendedGamepad;
-    if (pad && atomic_load(&g_slots_active)) { sample_extended(pad, &buttons, axes); buttons &= 0xffffu; }   // Home 扩展位只给玩家 1 开菜单用
+    GCController *pad = pad_usable(_slotOwner[slot]) ? _slotOwner[slot] : nil;
+    if (pad && atomic_load(&g_slots_active)) { sample_pad(pad, &buttons, axes); buttons &= 0xffffu; }   // Home 扩展位只给玩家 1 开菜单用
     {   // #1224 取证：玩家 2–4 每槽第一次采到按键记一行（分槽了却按不动：看是回调没来、前台标记关着，还是服务层没读）
         static _Atomic uint32_t said; uint32_t bit = 1u << slot;
         if (buttons && !(atomic_fetch_or(&said, bit) & bit)) LOG("系统手柄：玩家 %d（%s）第一次采到按键 0x%x", slot + 1, _slotOwner[slot].vendorName.UTF8String ?: "GameController", buttons);
         else if (!pad || !atomic_load(&g_slots_active)) { static _Atomic uint32_t idle; uint32_t ib = 1u << slot;
-            if (_slotOwner[slot] && !(atomic_fetch_or(&idle, ib) & ib)) LOG("系统手柄：玩家 %d 的回调来了但没采样（%s）", slot + 1, !pad ? "手柄没有扩展手柄档" : "前台标记关着"); }
+            if (_slotOwner[slot] && !(atomic_fetch_or(&idle, ib) & ib)) LOG("系统手柄：玩家 %d 的回调来了但没采样（%s）", slot + 1, !pad ? "手柄没有能采样的描述" : "前台标记关着"); }
     }
     for (int i = 0; i < 4; i++) atomic_store(&g_slot_sticks[slot][i], axes[i]);
     atomic_store(&g_slot_buttons[slot], buttons);
@@ -816,9 +839,9 @@ static void pad_face_sync(void) {
     GCController *current = _system;
     // 当前玩家 1 的对象自身可用就算在线（同 s2a_system_action：快照抖动期不让出槽 0）；延迟复查时仍不在快照里就不算（#1952：关机后旧对象
     //   extendedGamepad 仍非 nil，原先一直占着槽 0，再连上的新对象只能排玩家 2）
-    if (current.extendedGamepad && (!mayClear || [GCController.controllers containsObject:current])) { ids[n] = (__bridge const void *)current; ctrls[n] = current; n++; }
+    if (pad_usable(current) && (!mayClear || [GCController.controllers containsObject:current])) { ids[n] = (__bridge const void *)current; ctrls[n] = current; n++; }
     for (GCController *c in GCController.controllers) {
-        if (!c.extendedGamepad || c == current) continue;
+        if (!pad_usable(c) || c == current) continue;
         if (n >= 9) break;
         ids[n] = (__bridge const void *)c; ctrls[n] = c; n++;
     }
@@ -864,15 +887,15 @@ static void pad_face_sync(void) {
     __weak S2AController *weakSelf = self;
     for (int i = 1; i < S2A_IOS_MAX_PADS; i++) {
         if (old[i] == _slotOwner[i]) continue;   // 原样在槽里：回调已装
-        if (old[i] && old[i] != _system) old[i].extendedGamepad.valueChangedHandler = nil;   // 离开的手柄摘回调（强引用随 old 一起释放）
+        if (old[i] && old[i] != _system) pad_set_handler(old[i], nil);   // 离开的手柄摘回调（强引用随 old 一起释放）
         GCController *next = _slotOwner[i];
         if (!next) continue;
         prepare_pad(next, _inputQueue);
-        next.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
+        pad_set_handler(next, ^(GCController *pad) {
             S2AController *owner = weakSelf;
             if (!owner) return;
-            for (int k = 1; k < S2A_IOS_MAX_PADS; k++) if (owner->_slotOwner[k].extendedGamepad == pad) { [owner publishSlot:k]; break; }
-        };
+            for (int k = 1; k < S2A_IOS_MAX_PADS; k++) if (owner->_slotOwner[k] == pad) { [owner publishSlot:k]; break; }
+        });
         LOG("系统手柄：%s 接入玩家 %d", next.vendorName.UTF8String ?: "GameController", i + 1);
     }
     for (int i = 1; i < S2A_IOS_MAX_PADS; i++) [self publishSlot:i];   // 空槽清零；新接入的立即采一次
@@ -884,7 +907,7 @@ static void pad_face_sync(void) {
 // 只在 inputQueue 上跑。
 - (void)attachSystem:(GCController *)next {
     if (next == _system) return;
-    _system.extendedGamepad.valueChangedHandler = nil;
+    pad_set_handler(_system, nil);
     _system = next;
     _systemRev++;          // 挂起的延迟复查作废：已经有新对象了
     _systemRecheck = NO;
@@ -892,10 +915,10 @@ static void pad_face_sync(void) {
     s2a_ios_slot_feedback_owner(0, next);   // 玩家 1 的体感跟着换手柄（回调在 ios/slot_feedback.m，同玩家 2–4）
     prepare_pad(next, _inputQueue);   // 回调队列 + 「-」「Home」关系统手势
     __weak S2AController *weakSelf = self;
-    next.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
+    pad_set_handler(next, ^(GCController *pad) {
         S2AController *owner = weakSelf;
-        if (owner && pad == owner->_system.extendedGamepad) [owner publishSystem:pad];
-    };
+        if (owner && pad == owner->_system) [owner publishSystem:pad];
+    });
     LOG("系统手柄：接入 %s", next.vendorName.UTF8String ?: "GameController");
 }
 // 确认断开：摘 handler 并把共享内存里的系统手柄状态清零。只在 inputQueue 上跑。
@@ -906,7 +929,7 @@ static void pad_face_sync(void) {
     _systemRecheck = NO;
     system_select_device(nil);    // 震动侧一并摘掉（原 selectSystem 里 next 为 nil 时同样会调）
     s2a_ios_slot_feedback_owner(0, nil);   // 玩家 1 的体感跟着摘（样本清零，s2a_pad_read_motion 自然回落）
-    old.extendedGamepad.valueChangedHandler = nil;
+    pad_set_handler(old, nil);
     s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, NULL);
 }
 // 第一次发现当前手柄不可用：不立刻清零，S2A_SYSTEM_RECHECK_MS 后复查一次。只在 inputQueue 上跑。
@@ -935,7 +958,7 @@ static void pad_face_sync(void) {
     s2a_sys_state state = {
         .foreground = foreground,
         .has_current = current != nil,
-        .current_alive = current.extendedGamepad != nil,
+        .current_alive = pad_usable(current),
         .current_listed = current && [controllers containsObject:current],
         .candidate_ready = candidate != nil,
         .may_clear = mayClear,
@@ -943,20 +966,20 @@ static void pad_face_sync(void) {
     const char *name = current.vendorName.UTF8String ?: "GameController";
     // 按顺序表分配过（#1606 ④）：玩家 1 可能被重新指定成别的手柄、或这只被设成不分配。s2a_system_action 只看「当前这只还活着就留着」
     //   （不按表时还在线的手柄一定留原槽，这么判没错），所以有表、前台、当前这只还活着而槽 0 换了人时在这里换：槽 0 有人就接它，空了就清掉这只。没表时不走这里
-    if (g_order_loaded && foreground && current.extendedGamepad && slot0 != current) {
+    if (g_order_loaded && foreground && pad_usable(current) && slot0 != current) {
         LOG("系统手柄：按分配玩家的顺序表，玩家 1 从 %s 换成 %s", name, slot0 ? (slot0.vendorName.UTF8String ?: "GameController") : "（没有手柄）");
-        if (slot0) { [self attachSystem:slot0]; [self publishSystem:slot0.extendedGamepad]; }
+        if (slot0) { [self attachSystem:slot0]; [self publishSystem:slot0]; }
         else { [self clearSystem]; if (atomic_load(&g_kb_state) == KB_ACTIVE) [self keyboardChanged:NO]; }
         return;
     }
     switch (s2a_system_action(state)) {
         case S2A_SYS_PUBLISH:
             if (mayClear) LOG("系统手柄：%s 已恢复，保留 handler", name);
-            [self publishSystem:current.extendedGamepad];
+            [self publishSystem:current];
             break;
         case S2A_SYS_ATTACH:
             [self attachSystem:candidate];
-            [self publishSystem:candidate.extendedGamepad];
+            [self publishSystem:candidate];
             break;
         case S2A_SYS_DEFER:
             // 抖动期不清 handler、不清零：这期间实体手柄的按键仍然走 publishSystem 进共享内存。
@@ -984,7 +1007,7 @@ void s2a_ios_pad_order_changed(void) {
     dispatch_sync(_inputQueue, ^{ [self selectSystemLocked:foreground mayClear:NO]; });
     [self updateVisibility];
 }
-// 诊断（#456）：列出 GameController 枚举到的全部设备与 profile。只有带 extendedGamepad 的才会被选成系统手柄并打「接入」，
+// 诊断（#456）：列出 GameController 枚举到的全部设备与 profile。只有带 extendedGamepad 的（与单只一代 Joy-Con，#2244）才会被选成系统手柄并打「接入」，
 //   第三方手柄的 Switch 模式若被枚举成只有 micro / 没有标准 profile，或根本没被枚举，原先日志里一片空白，分不清卡在系统层还是 App 层
 static void log_controllers(int why) {   // why：0 启动时、1 连接通知、2 断开通知
     NSMutableArray<NSString *> *list = [NSMutableArray array];

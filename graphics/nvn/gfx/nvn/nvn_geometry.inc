@@ -113,6 +113,17 @@ static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t
 typedef struct { pso_key k; const void *ts; uint32_t pad, emu; } mtk_key;   // pso_key with the mesh shader in its vertex place, the task shader (the pipeline's third function), and the user(locn) mask of the padded mesh variant used (0 = none)
 static nvn_hmap g_pso_mtk = {.klen = sizeof(mtk_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
 static NSObject *g_pso_mtk_building; static dispatch_queue_t g_mtk_q; static dispatch_group_t g_mtk_group;
+// 管线额度（nvn_pso_budget.inc ⑦，D-EH7W）：网格管线也是活着的管线。g_pb_mtk = 表里真管线的条数（不含在建占位、拒建的 NSNull）；
+//   放进表一律经 mtk_put_locked、画到经 pb_touch_m（都在 g_pso_mtk_lock 下），超额时与其他表一起按最久没用先放
+static _Atomic uint32_t g_pb_mtk;
+static void pb_built_m(const mtk_key *k); static void pb_touch_m(const mtk_key *k);
+static inline int mtk_real(id v) { return v && v != NSNull.null && v != g_pso_mtk_building; }
+static void mtk_put_locked(const mtk_key *k, id v) {
+    int was = mtk_real(hm_get_id(&g_pso_mtk, k)), is = mtk_real(v);
+    hm_put_id(&g_pso_mtk, k, v);
+    if (is && !was) atomic_fetch_add(&g_pb_mtk, 1); else if (was && !is) atomic_fetch_sub(&g_pb_mtk, 1);
+    if (is) pb_built_m(k);
+}
 static uint64_t g_mtk_n, g_mtk_ind_n, g_mtk_wait, g_mtk_skip;   // drawn (of them indirect), skipped while the pipeline was built, skipped as not drawable (red)
 // #770 实验开关 S2A_MESH_PACE（缺省 0 = 关，照旧建好即交付）：M1 Max（没有硬件网格着色，驱动走软件网格）换图时 GPU 挂死，都紧跟某条网格管线交付、
 //   且发生在多条网格管线排队待交付时；跳过网格绘制不挂；清掉系统缓存全部现编照样挂（作者 11-12 反例，所以不是缓存）。两档各验一个假设：
@@ -137,7 +148,7 @@ static void mtk_publish(void) {   // pace on, submit thread, before a mesh draw 
     if (pace == 2 && f == g_mtk_pub_frame) return;
     os_unfair_lock_lock(&g_pso_mtk_lock);
     NSUInteger n = pace == 2 ? 1 : g_mtk_ready.count;
-    for (NSUInteger i = 0; i < n; i++) { NSArray *r = g_mtk_ready[i]; mtk_key kk; [(NSData *)r[0] getBytes:&kk length:sizeof kk]; hm_put_id(&g_pso_mtk, &kk, r[1]); }
+    for (NSUInteger i = 0; i < n; i++) { NSArray *r = g_mtk_ready[i]; mtk_key kk; [(NSData *)r[0] getBytes:&kk length:sizeof kk]; mtk_put_locked(&kk, r[1]); }
     NSArray *done = [g_mtk_ready subarrayWithRange:NSMakeRange(0, n)]; [g_mtk_ready removeObjectsInRange:NSMakeRange(0, n)]; NSUInteger left = g_mtk_ready.count;
     os_unfair_lock_unlock(&g_pso_mtk_lock);
     g_mtk_pub_frame = f;
@@ -644,7 +655,7 @@ static uint64_t g_mtk_warm_claimed;
 static void mtk_warm_claim(NSData *key, id ps) {   // submit thread (warm_claim): a pipeline the prewarm built goes where the draw looks, unless the draw already has one
     mtk_key mk; if (key.length != sizeof mk) return; [key getBytes:&mk length:sizeof mk];
     os_unfair_lock_lock(&g_pso_mtk_lock); __unsafe_unretained id cur = hm_get_id(&g_pso_mtk, &mk); int put = !cur || cur == g_pso_mtk_building;
-    if (put) hm_put_id(&g_pso_mtk, &mk, ps); os_unfair_lock_unlock(&g_pso_mtk_lock);
+    if (put) mtk_put_locked(&mk, ps); os_unfair_lock_unlock(&g_pso_mtk_lock);
     if (put) { uint64_t n = ++g_mtk_warm_claimed; if (!(n & (n - 1))) MLOG("task / mesh pipelines from the prewarm taken by the draws' table: %llu so far", (unsigned long long)n); }
 }
 // The background build of a mesh pipeline: a concurrent queue, at most mtk_width() at a time (the system compiler service builds them in parallel; one serial queue left a draw that
@@ -668,7 +679,7 @@ static void mtk_kick(id m, NSString *names, const mtk_key *key) {   // m: a mesh
         os_unfair_lock_lock(&g_pso_mtk_lock);
         if (p) { if (!g_mtk_names) g_mtk_names = [NSMapTable strongToStrongObjectsMapTable]; [g_mtk_names setObject:names forKey:p]; }
         if (mtk_pace()) { if (!g_mtk_ready) g_mtk_ready = [NSMutableArray array]; [g_mtk_ready addObject:@[[NSData dataWithBytes:&kk length:sizeof kk], p ? (id)p : NSNull.null]]; }   // held: mtk_publish delivers
-        else if (hm_get_id(&g_pso_mtk, &kk) == g_pso_mtk_building) hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null);   // the prewarm may have handed one over meanwhile: keep that one
+        else if (hm_get_id(&g_pso_mtk, &kk) == g_pso_mtk_building) mtk_put_locked(&kk, p ?: NSNull.null);   // the prewarm may have handed one over meanwhile: keep that one
         os_unfair_lock_unlock(&g_pso_mtk_lock);
     } });
 }
@@ -733,7 +744,8 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (quar_has(ms, fs)) { g_mtk_quar_skip++; static int qn; if (qn++ < 4) MLOG("【红】 GPU error quarantine: task / mesh pipeline (task %s mesh %s fragment %s) skipped (it faulted the GPU before)",
                                                                            ts ? ts->key : "-", ms->key, fs ? fs->key : "-"); return nil; }
     os_unfair_lock_lock(&g_pso_mtk_lock); __unsafe_unretained id ps = hm_get_id(&g_pso_mtk, &mk);
-    if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &mk, g_pso_mtk_building); }
+    if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; mtk_put_locked(&mk, g_pso_mtk_building); }
+    else if (mtk_real(ps)) pb_touch_m(&mk);
     os_unfair_lock_unlock(&g_pso_mtk_lock);
     if (ps == NSNull.null && !mk.pad && want) vp_ask(S.prog, ms, want);   // refused unpadded: ask for the padded variant (once; a variant that cannot be made stays failed)
     if (ps && ps != NSNull.null && ps != g_pso_mtk_building) {   // #770: the first draw of each pipeline, with the frame and how many are still building

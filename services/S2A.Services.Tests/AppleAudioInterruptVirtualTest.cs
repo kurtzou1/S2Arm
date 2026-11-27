@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
-using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
 using Ryujinx.Audio.Backends.Common;
 using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
@@ -12,8 +12,8 @@ using System.Threading;
 namespace S2A.Services.Tests
 {
     // D-J7ZC 巫师3 iPad 中止：iOS 音频中断期间系统停了输出队列、设备不交还，游戏约 1 秒收不到交还就自己关掉音频输出重开，
-    //   巫师3 的重开路径没先销毁上一个 SystemEvent，OpenDefaultAudioOut 中止。修法：中断期间改走无设备播放，按采样率照常交还（AppleHardwareDeviceSession._virtual）。
-    //   真声卡（本机 AudioQueue），测试钩子 S2A_AUDIO_TEST_NOTE_AT=1:2500：开播后第 1 秒投递 began、暂停队列（同系统停播），2.5 秒后投递 ended。期望按语义手算：
+    //   巫师3 的重开路径没先销毁上一个 SystemEvent，OpenDefaultAudioOut 中止。修法：中断期间改走无设备播放，按采样率照常交还（ApplePullHardwareDeviceSession._virtual，#2157 只留拉取一种传输后机制随输出会话迁入）。
+    //   真声卡（本机拉取会话），测试钩子 S2A_AUDIO_TEST_NOTE_AT=1:2500：开播后第 1 秒投递 began、暂停队列（同系统停播），2.5 秒后投递 ended。期望按语义手算：
     // ① 钩子到点生效（一行「测试钩子…模拟中断…2500 ms 后投递 ended」）
     // ② 看门狗（每 250 ms 一拍）1 秒内见 began，改走无设备播放（一行「系统通知：中断开始 … 改走无设备播放」）
     // ③ 中断期间游戏照常收到交还、按采样率：钩子后 0.5–1.5 秒这 1 秒里播完 38400–57600 帧（48000 × 0.8–1.2；排着 8 秒声音，不缺数据）
@@ -62,7 +62,7 @@ namespace S2A.Services.Tests
             string Line(string s) { foreach (string l in log.ToString().Split('\n')) if (l.Contains(s)) return l.Trim(); return "—"; }
 
             var reader = new ToneReader();
-            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
             IHardwareDeviceSession session = driver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, null, SampleFormat.PcmInt16, 48000, 2);
             session.Start();
 

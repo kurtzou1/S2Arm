@@ -225,7 +225,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
         /// <summary>
         /// Initialize the <see cref="WaveBuffer"/> in this <see cref="VoiceInfo"/>.
         /// </summary>
-        private void InitializeWaveBuffers()
+        internal void InitializeWaveBuffers()   // S2Arm (#12/#13 拆分): 影子驱动的波表段要走今天同一条初始化
         {
             Span<WaveBuffer> waveBuffersSpan = WaveBuffers.AsSpan();
             
@@ -440,10 +440,15 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
         /// <param name="userPlayState">The target user play state.</param>
         public void UpdatePlayState(Common.PlayState userPlayState)
         {
-            PlayState oldServerPlayState = PlayState;
+            (PlayState, PreviousPlayState) = S2AUpdatePlayState(PlayState, userPlayState);
+        }
 
-            PreviousPlayState = oldServerPlayState;
-
+        // S2Arm (#12/#13 拆分): 播放态迁移的纯函数。锁2a 落账对「活」PlayState 重放——中拍(解析段进行时的渲染拍)把
+        //   Stopping 迁到 Stopped 时,按活值重算 = 「Update 在拍后串行」的今天语义;快照基底重算会复活 Stopping,
+        //   下一拍再清一遍把已消费的波表再消费一次。语义与原内联体逐行一致:PreviousPlayState 恒写老值
+        //   (Stop 打在 Stopped 上的早退也在写完之后),Stop+Stopped 时 PlayState 保持不动
+        internal static (PlayState NewState, PlayState PreviousState) S2AUpdatePlayState(PlayState oldServerPlayState, Common.PlayState userPlayState)
+        {
             PlayState newServerPlayState;
 
             switch (userPlayState)
@@ -455,7 +460,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
                 case Common.PlayState.Stop:
                     if (oldServerPlayState == PlayState.Stopped)
                     {
-                        return;
+                        return (oldServerPlayState, oldServerPlayState);
                     }
 
                     newServerPlayState = PlayState.Stopping;
@@ -469,7 +474,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
                     throw new NotImplementedException($"Unhandled PlayState.{userPlayState}");
             }
 
-            PlayState = newServerPlayState;
+            return (newServerPlayState, oldServerPlayState);
         }
         
         /// <summary>
@@ -661,13 +666,37 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
             PoolMapper mapper,
             ref BehaviourInfo behaviourInfo)
         {
+            S2AUpdateWaveBuffer(errorInfos, ref waveBuffer, ref inputWaveBuffer, sampleFormat, isValid, mapper, ref behaviourInfo, ref BufferInfoUnmapped);
+        }
+
+        // S2Arm (#12/#13 拆分 · 处方①②③的载体): 单个波表槽更新的纯核,与原内联体逐行同体;BufferInfoUnmapped
+        //   (voice 级,四槽按原序演化)按引用进出。三处调用、一个语义:
+        //   ① 解析段(锁外):基底 = 锁1 快照槽,isValid = 解析段读到的(CPU 侧 IsWaveBufferValid),产出影子槽;
+        //   ② 锁2a 翻转重演:同一基底 = 锁1 快照槽(含旧地址与旧 IsSendToAudioProcessor),isValid = 落账时活的
+        //     (中拍被 Stopping 清全数组 / FlushWaveBuffers / DSP 消费回拷翻成 false)——重跑 isValid 分支与重发分支
+        //     两者,产出整体替换该槽的解析段结果。不能拿解析后的影子当基底::664 条件里的 IsSendToAudioProcessor
+        //     已被重发置 false,分支整跳过,A_old 的 Unmap 丢失;重发分支重跑一遍还会把错误二次入队、:674 的
+        //     Debug.Assert 直接触发——基底必须是快照槽(断言与今天的触发条件完全一致)。
+        //   ③ 单测直调(纯函数/日志重演口径):同基底换 isValid 输入比对今天串行序的终值与错误段。
+        //   hook 槽的今天时序:isValid 分支的 Unmap(A_old) 在前、重发挂接的双 Map(A_new) 在后(AssignDspAddress
+        //   强制映射路径本样双 Map,见 PoolMapper.S2AHookLog)。
+        internal static void S2AUpdateWaveBuffer(
+            List<ErrorInfo> errorInfos,
+            ref WaveBuffer waveBuffer,
+            ref WaveBufferInternal inputWaveBuffer,
+            SampleFormat sampleFormat,
+            bool isValid,
+            PoolMapper mapper,
+            ref BehaviourInfo behaviourInfo,
+            ref bool bufferInfoUnmapped)
+        {
             if (!isValid && waveBuffer.IsSendToAudioProcessor && waveBuffer.BufferAddressInfo.CpuAddress != 0)
             {
                 mapper.ForceUnmap(ref waveBuffer.BufferAddressInfo);
                 waveBuffer.BufferAddressInfo.Setup(0, 0);
             }
 
-            if (!inputWaveBuffer.SentToServer || BufferInfoUnmapped)
+            if (!inputWaveBuffer.SentToServer || bufferInfoUnmapped)
             {
                 if (inputWaveBuffer.IsSampleOffsetValid(sampleFormat))
                 {
@@ -682,10 +711,10 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
                     waveBuffer.LoopEndSampleOffset = inputWaveBuffer.LoopLastSampleOffset;
                     waveBuffer.LoopCount = inputWaveBuffer.LoopCount;
 
-                    BufferInfoUnmapped = !mapper.TryAttachBuffer(out ErrorInfo bufferInfoError, ref waveBuffer.BufferAddressInfo, inputWaveBuffer.Address, inputWaveBuffer.Size);
+                    bufferInfoUnmapped = !mapper.TryAttachBuffer(out ErrorInfo bufferInfoError, ref waveBuffer.BufferAddressInfo, inputWaveBuffer.Address, inputWaveBuffer.Size);
 
                     if (bufferInfoError.ErrorCode != ResultCode.Success)
-                    {   
+                    {
                         errorInfos.Add(bufferInfoError);
                     }
 
@@ -697,17 +726,17 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
                                                                              inputWaveBuffer.ContextSize);
 
                         if (adpcmLoopContextInfoError.ErrorCode != ResultCode.Success)
-                        {   
+                        {
                             errorInfos.Add(adpcmLoopContextInfoError);
                         }
 
-                        if (!adpcmLoopContextMapped || BufferInfoUnmapped)
+                        if (!adpcmLoopContextMapped || bufferInfoUnmapped)
                         {
-                            BufferInfoUnmapped = true;
+                            bufferInfoUnmapped = true;
                         }
                         else
                         {
-                            BufferInfoUnmapped = false;
+                            bufferInfoUnmapped = false;
                         }
                     }
                     else
@@ -719,7 +748,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
                 {
                     errorInfos.Add(new ErrorInfo
                     {
-                        ErrorCode = ResultCode.InvalidAddressInfo, 
+                        ErrorCode = ResultCode.InvalidAddressInfo,
                         ExtraErrorInfo = inputWaveBuffer.Address
                     });
                 }

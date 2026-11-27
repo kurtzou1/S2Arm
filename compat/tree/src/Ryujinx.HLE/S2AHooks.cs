@@ -28,6 +28,10 @@ namespace Ryujinx.HLE
         // even when the game's control data declares no supported languages (otherwise American English, #401).
         public static bool ExplicitSystemLanguage;
 
+        // Supported-language bits (TitleLanguage) read off the game's RomFS when its control data is synthesized and declares none of them truthfully
+        // (services RomFsLanguages, D-7FZ6); -1 = not derived. GetDesiredLanguage then picks from these as from a real table instead of passing the host language through.
+        public static int RomFsTitleLanguages = -1;
+
         // KReadableEvent bound to a native event (KReadableEvent.S2ANativeEvent != 0): mirror Signal / Clear to it,
         // because the game waits on the native event (WaitSynchronization never enters C#).
         public static delegate*<ulong, void> EventSignal;

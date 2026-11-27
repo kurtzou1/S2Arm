@@ -225,7 +225,7 @@ static id<MTLTexture> tensor_write_view(id<MTLTexture> v) {
     MTLTextureSwizzleChannels s = v.swizzle; id<MTLTexture> p = v.parentTexture;
     if (!p || (s.red == MTLTextureSwizzleRed && s.green == MTLTextureSwizzleGreen && s.blue == MTLTextureSwizzleBlue && s.alpha == MTLTextureSwizzleAlpha)) return v;
     NSUInteger ns = v.textureType == MTLTextureType3D ? 1 : v.arrayLength * (v.textureType == MTLTextureTypeCube || v.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-    id<MTLTexture> w = [p newTextureViewWithPixelFormat:v.pixelFormat textureType:v.textureType levels:NSMakeRange(v.parentRelativeLevel, v.mipmapLevelCount) slices:NSMakeRange(v.parentRelativeSlice, ns)];
+    id<MTLTexture> w = mtl_view(p, v.pixelFormat, v.textureType, NSMakeRange(v.parentRelativeLevel, v.mipmapLevelCount), NSMakeRange(v.parentRelativeSlice, ns));
     return w ? w : v;
 }
 // 派发一个带 HMMA 的计算程序时调（dispatch）：不派发它；它写图就把读到的低分辨率画面放大进去

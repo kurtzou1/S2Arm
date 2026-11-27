@@ -209,6 +209,88 @@ namespace Ryujinx.Audio.Renderer.Server.Splitter
             IsBugFixed = isBugFixed;
         }
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 影子构建——解析段(锁外)在影子上跑 SplitterContext.Update。
+        //   各存储来自 S2AUpdateShadow 的原生影子块(链表指针必须指向稳定的影子目的地数组,原生块不随 GC 移动);
+        //   标量按 live 现值快照;双二阶滤波状态与 live 共享(游戏段只读,DSP 在锁外独写)
+        internal void S2AInitializeShadow(
+            SplitterContext live,
+            Memory<SplitterState> splitters,
+            Memory<SplitterDestinationVersion1> splitterDestinationsV1,
+            Memory<SplitterDestinationVersion2> splitterDestinationsV2,
+            Memory<BiquadFilterState> splitterBqfStates)
+        {
+            Version = live.Version;
+            IsSplitterPrevVolumeResetSupported = live.IsSplitterPrevVolumeResetSupported;
+            IsBiquadFilterParameterFloatSupported = live.IsBiquadFilterParameterFloatSupported;
+            _splitterBqfStates = splitterBqfStates;
+
+            Setup(splitters, splitterDestinationsV1, splitterDestinationsV2, live.IsBugFixed);
+        }
+
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 影子分频段→live 的落账。目的地按字段矩阵落账
+        //   (S2ACommitGameFieldsFrom,基底=锁1 快照拷贝);分频器结构体整拷+链重建(S2ACommitGameFieldsFrom)
+        internal void S2ACommitFrom(SplitterContext shadow)
+        {
+            if (shadow._splitterDestinationsV2.IsEmpty && shadow._splitterDestinationsV1.IsEmpty)
+            {
+                return;
+            }
+
+            if (shadow._splitterDestinationsV2.IsEmpty)
+            {
+                for (int i = 0; i < shadow._splitterDestinationsV1.Length; i++)
+                {
+                    _splitterDestinationsV1.Span[i].S2ACommitGameFieldsFrom(
+                        in shadow._splitterDestinationsV1.Span[i],
+                        in shadow._s2aDestinationBaseV1.Span[i]);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < shadow._splitterDestinationsV2.Length; i++)
+                {
+                    _splitterDestinationsV2.Span[i].S2ACommitGameFieldsFrom(
+                        in shadow._splitterDestinationsV2.Span[i],
+                        in shadow._s2aDestinationBaseV2.Span[i]);
+                }
+            }
+
+            for (int i = 0; i < _splitters.Length; i++)
+            {
+                _splitters.Span[i].S2ACommitGameFieldsFrom(in shadow._splitters.Span[i], this);
+            }
+        }
+
+        // S2Arm (#12/#13 拆分): 目的地数组的锁1 基底拷贝(落账的增量判据;影子块内、随影子复用)
+        internal Memory<SplitterDestinationVersion1> _s2aDestinationBaseV1;
+        internal Memory<SplitterDestinationVersion2> _s2aDestinationBaseV2;
+        // S2Arm (#12/#13 拆分): 影子构建/落账要的逐项访问与原生基址(工作缓冲原生块,指针稳定;
+        //   快照拷贝的重绑、落账的链头重建都要按下标平移指针)
+        internal ref SplitterState S2AGetState(int id) => ref _splitters.Span[id];
+        internal ref SplitterDestinationVersion1 S2AGetDestinationV1(int id) => ref _splitterDestinationsV1.Span[id];
+        internal ref SplitterDestinationVersion2 S2AGetDestinationV2(int id) => ref _splitterDestinationsV2.Span[id];
+        internal unsafe SplitterDestinationVersion1* S2ADestinationBaseV1
+        {
+            get
+            {
+                fixed (SplitterDestinationVersion1* p = _splitterDestinationsV1.Span) { return p; }
+            }
+        }
+        internal unsafe SplitterDestinationVersion2* S2ADestinationBaseV2
+        {
+            get
+            {
+                fixed (SplitterDestinationVersion2* p = _splitterDestinationsV2.Span) { return p; }
+            }
+        }
+
+        // S2Arm (#12/#13 拆分): 影子上下文共享 live 的双二阶滤波状态(游戏段只读,DSP 在锁外独写)
+        internal Memory<BiquadFilterState> S2ABqfStates => _splitterBqfStates;
+
+        // S2Arm (#12/#13 拆分): 影子构建要的计数(分频器数/目的地数)
+        internal int S2ASplitterCount => _splitters.Length;
+        internal int S2ADestinationCount => _splitterDestinationsV2.IsEmpty ? _splitterDestinationsV1.Length : _splitterDestinationsV2.Length;
+
         /// <summary>
         /// Clear the new connection flag.
         /// </summary>

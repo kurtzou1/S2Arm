@@ -68,6 +68,17 @@ namespace Ryujinx.Audio.Renderer.Common
             _storage.Reset();
         }
 
+        // S2Arm (#12/#13 拆分 · 渲染拍不等 Update 的锁): 影子→live 的整组位拷(两实例节点数相同,只拷用到的字节;
+        //   解析段在影子邻接矩阵上改,落账搬回——live 邻接矩阵只有游戏段读,不搬会从旧基底漂移)
+        public void S2ACopyTo(EdgeMatrix destination)
+        {
+            Debug.Assert(_nodeCount == destination._nodeCount);
+
+            int bytes = (_nodeCount * _nodeCount + 7) / 8;
+
+            _storage.S2AStorage.Span[..bytes].CopyTo(destination._storage.S2AStorage.Span[..bytes]);
+        }
+
         /// <summary>
         /// Reset the bit at the given index.
         /// </summary>

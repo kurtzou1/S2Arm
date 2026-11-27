@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
-using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+using Ryujinx.Audio.Backends.Apple;   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
 using Ryujinx.Audio.Backends.Common;
 using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
@@ -13,8 +13,8 @@ namespace S2A.Services.Tests
 {
     // D-GJCX / D-4T8M 宝可梦剑中止：设备不回调而不是系统中断（路由切换、失焦未冻结……）时，游戏约 0.8–1 秒收不到交还就关掉音频输出重开，
     //   重开路径不销毁上一个 SystemEvent，OpenDefaultAudioOut 中止。修法：交还永不停——任何原因设备超过 VirtualAfterMs（200 ms）不回调就改走
-    //   无设备播放、按采样率交还，不在系统中断里 VirtualProbeMs（500 ms）后试回设备（AppleHardwareDeviceSession）。
-    //   真声卡（本机 AudioQueue），钩子 S2A_AUDIO_TEST_STALL_AT=1：开播后第 1 秒外部暂停队列、不发任何通知（同系统悄悄停播）。期望按语义手算：
+    //   无设备播放、按采样率交还，不在系统中断里 VirtualProbeMs（500 ms）后试回设备（ApplePullHardwareDeviceSession）。
+    //   真声卡（本机拉取会话），钩子 S2A_AUDIO_TEST_STALL_AT=1：开播后第 1 秒外部停输出器件、不发任何通知（同系统悄悄停播，日志措辞沿用「外部暂停输出队列」）。期望按语义手算：
     // ① 钩子到点生效（一行「测试钩子…外部暂停输出队列」）
     // ② 看门狗（每 250 ms 一拍）1 秒内因「设备 … ms 没有回调」改走无设备播放（不是系统中断）
     // ③ 游戏侧交还不停：钩子后 2 秒里每 10 ms 取一次播完帧数，相邻两次增长之间最长间隔 ≤ 600 ms
@@ -63,7 +63,7 @@ namespace S2A.Services.Tests
             string Line(string s) { foreach (string l in log.ToString().Split('\n')) if (l.Contains(s)) return l.Trim(); return "—"; }
 
             var reader = new ToneReader();
-            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioQueue），只在 macOS 跑
+            var driver = new AppleHardwareDeviceDriver();   // 平台例外：苹果音频后端单测（真 AudioUnit 拉取），只在 macOS 跑
             IHardwareDeviceSession session = driver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, null, SampleFormat.PcmInt16, 48000, 2);
             session.Start();
 

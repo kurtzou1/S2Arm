@@ -1,0 +1,14 @@
+regionCN/CNch/message/Glossary.msbt
+regionEU/EUde/message/Glossary.msbt
+regionEU/EUen/message/Glossary.msbt
+regionEU/EUes/message/Glossary.msbt
+regionEU/EUfr/message/Glossary.msbt
+regionEU/EUit/message/Glossary.msbt
+regionEU/EUnl/message/Glossary.msbt
+regionEU/EUru/message/Glossary.msbt
+regionJP/JPja/message/Glossary.msbt
+regionKR/KRkr/message/Glossary.msbt
+regionTW/TWch/message/Glossary.msbt
+regionUS/USen/message/Glossary.msbt
+regionUS/USes/message/Glossary.msbt
+regionUS/USfr/message/Glossary.msbt

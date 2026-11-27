@@ -10,6 +10,7 @@
 #import <GameController/GameController.h>
 #import "s2a_l10n.h"
 #import "controller.h"
+#include "pad_profile.h"   // s2a_pad_single_joycon（#2244）
 
 NSString *s2a_ios_pad_order_path(void);           // controller.m
 uint32_t s2a_ios_ble_raw_buttons(int *ready);      // controller.m：NS2 Pro 最近一笔原始按键，ready = 连着
@@ -33,7 +34,7 @@ enum { kAssignMax = 4 };
     NSMutableArray *out = [NSMutableArray array];
     NSMutableDictionary<NSString *, NSNumber *> *seen = [NSMutableDictionary dictionary];
     for (GCController *c in GCController.controllers) {
-        if (!c.extendedGamepad) continue;
+        if (!c.extendedGamepad && !s2a_pad_single_joycon(c.productCategory, NO)) continue;   // 单只一代 Joy-Con 也当一位玩家（#2244，同 controller.m pad_usable）
         NSString *name = c.vendorName ?: c.productCategory ?: @"GameController";
         int index = seen[name].intValue; seen[name] = @(index + 1);
         BOOL pressed = NO;
@@ -137,7 +138,7 @@ enum { kAssignMax = 4 };
 // 齿轮菜单入口（vpad.m）：连着两只以上手柄，或已经分配过，才列
 BOOL s2a_ios_player_assign_wanted(void) {
     int pads = 0, ready = 0;
-    for (GCController *c in GCController.controllers) if (c.extendedGamepad) pads++;
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad || s2a_pad_single_joycon(c.productCategory, NO)) pads++;
     s2a_ios_ble_raw_buttons(&ready);
     return pads + ready >= 2 || [NSFileManager.defaultManager fileExistsAtPath:s2a_ios_pad_order_path()];
 }

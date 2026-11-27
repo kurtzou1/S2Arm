@@ -6,6 +6,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- S2Arm (#12/#13 拆分): 服务层回归直测波表槽重演纯核(VoiceInfo.S2AUpdateWaveBuffer 与 PoolMapper 的影子录制件是 internal,先例 Ryujinx.Common 对 S2A.Services.Tests 的开放) -->
+    <InternalsVisibleTo Include="S2A.Services.Tests" />
     <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
     <ProjectReference Include="..\Ryujinx.Cpu\Ryujinx.Cpu.csproj" />
     <ProjectReference Include="..\Ryujinx.Memory\Ryujinx.Memory.csproj" />

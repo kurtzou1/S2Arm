@@ -15,7 +15,7 @@ namespace S2A.Services.Tests
     public static unsafe partial class Program
     {
         [DynamicDependency(DynamicallyAccessedMemberTypes.NonPublicFields,
-            "Ryujinx.Audio.Backends.Apple.AppleHardwareDeviceSession", "Ryujinx.Audio.Backends.Apple")]
+            "Ryujinx.Audio.Backends.Apple.ApplePullHardwareDeviceSession", "Ryujinx.Audio.Backends.Apple")]   // 平台例外：测试点名 Apple 后端类型（#2157）
         internal static int AppleAudioDispose()
         {
             try
@@ -76,7 +76,7 @@ namespace S2A.Services.Tests
                         if (!reused.WaitOne(0) || reused.WaitOne(0))
                             throw new InvalidOperationException($"第{round}轮GC后事件语义被旧句柄释放破坏");
                         foreach (AutoResetEvent evnt in events) evnt.Dispose();
-                        Console.WriteLine($"真实Apple音频Dispose {round}/10：AudioQueue建/关，旧槽由AutoResetEvent复用，重复session/driver Dispose及GC后信号均正确；事件数{events.Count}");
+                        Console.WriteLine($"真实Apple音频Dispose {round}/10：拉取会话建/关，旧槽由AutoResetEvent复用，重复session/driver Dispose及GC后信号均正确；事件数{events.Count}");
                     }
                     finally { memory.DecrementReferenceCount(); }
                 }

@@ -24,7 +24,7 @@ using CpuAddress = System.UInt64;
 
 namespace Ryujinx.Audio.Renderer.Server
 {
-    public class AudioRenderSystem : IDisposable
+    public partial class AudioRenderSystem : IDisposable
     {
         private readonly Lock _lock = new();
 
@@ -455,156 +455,94 @@ namespace Ryujinx.Audio.Renderer.Server
         public static long S2AUpdateHoldMaxTicks;
         public static long S2ARenderLockWaitTicks;
 
-        public ResultCode Update(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
+        // S2Arm (#2157 评审 #12/#13): iPhone 上一次 Update 持锁 7.8 ms,渲染拍等锁 10 ms——持锁花在哪一段。分段计时进
+        //   本实例的 _s2aPhaseTicks;Update() 里两段持锁(锁1 快照 / 锁2a 落账)取最长的一次,超过本拍已见最长
+        //   (比较基准 = S2AUpdateHoldMaxTicks,渲染调度循环每拍循环首清零、慢拍行打印时再 Exchange 清零,见
+        //   AudioRendererManager)的那次把整组归档到静态——数组最终留下的就是本拍最长持锁那一次的分段,慢拍行整组打印。
+        //   线程侧:游戏线程写、渲染调度线程读(慢拍行)与测宿主收官读(renderer-load 组拼 phases),跨线程撕裂只影响
+        //   诊断行,无害。计时口径 = 锁内时长(进锁后才开表,不含等锁);拆分后 0..7 各段计在锁外解析段上(画像含义不变:
+        //   解析花在哪一段),8=落账(锁1+锁2a 两小段)。名字表公开只读,下标即段号,收官拼 phases 字符串用
+        public static readonly string[] S2AUpdatePhaseNames = new string[] { "行为+内存池", "声道资源", "声音", "效果", "分频", "混音", "汇", "收尾", "落账" };
+        public static readonly long[] S2AUpdatePhaseTicks = new long[S2AUpdatePhaseNames.Length];
+
+        // S2Arm (#12/#13): 慢拍行的分段摘要:整组按名字表顺序拼「名字 数值」(ms,一位小数)以「、」相接
+        //   (hold > 0 才被调用;诊断路径,慢拍行全程至多 40 行,这里才构造字符串,分配可忽略)
+        public static string S2AUpdatePhaseSummary(long frequency)
         {
-            lock (_lock)
+            System.Text.StringBuilder sb = new();
+
+            for (int i = 0; i < S2AUpdatePhaseTicks.Length; i++)
             {
-                long s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp();
-
-                try
-                {
-                    return S2AUpdateLocked(output, performanceOutput, input);
-                }
-                finally
-                {
-                    s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp() - s2aHeld;
-
-                    if (s2aHeld > Volatile.Read(ref S2AUpdateHoldMaxTicks))
-                    {
-                        Volatile.Write(ref S2AUpdateHoldMaxTicks, s2aHeld);
-                    }
-                }
+                sb.Append(i == 0 ? "" : "、").Append(S2AUpdatePhaseNames[i]).Append(' ').Append((S2AUpdatePhaseTicks[i] * 1000.0 / frequency).ToString("F1"));
             }
+
+            return sb.ToString();
         }
 
-        private ResultCode S2AUpdateLocked(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
+        // 本实例的分段计时(只在游戏线程持锁内触碰;实例量,静态量只收归档结果)
+        private long[] _s2aPhaseTicks = new long[S2AUpdatePhaseNames.Length];
+
+        // S2Arm (#12/#13 拆分 · 维护方 #12 主方向「渲染这一拍不等游戏 Update 的锁」): Update 不再整段持锁。
+        //   三段:锁1 只做 live→影子快照(整组 memcpy+逐型拷贝,微秒级);解析段在锁外的影子上跑全部 StateUpdater 段
+        //   (波表段由驱动逐槽驱动,重发错误按 (voiceId,波表) 暂存,处方③);锁2a 只做落账(字段矩阵拷回 + 波表翻转
+        //   重演(处方①②)+ hook 日志按原序重放 + 错误原序入队)。渲染拍最多等一小段落账,不再等整段解析
+        //   (iPhone 实测一次 7.8 ms、渲染拍等锁 10 ms)。
+        //   语义保真口径:无中拍(解析段进行时没有渲染拍)时与今天逐字节一致(响应字节、错误顺序、事件时序);
+        //   有中拍时,Update 的串行点 = 锁2a(解析读数取锁1 快照、拍写字段保留活值、播放态/IsNew/Flush 计数按纯函数
+        //   对活值重放 = 「Update 在拍后串行」的今天可能序),波表槽按处方①②重演。
+        public ResultCode Update(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
         {
+            S2AUpdateShadow shadow = S2AEnsureUpdateShadow();
+
+            ulong updateStartTicks = GetSystemTicks();
+
+            output.Span.Clear();
+
+            long s2aLock1Start = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            lock (_lock)
             {
-                ulong updateStartTicks = GetSystemTicks();
-
-                output.Span.Clear();
-
-                StateUpdater stateUpdater = new(input, output, _processHandle, _behaviourInfo);
-
-                ResultCode result;
-
-                result = stateUpdater.UpdateBehaviourInfo();
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                result = stateUpdater.UpdateMemoryPools(_memoryPools.Span, GetMemoryPoolStateMapper());
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                result = stateUpdater.UpdateVoiceChannelResources(_voiceContext);
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                PoolMapper poolMapper = GetUpdatePoolMapper();
-
-                if (_behaviourInfo.IsBiquadFilterParameterFloatSupported())
-                {
-                    result = stateUpdater.UpdateVoices2(_voiceContext, poolMapper);
-                }
-                else
-                {
-                    result = stateUpdater.UpdateVoices1(_voiceContext, poolMapper);
-                }
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                if (_s2aVoiceDiag != null)
-                {
-                    string line = _s2aVoiceDiag.Observe(_voiceContext, _manager.TickSource.ElapsedSeconds, _sessionId);
-
-                    if (line != null)
-                    {
-                        Console.Error.WriteLine(line);
-                    }
-                }
-
-                result = stateUpdater.UpdateEffects(_effectContext, _isActive, poolMapper);
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                if (_behaviourInfo.IsSplitterSupported())
-                {
-                    result = stateUpdater.UpdateSplitter(_splitterContext);
-
-                    if (result != ResultCode.Success)
-                    {
-                        return result;
-                    }
-                }
-
-                result = stateUpdater.UpdateMixes(_mixContext, GetMixBufferCount(), _effectContext, _splitterContext);
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                result = stateUpdater.UpdateSinks(_sinkContext, poolMapper);
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                result = stateUpdater.UpdatePerformanceBuffer(_performanceManager, performanceOutput.Span);
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                result = stateUpdater.UpdateErrorInfo();
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                if (_behaviourInfo.IsElapsedFrameCountSupported())
-                {
-                    result = stateUpdater.UpdateRendererInfo(_elapsedFrameCount);
-
-                    if (result != ResultCode.Success)
-                    {
-                        return result;
-                    }
-                }
-
-                result = stateUpdater.CheckConsumedSize();
-
-                if (result != ResultCode.Success)
-                {
-                    return result;
-                }
-
-                _systemEvent.Clear();
-
-                ulong updateEndTicks = GetSystemTicks();
-
-                _totalElapsedTicksUpdating += (updateEndTicks - updateStartTicks);
-
-                return result;
+                // 锁1:快照(渲染拍最多等这一小段)
+                shadow.SnapshotFromLive(_behaviourInfo, _isActive);
             }
+
+            long s2aLock1Ticks = System.Diagnostics.Stopwatch.GetTimestamp() - s2aLock1Start;
+
+            // 解析段(锁外):失败也只落在影子上,落账按失败点落前置段
+            ResultCode result = S2AParseLocked(output, performanceOutput, input, shadow);
+
+            long s2aLock2Start = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            lock (_lock)
+            {
+                // 锁2a:落账(数据搬动 + 复核重演 + hook 重放,微秒级);收尾段的消费核算失败也在这里改判
+                result = S2ACommitLocked(output, input, shadow, result);
+            }
+
+            long s2aLock2Ticks = System.Diagnostics.Stopwatch.GetTimestamp() - s2aLock2Start;
+
+            // 分段计时:解析段各相位已由 S2AParseLocked 记进 _s2aPhaseTicks(0..7),8=落账(锁1+锁2a)
+            _s2aPhaseTicks[8] += s2aLock1Ticks + s2aLock2Ticks;
+
+            ulong updateEndTicks = GetSystemTicks();
+
+            if (result == ResultCode.Success)
+            {
+                _totalElapsedTicksUpdating += updateEndTicks - updateStartTicks;
+            }
+
+            // 持锁口径:两段里最长的一段(渲染拍等锁受制于最长段;比较基准/归档时序见 S2AUpdatePhaseNames 上注)
+            long s2aHeld = Math.Max(s2aLock1Ticks, s2aLock2Ticks);
+
+            if (s2aHeld > Volatile.Read(ref S2AUpdateHoldMaxTicks))
+            {
+                Volatile.Write(ref S2AUpdateHoldMaxTicks, s2aHeld);
+
+                // 本次是本拍已见最长持锁:分段耗时整组归档(同拍再有更长的会整组重拷,最终留下最长那份)
+                Array.Copy(_s2aPhaseTicks, S2AUpdatePhaseTicks, S2AUpdatePhaseTicks.Length);
+            }
+
+            return result;
         }
 
         private ulong GetSystemTicks()
@@ -1017,6 +955,7 @@ namespace Ryujinx.Audio.Renderer.Server
                 _manager.Unregister(this);
                 _workBufferMemoryPin.Dispose();
                 FreeOwnedWorkBuffer();
+                _s2aUpdateShadow?.DisposeNative();   // S2Arm (#12/#13 拆分): 影子原生块(池表/分频链表)
 
                 if (MemoryManager is IRefCounted rc)
                 {
