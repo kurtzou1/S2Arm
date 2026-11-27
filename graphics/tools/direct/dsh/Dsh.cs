@@ -1989,8 +1989,29 @@ namespace S2A.Dsh
             //   它的每处匹配都以「. atomic_xxx (」结尾，即都含 atomicCalls 的一处匹配：atomicCalls 为 0（绝大多数着色器）时它必为空，不跑
             IList<Match> atomics = atomicCalls.Count == 0 ? Array.Empty<Match>()
                 : All(@"(?<receiver>[A-Za-z_]\w*(?:(?:\s*\.\s*[A-Za-z_]\w*)|(?:\s*\[[^\]\r\n]*\]))*)\s*\.\s*atomic_[A-Za-z_]\w*\s*\(", code);
-            if (atomics.Count != atomicCalls.Count)
-                throw new DshError("reflect failed", $"could not parse every native texture atomic receiver ({atomics.Count} of {atomicCalls.Count})");
+            // 池元素上的原子（PoolArrays 改写后的接收者 (&spvDescriptorSet0.<名>->e[0])[下标]，上面那条式子不收它）：追不到槽的图像句柄按运行时下标取池元素再做原子
+            //   （D-GMKW / D-F6ZC 计算着色器 ffeb5f2b8abc6dc3：cp_ib_cb0_40000000_r32ui[int(_1875)].atomic_*，原先整支反射失败，用它的计算落空）。
+            //   只放读写的 R32 整数图像缓冲池：宿主建这种缓冲贴图时就带原子用途（nvn_mtl.m 缓冲贴图建法「R32 整数的可写缓冲贴图建时就带原子」），池表 pool_fit 原样放它；
+            //   别的池（2D 图像等）的贴图不保证带原子用途，照旧拒、点名池与元素类型
+            int poolAtomics = 0;
+            foreach (Match c in atomicCalls)
+            {
+                int j = c.Index - 1; while (j >= 0 && char.IsWhiteSpace(code[j])) j--;
+                if (j < 0 || code[j] != ']') continue;
+                int k = j, depth = 0;
+                for (; k >= 0; k--) { if (code[k] == ']') depth++; else if (code[k] == '[' && --depth == 0) break; }
+                if (k < 0) continue;
+                Match pm = Search(@"\(&\s*spvDescriptorSet0\s*\.\s*([A-Za-z_]\w*)\s*->\s*e\[0\]\s*\)\s*\z", code[Math.Max(0, k - 256)..k]);
+                if (!pm.Success) continue;
+                string pn = pm.Groups[1].Value;
+                string pel = byName.TryGetValue(pn, out var pe) && (string)pe["kind"] == "tex_pool" ? pe["elem"] as string : null;
+                if (pel == null || !Regex.IsMatch(pel, @"\Atexture_buffer<u?int, access::read_write>\z", RegexOptions.CultureInvariant)
+                    || !(pn.EndsWith("_r32ui", StringComparison.Ordinal) || pn.EndsWith("_r32i", StringComparison.Ordinal)))
+                    throw new DshError("reflect failed", "native texture atomic on a pool element is supported only for read_write R32 integer buffer images: " + pn + " (" + (pel ?? "not a texture pool") + ")");
+                poolAtomics++;
+            }
+            if (atomics.Count + poolAtomics != atomicCalls.Count)
+                throw new DshError("reflect failed", $"could not parse every native texture atomic receiver ({atomics.Count + poolAtomics} of {atomicCalls.Count})");
             foreach (Match call in atomics)
             {
                 string receiver = call.Groups["receiver"].Value;

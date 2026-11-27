@@ -49,6 +49,17 @@ int main(void) {
     CHECK(rc == 0 && n == sizeof graphics && !memcmp(out, graphics, sizeof graphics),
           "paired v5 canonical bytes with FS texture");
 
+    tex.stage = "tcs";
+    graphics[430] = 4;
+    rc = s2a_input_identity_encode(&in, out, sizeof out, &n);
+    CHECK(rc == 0 && n == sizeof graphics && !memcmp(out, graphics, sizeof graphics),
+          "paired v5 canonical bytes with TCS texture");
+    tex.stage = "tes";
+    graphics[430] = 5;
+    rc = s2a_input_identity_encode(&in, out, sizeof out, &n);
+    CHECK(rc == 0 && n == sizeof graphics && !memcmp(out, graphics, sizeof graphics),
+          "paired v5 canonical bytes with distinct TES texture");
+
     // NVN CS is bit 5, but proof is packed in slot 0, not slot 5. One source
     // record removes 40 bytes. Texture stage index 2 is distinct from vs/fs.
     static const uint8_t compute[409] = {
@@ -76,7 +87,7 @@ int main(void) {
     in.compute_has_unaligned_ssbo = 1; in.compute_unaligned_ssbo = 2;
     CHECK(s2a_input_identity_encode(&in, out, sizeof out, &n) == -1, "invalid CS alignment rejected");
     in.compute_unaligned_ssbo = 1;
-    static const char *bad[] = {NULL, "", "unknown", "CS", "cs ", "tcs"};
+    static const char *bad[] = {NULL, "", "unknown", "CS", "cs ", "TCS", "tess"};
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         tex.stage = bad[i];
         n = 777;

@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 26   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 27   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -142,6 +142,7 @@ typedef struct {
     uint32_t storage_stages;       // 允许存储缓冲 / 存储图像写的 NVN 阶段位（1 << nvn_gpu_stage）(vertexPipelineStoresAndAtomics / fragmentStoresAndAtomics)
     uint32_t atomic_stages;        // 允许图像原子的 NVN 阶段位；具体格式再看 NVN_GPU_FMT_ATOMIC
     uint32_t display_max_hz;       // 有窗口时屏幕最高刷新率，没窗口 0（来自平台层的窗口；nvn_be_display_hz 的来源）
+    uint32_t max_patch_size;       // v27：曲面细分每片控制点数上限 (maxTessellationPatchSize；未启用 NVN_GPU_CAP_TESSELLATION 时为 0)
 } nvn_gpu_caps;
 // 每个 NVN 格式在本设备上的用法位（来源：格式属性 optimalTilingFeatures / Metal 格式能力表）
 enum {

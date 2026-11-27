@@ -389,6 +389,33 @@ static char *sampler_precision(char *t, size_t n, size_t *on) {   // t 以「#ve
     sb o = {0}; sb_put(&o, t, cut); if (cut && t[cut - 1] != '\n') sb_str(&o, "\n"); sb_put(&o, add.p, add.n); sb_put(&o, t + cut, n - cut); free(add.p); free(t);
     return sb_take(&o, on);
 }
+// 文件作用域的多余分号（D-RWJY #2304，游戏王 遗产链接进化：函数体后面跟「};」）：glslang 在 ES 下一律报「'extraneous semicolon' : not supported with this profile: es」
+//   （glslang.y external_declaration: SEMICOLON → requireProfile(~EEsProfile)，桌面 4.60 起才收），整支编不过、用它的绘制全丢（整屏粉红）；NVIDIA 驱动收。
+//   在花括号与圆括号之外、顶层上一记号是开头 / 「;」/ 函数体的「}」（「{」紧跟在「)」后开的）时，这个「;」是多余的，删掉；struct / 接口块的「}」后面那个「;」是声明的一部分，留着。
+//   函数体里的「;;」是空语句（合法），不动。预处理指令行（#version / #extension / #line …）整行跳过，不算记号
+static char *stray_semicolons(const char *t, size_t n, size_t *on) {
+    sb o = {0}; int depth = 0, parens = 0, top_func = 0, line_start = 1; char prev = 0, last = 0;   // prev：顶层上一记号 0 开头 / ';' / 'f' 函数体闭合 / 'a' 其它
+    size_t from = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)t[i];
+        if (line_start && c == '#') { const char *nl = memchr(t + i, '\n', n - i); if (!nl) break; i = (size_t)(nl - t); continue; }   // 指令行：到行尾（换行留给下一轮置行首）
+        if (c == '\n') { line_start = 1; continue; }
+        if (is_space(c)) continue;
+        line_start = 0;
+        if (c == '(') parens++;
+        else if (c == ')') parens--;
+        else if (c == '{') { if (depth == 0) top_func = last == ')'; depth++; }
+        else if (c == '}') { if (depth > 0) depth--; if (depth == 0) { prev = top_func ? 'f' : 'a'; last = '}'; continue; } }
+        else if (c == ';' && depth == 0 && parens == 0) {
+            if (prev == 0 || prev == ';' || prev == 'f') { sb_put(&o, t + from, i - from); from = i + 1; continue; }   // 多余的：不抄
+            prev = ';'; last = ';'; continue;
+        }
+        if (depth == 0) prev = 'a';
+        last = (char)c;
+    }
+    sb_put(&o, t + from, n - from);
+    return sb_take(&o, on);
+}
 char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, char *err, size_t errn) {
     if (errn) err[0] = 0;
     if (stage != 'v' && stage != 'f' && stage != 'c') { snprintf(err, errn, "stage %c is not v / f / c", stage); return NULL; }
@@ -421,6 +448,7 @@ char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, 
     //   游戏查编译状态失败就断言退出（D-9EPN：5 支片元编不过、随后游戏 Break）。结果不是 3.20、也没开那个扩展时，这个词只可能是名字：整词改成 s2a_sample
     //   11-20 D-45CD：原先只在「结果不是 3.20、也没开扩展」时改名——游戏写「#version 320」（NVIDIA 放过不写 es，s2a_glsl_es_prefix 补成 320 es）
     //   又拿 sample 当名字，照样报 Reserved word。改成按用法判，不按版本判：sample 后面紧跟 in / out / 插值 / 精度限定词才是限定符（原样），其余一律是名字、改 s2a_sample
+    { size_t xn; char *x = stray_semicolons(body, bn, &xn); free(body); if (!x) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = xn; }
     { size_t sn; char *x = sample_names(body, bn, &sn); free(body); if (!x) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = sn; }
     { size_t pn; char *x = sampler_precision(body, bn, &pn); if (!x) { free(body); if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = pn; }
     size_t fn; char *fx = fixups(body, bn, &fn, err, errn);

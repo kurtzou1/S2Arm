@@ -100,6 +100,24 @@ END { flush() }
 # 各格 edge 图跨跑残留：格没跑成时旧图会让 distinctions 假绿——先清
 rm -f "$out"/mtl?-*/edge-*.bgra
 bad=0; unproven=0; unpr=' '
+lost=0; lost_ok=0; lost_unpr=0   # 平台呈现回执丢失（退出 78）：重跑的格数、重跑后过的、重跑仍丢记未证的——进末行汇总（门禁摘要），连续出现看得见
+# 门禁到点（步超时）发 SIGTERM 整组结束时：先把正在跑的那一格的现场写进本步输出（门禁日志收的就是它），再退出。
+#   原先被掐时一行不留——11-26 门禁 5 次 720 秒超时与 1 次 60 秒闹钟真红，前者只剩「0 个步结论」，分不清卡在哪一格还是在排显卡锁。
+#   行首「✗」同红摘要（graphics/gate.sh / tools/gate.sh 摘 ^(✗ |不通 |FAIL)），摘要也能带出来
+cells_done=0; name=''; runtime=''; pid=''
+on_term() {
+    trap - TERM INT
+    printf '✗ 本测被结束（SIGTERM，多半是门禁步超时）：已跑完 %s 格，用时 %s 秒；正在跑：%s\n' "$cells_done" "$SECONDS" "${name:-还没开始跑格（编译 / 链接阶段）}" >&2
+    if [[ -n "$runtime" && -f "$runtime/run.log" ]]; then
+        /usr/bin/grep -a '^【卡】' "$runtime/run.log" 2> /dev/null | head -n 3 | cut -c1-1500 | sed "s/^/✗ 卡 ${name}｜/" >&2
+        /usr/bin/grep -a '【红】\|\[红\]' "$runtime/run.log" 2> /dev/null | /usr/bin/grep -Fv '【红】地址窗口：读不到本款 main.npdm' | head -n 4 | cut -c1-400 | sed "s/^/✗ 红 ${name}｜/" >&2
+        [[ ! -s "$runtime/stuck.sample" ]] || awk "$stuck_awk" "$runtime/stuck.sample" | cut -c1-220 | sed "s/^/✗ 栈 ${name}｜/" >&2
+        /usr/bin/grep -av '^\[s2a\] \[心跳\]\|^\[s2a\] \[能耗\]' "$runtime/run.log" 2> /dev/null | tail -n 6 | sed "s/^/✗ 尾 ${name}｜/" >&2
+    fi
+    [[ -z "$pid" ]] || kill "$pid" 2> /dev/null
+    exit 143
+}
+trap on_term TERM INT
 for backend in mtl3 mtl4; do
     for aa in None SmaaMedium SmaaHigh; do
         for filter in Nearest Bilinear MetalFX Fsr; do   # Fsr = AMD FSR 1
@@ -119,6 +137,7 @@ for backend in mtl3 mtl4; do
             if [[ "$backend" == mtl4 && "$filter" == MetalFX ]] && [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 27 ]; then
                 nodbg=(); for e in "${run_env[@]}"; do case $e in MTL_DEBUG_LAYER=*|MTL_DEBUG_LAYER_ERROR_MODE=*) ;; *) nodbg+=("$e");; esac; done; run_env=("${nodbg[@]}")
                 echo "说明 ${name}：macOS $(sw_vers -productVersion) 的 Metal 调试层不支持 Metal 4 + MetalFX，本格不开调试层（macOS 27 起照开）"; fi
+            for attempt in 1 2; do   # 78 = 平台呈现回执丢失（我方上屏六步已做完，见 t_present_settings.m checkPresentation）：换个进程重跑一次
             status=0
             rm -f "$runtime/stuck.sample"
             "${run_env[@]}" "$out/t_present_settings" "$runtime" > "$runtime/run.log" 2>&1 & pid=$!
@@ -128,6 +147,10 @@ for backend in mtl3 mtl4; do
               /usr/bin/sample "$pid" 3 -file "$runtime/stuck.sample" ) < /dev/null > /dev/null 2>&1 & wd=$!
             wait "$pid" || status=$?
             wait "$wd" 2> /dev/null || true
+            if [[ "$status" == 78 && "$attempt" == 1 ]]; then /usr/bin/grep -a '^未证' "$runtime/run.log" | head -n 1 | sed "s/^/说明 ${name}：/"; lost=$((lost+1)); continue; fi
+            break; done
+            if [[ "$status" == 78 ]]; then   # 重跑又丢回执：记未证（不计红），原因写清
+                /usr/bin/grep -a '^未证' "$runtime/run.log" | head -n 1 | sed "s/^/说明 ${name}（重跑）：/"; status=77; lost_unpr=$((lost_unpr+1)); fi
             # 77 = 宿主显示环境未证（屏睡/非活动 Space）：记未证不计红，见 t_present_settings.m 探针
             if [[ "$status" == 77 ]]; then unpr+="$name "; unproven=$((unproven+1)); printf 'UNPROVEN %s（宿主显示环境未证）\n' "$name"; continue; fi
             ok=1
@@ -152,14 +175,18 @@ for backend in mtl3 mtl4; do
             # raw log; every other red diagnostic still rejects this case.
             if /usr/bin/grep -Ein '^FAIL |command buffer.*error|GPU Address Fault|PageFault|Page Fault|FATAL|failed assertion|Metal Validation Error|\[红\]|【红】' "$runtime/run.log" | \
                 /usr/bin/grep -Fv '【红】地址窗口：读不到本款 main.npdm（可执行文件同目录 / 模块目录），不知道要多大，不占窗口'; then ok=0; fi
+            cells_done=$((cells_done+1))
             /usr/bin/grep -E '^PASS .*coverage|^PASS .*pixel-center|^present settings:' "$runtime/run.log" || true
+            if [[ "$ok" == 1 && "$attempt" == 2 ]]; then lost_ok=$((lost_ok+1)); fi
             if [[ "$ok" == 1 ]]; then printf 'PASS %s\n' "$name"
             else printf 'FAIL %s (exit=%s, log=%s)\n' "$name" "$status" "$runtime/run.log" >&2; bad=$((bad+1))
                 # 这一格日志的末 6 行随红一起打出来（exit=142 = 进程 60 秒闹钟到点被杀：末尾就是卡住前最后一步）。门禁的树会被下一局复用，run.log 留不住，
                 #   门禁存下的只有红摘要。行首用「✗」：两条路径的摘要都认它——graphics/gate.sh evidence 摘 ^(✗ |不通 |FAIL) 前 20 行，
                 #   作为单测（tests/present_settings_test.sh）时 tools/gate.sh 摘 ^(不通|✗) 前 10 行；「FAIL: 」与【红】那几行名额会被编译命令文本占掉
                 printf '✗ %s（exit=%s）\n' "$name" "$status" >&2
-                /usr/bin/grep -a '^【卡】' "$runtime/run.log" 2> /dev/null | head -n 3 | cut -c1-600 | sed "s/^/✗ 卡 ${name}｜/" >&2
+                /usr/bin/grep -a '^【卡】' "$runtime/run.log" 2> /dev/null | head -n 3 | cut -c1-1500 | sed "s/^/✗ 卡 ${name}｜/" >&2
+                # 这一格的红行（去掉已知的 npdm 那条）：上屏编码失败、drawable 没呈现等都在这里点名（11-27：门禁树会被复用，整格日志留不住）
+                /usr/bin/grep -a '【红】\|\[红\]' "$runtime/run.log" 2> /dev/null | /usr/bin/grep -Fv '【红】地址窗口：读不到本款 main.npdm' | head -n 4 | cut -c1-400 | sed "s/^/✗ 红 ${name}｜/" >&2
                 [[ ! -s "$runtime/stuck.sample" ]] || awk "$stuck_awk" "$runtime/stuck.sample" | cut -c1-220 | sed "s/^/✗ 栈 ${name}｜/" >&2
                 # 末 6 行去掉每 10 秒一条的心跳 / 能耗（卡死格里它们占满 6 行、把卡住前的最后一步挤掉）
                 /usr/bin/grep -av '^\[s2a\] \[心跳\]\|^\[s2a\] \[能耗\]' "$runtime/run.log" 2> /dev/null | tail -n 6 | sed "s/^/✗ 尾 ${name}｜/" >&2; fi
@@ -194,8 +221,11 @@ for backend in mtl3 mtl4; do
     done
 done
 printf 'present settings matrix: %d/24 passed, %d unproven (logs/images: %s)\n' "$((24-bad-unproven))" "$unproven" "$out"
-printf 'present settings output distinctions: %d/24 passed, %d skipped\n' "$distinctions" "$dskip"
 if ((unproven)); then printf 'present settings: %d cells 未证（宿主显示环境不给真上屏位）\n' "$unproven"; fi
+# 末行 = 门禁摘要（同 0941b4796：射程与专项计数并进汇总）。回执丢失重跑过或有未证：行首【黄】，这一步绿着也看得见
+warn=''; ((lost || unproven)) && warn='【黄】'
+printf '%spresent settings output distinctions: %d/24 passed, %d skipped；矩阵 %d/24 过、未证 %d 格；平台呈现回执丢失重跑 %d 格（重跑后过 %d、仍丢记未证 %d）\n' \
+    "$warn" "$distinctions" "$dskip" "$((24-bad-unproven))" "$unproven" "$lost" "$lost_ok" "$lost_unpr"
 # 24 格（加 Fsr 一列前 18）全未证 = 这次一格真上屏都没验：退 75（门禁记「环境未就绪」重排），不能当绿（判据绿着失效）；部分未证照跳过那几格
 if ((unproven == 24)); then exit 75; fi
 [[ "$bad" == 0 && $((distinctions+dskip)) == 24 ]]   # 每个后端：3 种模式两两 3 对 + 每模式最近邻对双线性 3 次 + MetalFX 对双线性 3 次 + FSR 对双线性 3 次 = 12，两个后端 24；未证格的对子计 skip 不判（10-30 去掉 FXAA 前 4 种模式是 28）

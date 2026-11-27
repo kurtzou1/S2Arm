@@ -188,3 +188,14 @@ import SwiftUI
     #expect(r.separated && r.controls.minY == 478 && r.game.width == 440)
 }
 #endif
+
+// 轮播「停稳」只看玩家自己的滚动：程序自己发起的居中动画（启动时、点侧卡、方向键）可能一直停在 animating、不回 idle（#502 横屏冷启动点封面不起局）。
+// 期望按规则手算；反证：改回 `phase == .idle` → (animating, 不是玩家滚动) 一行变 false，本测试红。
+@MainActor @Test func carouselSettledIgnoresProgrammaticScroll() {
+    #expect(CoverFlowView.phaseSettled(.idle, userScrolling: false))
+    #expect(CoverFlowView.phaseSettled(.animating, userScrolling: false))
+    #expect(!CoverFlowView.phaseSettled(.animating, userScrolling: true))
+    #expect(!CoverFlowView.phaseSettled(.interacting, userScrolling: true))
+    #expect(!CoverFlowView.phaseSettled(.decelerating, userScrolling: true))
+    #expect(!CoverFlowView.phaseSettled(.tracking, userScrolling: false))
+}

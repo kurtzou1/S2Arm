@@ -366,11 +366,21 @@ def rewrite_plan(game, current, deps):
     verified = next((line for line in read(vt).splitlines() if not line.startswith('#')
                      and len(line.split('\t')) >= 4 and line.split('\t')[0].upper() == pid
                      and line.split('\t')[1].lower() == bid and line.split('\t')[3].lower() == 'apple'), '')   # F7 #1574：苹果路线只取 apple 行
-    fps = REPO / f'runtime/fps/{bid[:16]}.tsv'
+    # 逐款表（pack/fn_match.py tables）：本构建号的精确表 runtime/{fix,fps}/<前 16 位>.tsv 优先；没有就按 runtime/{fix,fps}/match/<程序号>.tsv
+    #   的函数指纹在这一版 main 里定位、展开成精确行（写进本次工作目录）。改写器读的仍是精确行
+    if str(REPO / 'pack') not in sys.path:
+        sys.path.insert(0, str(REPO / 'pack'))
+    import fn_match
+    try:
+        fix, fps, fm_log = fn_match.tables(pid, main, deps.work / 'fn_match', REPO)
+    except fn_match.MatchError as e:
+        raise StageError(f'逐款表：{e}') from e
+    for line in fm_log:
+        print(line, file=sys.stderr)
     # 我方帧率表（c 行改指令）只在内部对照口径 S2A_CAPS_OWN=1 进包，同 stage_rewrite.sh FT（11-18，#1607：60 帧关着游戏也被解锁）
     #   只有 build / speed 行的表（实时步长表）不提高帧率、不改指令，只让宿主每次出图把实测帧时写进槽：缺省口径也进包，同 stage_rewrite.sh
-    fps = fps if fps.is_file() and (env.get('S2A_CAPS_OWN') == '1' or step_only_table(fps)) else None
-    fix = REPO / f'runtime/fix/{bid[:16]}.tsv'   # 游戏缺陷修补表（改写器 fix_rows）：仓库源表，改写器直接读，不进产物根
+    fps = fps if fps and (env.get('S2A_CAPS_OWN') == '1' or step_only_table(fps)) else None
+    # fix：游戏缺陷修补表（改写器 fix_rows）：仓库源表或展开结果，改写器直接读，不进产物根
     dirs, selection, on = community_selection(env, pid, bid)
     if env.get('S2A_COMMUNITY_SELECT'):
         deps.record(env['S2A_COMMUNITY_SELECT'])
@@ -412,13 +422,13 @@ def rewrite_plan(game, current, deps):
         patch = None
     key = digest(f'{key} backend={rk.strip()}{ck}{code}' +
                  (f' fps={digest(fps.read_bytes())}' if fps else '') +
-                 (f' fix={digest(fix.read_bytes())}' if fix.is_file() else '') +
+                 (f' fix={digest(fix.read_bytes())}' if fix else '') +
                  (f' verified={digest(verified)}' if verified else ''), 10)
     key = digest(f'{key} inputs={rewrite_inputs(current)}', 10)
     tag = f'rw-{key}' + (f'-{target}' if target != 'apple' else '') + ('-spin' if spin else '')
     deps.record('graphics/nvn/tools/romfs_list.py')
     return dict(key=key, tag=tag, bid=bid, tables=tables, verified=verified,
-                fps=fps, fix=fix if fix.is_file() else None, patch=patch, addr=addr,
+                fps=fps, fix=fix, patch=patch, addr=addr,
                 addr_log=ad / 'log', community=bool(ck), dirs=dirs, selection=selection)
 
 

@@ -186,6 +186,12 @@ make lint             # 静态问题、文档链接与日志事件设计
 
 AI 辅助贡献见 [LLM_POLICY.md](LLM_POLICY.md)，社区交流见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。内部协调和维护者合入流程继续见[联合开发者指南](docs/贡献指南.md)与协作循环。
 
+## README 多语言
+
+维护方同步维护的 README 是六种：简体中文、繁體中文、English、日本語、Español、Français。改 README 正文（步骤、数字、说明）时，这六份一起改。
+
+社区贡献的其他语种（目前有 Türkçe，`README.tr.md`）照收，但不在同步范围内：页首注明「社区翻译、可能落后、以英文版为准」，并写明译自 `README.md` 的哪个提交，方便看出落后多少；后续由社区按英文版跟进。各语种页首的语言切换行列出全部语种。
+
 ## 从旧仓库改投补丁
 
 旧仓库上的补丁可以用 `python3 tools/port_old_patch.py <补丁文件>` 把路径换成当前目录结构，再 `git apply`。映射不到的文件会列出来；正文对不上的部分需要手工合并。

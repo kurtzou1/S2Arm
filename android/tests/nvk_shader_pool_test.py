@@ -75,10 +75,20 @@ def main():
             rc |= result.returncode
         return rc
 
-    live_modes = ('--live-compile-default', '--live-compile-thread', '--live-compile-pending',
+    live_modes = ('--tess-request', '--live-compile-default', '--live-compile-thread', '--live-compile-pending',
                   '--live-compile-stop', '--cs-libpack', '--lp-gate', '--lp-numeric')
     if len(sys.argv) == 2 and sys.argv[1] in live_modes:
         result = run(sys.argv[1][2:], original, args=(sys.argv[1],))
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
+
+    if len(sys.argv) == 5 and sys.argv[1] in ('--emit-tess', '--execute-tess'):
+        with tempfile.TemporaryDirectory(prefix='tess-warm-', dir=out) as td:
+            manifest = Path(td) / 'manifest'; manifest.mkdir()
+            cache = Path(td) / 'cache'; cache.mkdir()
+            env = dict(os.environ, S2A_PW_TEST_DIR=str(manifest), S2A_DIRECT_CACHE_DIR=str(cache))
+            result = run(sys.argv[1][2:], original, args=sys.argv[1:], env=env)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode
@@ -136,12 +146,12 @@ def main():
     if sys.argv[1:] == ['--compute-warm-mutants']:
         text = original.read_text()
         mutants = [
-            ('no-record', '    rec.lp_ok = unaligned ? 0 : 2;\n    nvk_prog_warm_note(&rec);',
-             '    rec.lp_ok = unaligned ? 0 : 2;\n    (void)rec;', '--compute-warm', 'compute program must be recorded in warm manifest'),
+            ('no-record', '    libpack_note_state(&rec, unaligned ? LIBPACK_SSBO_WINDOW : LIBPACK_ALIGNED, p);\n    nvk_prog_warm_note(&rec);',
+             '    libpack_note_state(&rec, unaligned ? LIBPACK_SSBO_WINDOW : LIBPACK_ALIGNED, p);', '--compute-warm', 'compute program must be recorded in warm manifest'),
             ('wrong-stage', 'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 32;',
              'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 1;', '--compute-warm', 'persisted compute manifest retains identity'),
-            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0], 0) : build(bytes, len, views, nst, rec->identity, 0);',
-             'struct entry *e = build(bytes, len, views, nst, rec->identity, 0);', '--compute-warm', 'compute program warm builds from prior cache'),
+            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0], 0) : build(bytes, len, views, rec->stage_mask, rec->identity, 0);',
+             'struct entry *e = build(bytes, len, views, rec->stage_mask, rec->identity, 0);', '--compute-warm', 'compute program warm builds from prior cache'),
             ('flag-ignored', 'if (!nvn_plat_flag("nvk_compute_warm", 0)) return;',
              '(void)nvn_plat_flag("nvk_compute_warm", 0);', '--compute-warm-off', 'compute warm off must not record programs'),
         ]
@@ -199,8 +209,7 @@ def main():
         for name, old, new, expected in (
             ('mask-0x3', 'lrc = s2a_libpack_program_v1(lp, keys, stages, &g,', 'lrc = s2a_libpack_program_v1(lp, keys, 0x3, &g,',
              'hit from the library, compiler not called'),
-            ('no-topology', 'const struct s2a_libpack_gfx g = { topology, pc->profile_json, pc->profile_bytes };',
-             'const struct s2a_libpack_gfx g = { NULL, pc->profile_json, pc->profile_bytes }; (void)topology;',
+            ('no-topology', '.topology = topology,', '.topology = ((void)topology, NULL),',
              'hit from the library, compiler not called'),
             # 取库入口的闸（nvk_shader.c libpack_fetch）：放 0x1 / 0x3 / 0x7。去掉 0x7u：三段（含几何）程序被挡在库外，必须红；
             #   去掉 0x1u：只有顶点的深度程序被挡在库外，必须红在 VS-only 那一例
@@ -251,8 +260,8 @@ def main():
         cases += [
             ('snap-not-counted', '    atomic_fetch_add_explicit(&g_lp_gate_snap[s->lp_gate], 1, memory_order_relaxed);\n', '', 'gate readout line'),
             ('live-not-counted', '        atomic_fetch_add_explicit(&g_lp_gate_live[s->lp_gate], 1, memory_order_relaxed);\n', '', 'gate readout line'),
-            ('gate-not-on-snapshot', '    s->lp_gate = libpack_gate_mask(&s->f.gfx); s->lp_ok = s->lp_gate == 0;',
-             '    s->lp_gate = 0; s->lp_ok = 1;', "library not used"),
+            ('gate-not-on-snapshot', '    s->lp_gate = libpack_gate_mask(&s->f.gfx);',
+             '    s->lp_gate = 0;', "library not used"),
             ('ties-pick-larger-mask', 'for (unsigned m = 1; m < (1u << LPG_N); m++) if (v[m] > v[best]) best = m;',
              'for (unsigned m = 1; m < (1u << LPG_N); m++) if (v[m] >= v[best] && v[m]) best = m;', 'gate readout line'),
             # 「放开闸会怎样」的只读探测：缺省关、两样记录都要在、没有的不算有、探过的份数要记，各撤一处，探测读数那一行红。
@@ -273,7 +282,7 @@ def main():
              'if (r != SBU_KNOWN) { unknown = 1; by_addr = r == SBU_PSB; }', 'if (r != SBU_KNOWN) { by_addr = r == SBU_PSB; }',
              "gate case 'unaligned storage, program not in library' #0: live compile request carries hasUnalignedStorageBuffer=true"),
             ('ssbo-fill-facts-unrefined',   # 程序身份（fill_facts）不跟新口径、快路摘要跟：身份说非对齐，库件放不出来
-             '    if (un && ssbo_used_slots_on()) {', '    if (un && !count && ssbo_used_slots_on()) {',
+             '    if (un && nst <= RP_PROG_INLINE_STAGES && ssbo_used_slots_on()) {', '    if (un && !count && nst <= RP_PROG_INLINE_STAGES && ssbo_used_slots_on()) {',
              "gate case 'unaligned storage, slot the program does not use': hit from the library"),
             ('ssbo-stages-merged',
              '            else if (used & um[st]) used_unaligned = 1;', '            else if (used & (um[0] | um[1] | um[2])) used_unaligned = 1;',
@@ -288,11 +297,14 @@ def main():
              'sbu_stage_slots(stage_key((unsigned)st), (unsigned)st, q->prim, &used)', 'sbu_stage_slots(stage_key((unsigned)st), 0u, q->prim, &used)',
              "gate case 'unaligned storage, slot the program does not use': hit from the library"),   # 片元段（有非对齐绑定才会被问）当成顶点段去读：stage 对不上 → 说不准 → 被挡下
             ('ssbo-switch-ignored',
-             '    if (un && ssbo_used_slots_on()) {', '    if (un && (ssbo_used_slots_on() || 1)) {',
+             '    if (un && nst <= RP_PROG_INLINE_STAGES && ssbo_used_slots_on()) {', '    if (un && nst <= RP_PROG_INLINE_STAGES && (ssbo_used_slots_on() || 1)) {',
              "gate case 'unaligned storage, switch off' #0: library not used"),
             ('ssbo-default-on',   # 属性没设时读生产缺省（关 = 旧口径，玩家包就是这样）：缺省改回开，「属性没设」那一行放行、命中库而红
              'nvn_plat_flag("nvk_lp_used_slots", 0) != 0', 'nvn_plat_flag("nvk_lp_used_slots", 1) != 0',
              "gate case 'unaligned storage, property not set (production default)' #0: library not used"),
+            ('window-memo-shared',
+             '    memcpy(k + 52, &state, 4);', '    (void)state; memset(k + 52, 0, 4);',
+             'quick path: used slot turning unaligned'),
             ('ssbo-quick-path-blind',
              'MIX(any); MIX(un | (unused << 1)); MIX(pc->storage_buffer_offset_alignment);',
              'MIX(any); MIX(unused << 1); MIX(pc->storage_buffer_offset_alignment);',
@@ -366,8 +378,8 @@ def main():
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
         # 正控：把 why 文本清空（模拟改了报错文案 / 文案消失）备忘仍归对类——分类读的是码，不是文本
-        text_gone = code.replace('pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw, &lwhy);',
-                                 'pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw, &lwhy); lw[0] = 0;')
+        text_gone = code.replace('pc->translator_closure, pf.max_shared, &g, bytes, len, lw, sizeof lw, &lwhy);',
+                                 'pc->translator_closure, pf.max_shared, &g, bytes, len, lw, sizeof lw, &lwhy); lw[0] = 0;')
         assert text_gone != code, 'text-independence anchor'
         path = out / 'cs-libpack-text-gone.c'
         path.write_text(text_gone)
@@ -528,24 +540,24 @@ def main():
             ('cs-query-proof-forced', 'e->prog.sampler_unused[0][e->prog.nent[0]] = (uint8_t)s2a_spirv_sampler_unused(',
              'e->prog.sampler_unused[0][e->prog.nent[0]] = 1 || (uint8_t)s2a_spirv_sampler_unused(', 1,
              'production compute builder retains sampler use proof: query=0'),
-            ('gs-slot', '(const char *const[]){"vs", "fs", "gs"}[st]',
-             '(const char *const[]){"vs", "fs", "fs"}[st]', 3, 'GS production request reaches compiler'),
+            ('gs-slot', 'st == 2 ? "gs" : st == 3 ? "tcs"',
+             'st == 2 ? "fs" : st == 3 ? "tcs"', 1, 'GS production request reaches compiler'),
             ('ubo-learn-reported-red', 'g_ubo_learned = 1;\n            else red1("compile_failed", oc.summary);',
              'g_ubo_learned = 1;\n            red1("compile_failed", oc.summary);', 1, 'a rejection that taught a coordinate is a learning step'),
             ('gs-wrong-stage', 'src.stage = (nvn_gpu_stage)st;',
              'src.stage = st == 2 ? NVN_GPU_SH_FS : (nvn_gpu_stage)st;', 1, 'result loads VS FS and GS'),
-            ('gs-key-omitted', '((stages & 4u) ? 3 : 2)',
-             '((stages & 4u) ? 2 : 2)', 1, 'changed GS key recompiles'),
-            ('gs-texture-omitted', 'if (stages & 4u) MIX(rp_tex_fact_sig(rp_S.tex[2], 32, rp_S.tex_base, rp_S.tex_pool_n));',
-             'if (0) MIX(rp_tex_fact_sig(rp_S.tex[2], 32, rp_S.tex_base, rp_S.tex_pool_n));', 1, 'changed GS texture fact recompiles'),
-            ('gs-separate-fast-omitted', 'if (stages & 4u) MIX(sep_fact_sig(2));',
-             'if (0) MIX(sep_fact_sig(2));', 1, 'GS separate texture fact reaches compiler'),
+            ('gs-key-omitted', 'if (stages & (1u << st)) { uint64_t k; memcpy(&k, stage_key((unsigned)st), 8); MIX(k); }',
+             'if (st != 2 && (stages & (1u << st))) { uint64_t k; memcpy(&k, stage_key((unsigned)st), 8); MIX(k); }', 1, 'changed GS key recompiles'),
+            ('gs-texture-omitted', 'MIX(rp_tex_fact_sig(rp_S.tex[st], 32, rp_S.tex_base, rp_S.tex_pool_n));',
+             'if (st != 2) MIX(rp_tex_fact_sig(rp_S.tex[st], 32, rp_S.tex_base, rp_S.tex_pool_n));', 1, 'changed GS texture fact recompiles'),
+            ('gs-separate-fast-omitted', 'MIX(sep_fact_sig(st));',
+             'if (st != 2) MIX(sep_fact_sig(st));', 1, 'GS separate texture fact reaches compiler'),
             ('gs-separate-generation-omitted', 'const uint64_t sg = rp_tex_sep_gen[st], rg = rp_tex_reg_gen();',
              'const uint64_t sg = st == 2 ? 0 : rp_tex_sep_gen[st], rg = rp_tex_reg_gen();', 1, 'changed GS separate slot invalidates cached signature and recompiles'),
-            ('gs-separate-stage-wrong', '(const char *const[]){"vs", "fs", "gs"}[st], (uint32_t)(90',
-             '(const char *const[]){"vs", "fs", "fs"}[st], (uint32_t)(90', 1, 'GS separate texture fact reaches compiler'),
-            ('gs-cap-ignored', 'if (!(caps.caps & NVN_GPU_CAP_GEOMETRY))',
-             'if (0 && !(caps.caps & NVN_GPU_CAP_GEOMETRY))', 1, 'disabled GS fails before compiler'),
+            ('gs-separate-stage-wrong', 'ubo_st_name(st), (uint32_t)(90',
+             '(st == 2 ? "fs" : ubo_st_name(st)), (uint32_t)(90', 1, 'GS separate texture fact reaches compiler'),
+            ('gs-cap-ignored', 'if ((stages & 4u) && !(caps.caps & NVN_GPU_CAP_GEOMETRY))',
+             'if (0 && (stages & 4u) && !(caps.caps & NVN_GPU_CAP_GEOMETRY))', 1, 'disabled GS fails before compiler'),
             ('withdraw-guard', 'if (!shader_texture_pool_ready()) return -1;',
              'if (0 && !shader_texture_pool_ready()) return -1;', 2, 'expected accounting=texture_pool_over_limit'),
             ('wrong-gfx-length', 'in.texture_array_length = s->tex_pool_n;',
@@ -567,8 +579,8 @@ def main():
              'else if (0 && !strcmp(code, "MISSING_FACT")) {', 1, 'compiler reason counted accurately'),
             ('drop-request-count', 'g_pool_request_rejected++;',
              '(void)g_pool_request_rejected;', 1, 'request failure is counted separately'),
-            ('drop-separate-vs', 'for (int st = 0; st < nst; st++) for (int slot = 0; slot < 128; slot++) {',
-             'for (int st = 0; st < nst; st++) for (int slot = 0; slot < 0; slot++) {', 1, 'separate VS registered view fact is sent'),
+            ('drop-separate-vs', 'if (stages & (1u << st)) for (int slot = 0; slot < 128; slot++) {',
+             'if (st != 0 && (stages & (1u << st))) for (int slot = 0; slot < 128; slot++) {', 1, 'separate VS registered view fact is sent'),
             ('drop-separate-cs', 'for (int slot = 0; slot < 128; slot++) {\n        uint64_t h = rp_S.tex[5][128 + slot];',
              'for (int slot = 0; slot < 0; slot++) {\n        uint64_t h = rp_S.tex[5][128 + slot];', 1, 'separate CS registered texture fact is sent'),
             ('drop-separate-fast-identity', 'MIX(sep_fact_sig(0));',
@@ -620,9 +632,10 @@ def main():
             # 会话重置清空事实复用的别名表与依赖索引（rp_shader_reset → fact_cache_reset）
             ('fact-reset-withdraw', '    fact_cache_reset();', '    (void)fact_cache_reset;', 1, 'reset clears aliases and dependency index'),
             # 只有活动阶段的 UBO 使用进图形请求事实（不活动阶段的 UBO 不改身份）
-            ('inactive-ubo-withdraw', 'for (int st = 0; st < nst; st++) { uint32_t m = 0;', 'for (int st = 0; st < 6; st++) { uint32_t m = 0;', 1,
+            ('inactive-ubo-withdraw', 'for (int st = 0; st < nst; st++) if (stages & (1u << st)) { uint32_t m = 0;',
+             'for (int st = 0; st < 6; st++) { uint32_t m = 0;', 1,
              'inactive stage UBO keeps graphics identity'),
-            ('alias-bg-fact-mask-omitted', 'if (!compute && e && !e->failed && alias_on()) e->fact_ok = (uint8_t)fact_cache_mask(bytes, len, &e->prog, e->fact_mask);',
+            ('alias-bg-fact-mask-omitted', 'if (!compute && e && !e->failed && !(rec->stage_mask & 0x18u) && alias_on()) e->fact_ok = (uint8_t)fact_cache_mask(bytes, len, &e->prog, e->fact_mask);',
              '(void)0;', 1, 'alias fact-bg[on] s2: identity differing only in an unread texture fact reuses the program'),
             # 开关关闭态（--alias-off 另起进程）：开关读了不用，关闭态下 B 就会被合并，「B 读自己的文件」必须变红
             ('alias-flag-ignored', 'if (v < 0) v = nvn_plat_flag("nvk_alias", 1) ? 1 : 0; return v;',

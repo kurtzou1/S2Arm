@@ -11,6 +11,8 @@
 #   ⑥ 完整门禁（当天已全跑过）、只改 android/native/inc/h.h → 只跑 h（11-27 起完整门禁头文件也按 include 闭包收窄；旧：三组全跑）
 #   ⑦ 完整门禁（当天已全跑过）、改 t_b.c + 没有源 include 的 android/native/inc/lone.h → 三组全跑（没人 include 的头可能是脚本 / 数据在读）
 #   ⑧ 只编、改 t_b.c + h.h、闭包脚本出错 → 三组全编（旧：脚本失败时 h.h 被静默丢掉、只编 b = 假绿）
+#   ⑨ 完整门禁、Makefile 用绝对路径（$(CURDIR)/…，同门禁工作树里 make -n 打出的样子）、只改 t_b.c → 跑 b（11-27 假绿：旧缓存存绝对路径、对不上相对的 GATE_CHANGED，三组全跳）
+#   ⑩ 完整门禁、只改共用前置的源 android/native/lib.c（只在 native-test-prereq 里编；组 a 的 mk 分片点名 NVN_TEST_LIB）→ 跑 a（旧：前置的源不在任何组清单里，全跳）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/rgdap.XXXXXX"); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 mk() {   # mk <目录>：搭一份临时仓库
@@ -45,5 +47,14 @@ ck "⑦ 完整门禁、源 + 没人 include 的头：三组全跑（真 $(built)
 mk "$T/8"; printf 'import sys\nsys.exit(3)\n' > tools/include_closure.py
 GATE_BUILD_ONLY=1 GATE_CHANGED="runtime/tests/t_b.c android/native/inc/h.h" S2A_RUN_ROOT=$T/rr8 bash runtime/gate.sh > "$T/8.out" 2>&1
 ck "⑧ 只编、源 + 头、闭包脚本出错：三组全编（真 $(built)）" '[ "$(built)" = "a b h" ]'
-[ $bad = 0 ] || { for i in 1 2 3 4 5 6 7 8; do echo "== $i"; tail -5 "$T/$i.out"; done; }
+mk "$T/9"; fullday "$T/rr9"; sed -i.bak 's#cc -o build/tests/t_\([a-z]\) runtime/tests/#cc -o build/tests/t_\1 $(CURDIR)/runtime/tests/#' Makefile && rm -f Makefile.bak && git -c user.email=t@t -c user.name=t commit -qam abs
+GATE_CHANGED=runtime/tests/t_b.c S2A_RUN_ROOT=$T/rr9 bash runtime/gate.sh > "$T/9.out" 2>&1
+ck "⑨ 完整门禁、Makefile 绝对路径、只改 t_b.c：跑 b（真「$(built)」）" '[ "$(built)" = "b" ]'
+mk "$T/10"; fullday "$T/rr10"; mkdir -p runtime/tests/mk; printf '# 用 NVN_TEST_LIB\n' > runtime/tests/mk/a.mk
+printf 'int lib(void){return 0;}\n' > android/native/lib.c
+printf 'native-test-prereq:\n\t@mkdir -p build\n\tcc -c -o build/lib.o android/native/lib.c\n' >> Makefile
+git add -A && git -c user.email=t@t -c user.name=t commit -qm pre
+GATE_CHANGED=android/native/lib.c S2A_RUN_ROOT=$T/rr10 bash runtime/gate.sh > "$T/10.out" 2>&1
+ck "⑩ 完整门禁、只改共用前置的源：用前置的 a 照跑（真「$(built)」）" 'case " $(built) " in *" a "*) true;; *) false;; esac'
+[ $bad = 0 ] || { for i in 1 2 3 4 5 6 7 8 9 10; do echo "== $i"; tail -5 "$T/$i.out"; done; }
 exit $bad

@@ -2717,7 +2717,7 @@ cleanup:
 }
 
 // #696 分段验证（后端 + 真 GS）：回放层把「GS + 不带索引的三角带」按 GL 序展开成三角形列表交给后端。
-// 后端契约本来就不收 GS 配三角带（建管线回 UNSUPPORTED），这里先核这一条；再在 lavapipe 上用同一个 GS 画两份列表，base vertex 7、5 个顶点：
+// 直接绘制仍验证两种三角形列表顺序；间接参数留在 GPU，原生三角带 / 扇均应建管线并能画。
 //   ① GL 序索引 {0,1,2, 2,1,3, 2,3,4}（回放层对 5 个顶点展开的结果，期望同 t_nvn_replay）；
 //   ② Vulkan 原生三角带的顶点序 {i, i+(1+i%2), i+(2-i%2)} 写成的索引 {0,1,2, 1,3,2, 2,3,4}，即原生画时 GS 会拿到的顺序。
 // GS 把 gl_in[0..2] 的顶点号与 gl_PrimitiveIDIn 写进 4x1 目标的第 gl_PrimitiveIDIn 列。期望按规范手算：
@@ -2726,7 +2726,7 @@ static void t_gs_tstrip_pixels(const char *dir) {
     static const char *names[3] = {"gs_tstrip.vert", "gs_tstrip.frag", "gs_tstrip.geom"};
     nvn_gpu_shader sh[3] = {0}; void *mem[3] = {0}; nvn_gpu_err e = {0};
     nvn_gpu_layout empty; memset(&empty, 0, sizeof empty);
-    nvn_gpu_pipe pipe = NULL;
+    nvn_gpu_pipe pipes[3] = {0};
     for (int st = 0; st < 3; st++) {
         char path[512]; size_t len = 0; snprintf(path, sizeof path, "%s/%s.spv", dir, names[st]); mem[st] = read_file(path, &len);
         CHECK(mem[st] != NULL, "GS 三角带着色器 %d 存在", st); if (!mem[st]) goto cleanup;
@@ -2738,46 +2738,62 @@ static void t_gs_tstrip_pixels(const char *dir) {
     {
         nvn_gpu_pipe_desc pd = {0}; pd.poly.mode = NVN_POLYGON_MODE_FILL; pd.color.logic_op = 3;
         for (int st = 0; st < 3; st++) pd.st[st].sh = sh[st];
-        pd.cfmt[0] = NVN_FORMAT_RGBA8; pd.samples = 1; pd.prim = 5; pd.chmask.mask = 15;
-        nvn_gpu_pipe strip = NULL; memset(&e, 0, sizeof e);
-        nvn_gpu_rc r = nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &strip, &e);
-        CHECK(r.code == NVN_GPU_E_UNSUPPORTED && !strip, "GS 三角带 原生三角带配 GS：期望后端拒建 UNSUPPORTED → rc=%d why=%s", r.code, e.why);
-        printf("GS 三角带 原生三角带配 GS 建管线 rc=%d（%s）\n", r.code, e.why);
-        pd.prim = 4;
-        r = nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &pipe, &e);
-        CHECK(OK(r), "GS 三角带 列表管线：%d %s", r.code, e.why); if (!OK(r)) goto cleanup;
+        pd.cfmt[0] = NVN_FORMAT_RGBA8; pd.samples = 1; pd.chmask.mask = 15;
+        for (uint32_t prim = 4; prim <= 6; prim++) {
+            pd.prim = prim;
+            nvn_gpu_rc r = nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &pipes[prim - 4], &e);
+            CHECK(OK(r) && pipes[prim - 4], "GS prim=%u 建管线：期望成功 → rc=%d why=%s", prim, r.code, e.why);
+            if (!OK(r) || !pipes[prim - 4]) goto cleanup;
+        }
     }
     {
         static const uint32_t idx[2][9] = {{0, 1, 2, 2, 1, 3, 2, 3, 4}, {0, 1, 2, 1, 3, 2, 2, 3, 4}};
+        const VkDrawIndirectCommand args = {.vertexCount = 5, .instanceCount = 1, .firstVertex = 7};
         nvn_gpu_buf ib = make_buf(sizeof idx, NVN_GPU_MEM_SHARED, idx);
+        nvn_gpu_buf ind = make_buf(sizeof args, NVN_GPU_MEM_SHARED, &args);
         nvn_gpu_tex tex = make_tex(4, 1, NVN_FORMAT_RGBA8, NVN_GPU_TEX_RENDER);
-        nvn_gpu_view view = make_view(tex); nvn_gpu_buf rb = make_buf(32, NVN_GPU_MEM_SHARED, NULL);
+        nvn_gpu_view view = make_view(tex); nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
         nvn_gpu_cmd cmd = begin_cmd();
-        for (int k = 0; k < 2; k++) {
+        for (int k = 0; k < 4; k++) {
             nvn_gpu_pass_desc pass = {0}; pass.ncolor = 1; pass.color[0].view = view;
             pass.color[0].load = NVN_GPU_LOAD_CLEAR; pass.color[0].store = NVN_GPU_STORE_STORE;
             pass.w = 4; pass.h = 1; pass.layers = 1; nvn_gpu_pass_begin(cmd, &pass);
-            nvn_gpu_set_pipe(cmd, pipe);
+            const uint32_t prim = k < 2 ? 4 : (uint32_t)k + 3;
+            nvn_gpu_set_pipe(cmd, pipes[prim - 4]);
             nvn_gpu_dyn dyn = {0}; dyn.nvp = 1; dyn.vp[0][2] = 4; dyn.vp[0][3] = 1; dyn.vp[0][5] = 1;
             dyn.has_sc = 1; dyn.sc[2] = 4; dyn.sc[3] = 1; nvn_gpu_set_dyn(cmd, &dyn);
-            nvn_gpu_draw_args draw = {0}; draw.instances = 1;
-            draw.prim = 4; draw.count = 9; draw.ibuf = ib; draw.ioff = (uint64_t)k * sizeof idx[0]; draw.itype = 2; draw.base_vertex = 7;
+            nvn_gpu_draw_args draw = {.prim = prim};
+            if (k < 2) {
+                draw.instances = 1;
+                draw.count = 9;
+                draw.ibuf = ib;
+                draw.ioff = (uint64_t)k * sizeof idx[0];
+                draw.itype = 2;
+                draw.base_vertex = 7;
+            } else {
+                draw.ind = ind;
+            }
             nvn_gpu_draw(cmd, &draw);
             nvn_gpu_pass_end(cmd); nvn_gpu_copy_tex_buf(cmd, tex, 0, 0, NULL, rb, (uint64_t)k * 16, 16, 16);
         }
         nvn_gpu_rc r = nvn_gpu_cmd_commit(cmd, 2, on_done, NULL, &e); CHECK(OK(r), "GS 三角带 commit %d %s", r.code, e.why);   // 同一会话里 t_gs_pixels 用了围栏 1
         r = nvn_gpu_fence_wait(2, 5000000000ull, &e); CHECK(OK(r), "GS 三角带 wait %d %s", r.code, e.why);
-        static const uint8_t want[2][4][4] = {{{7, 8, 9, 0}, {9, 8, 10, 1}, {9, 10, 11, 2}, {0, 0, 0, 0}},
-                                              {{7, 8, 9, 0}, {8, 10, 9, 1}, {9, 10, 11, 2}, {0, 0, 0, 0}}};
-        static const char *what[2] = {"列表（GL 序展开）", "列表（Vulkan 原生三角带序）"};
-        for (int k = 0; k < 2; k++) {
+        // 原生 strip 同 Vulkan 顺序列表。原生 fan 的公共顶点在每个输入三角形的最后。
+        static const uint8_t want[4][4][4] = {
+            {{7, 8, 9, 0}, {9, 8, 10, 1}, {9, 10, 11, 2}, {0, 0, 0, 0}},
+            {{7, 8, 9, 0}, {8, 10, 9, 1}, {9, 10, 11, 2}, {0, 0, 0, 0}},
+            {{7, 8, 9, 0}, {8, 10, 9, 1}, {9, 10, 11, 2}, {0, 0, 0, 0}},
+            {{8, 9, 7, 0}, {9, 10, 7, 1}, {10, 11, 7, 2}, {0, 0, 0, 0}},
+        };
+        static const char *what[] = {"列表（GL 序展开）", "列表（Vulkan 原生三角带序）", "原生间接 prim=5", "原生间接 prim=6"};
+        for (int k = 0; k < 4; k++) {
             const uint8_t *v = buf_cpu(rb) + k * 16;
             for (int i = 0; i < 4; i++)
                 CHECK(!memcmp(v + i * 4, want[k][i], 4), "GS 三角带 %s 第 %d 列：期望 (%u,%u,%u,%u) → 读到 (%u,%u,%u,%u)", what[k], i,
                       want[k][i][0], want[k][i][1], want[k][i][2], want[k][i][3], v[i * 4], v[i * 4 + 1], v[i * 4 + 2], v[i * 4 + 3]);
             printf("GS 三角带 %s：列 0..2 读到 (%u,%u,%u,%u) (%u,%u,%u,%u) (%u,%u,%u,%u)\n", what[k], v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
         }
-        nvn_gpu_buf_release(rb, NULL, NULL); nvn_gpu_view_release(view); nvn_gpu_tex_release(tex); nvn_gpu_buf_release(ib, NULL, NULL);
+        nvn_gpu_buf_release(rb, NULL, NULL); nvn_gpu_view_release(view); nvn_gpu_tex_release(tex); nvn_gpu_buf_release(ib, NULL, NULL); nvn_gpu_buf_release(ind, NULL, NULL);
     }
 cleanup:
     for (int st = 0; st < 3; st++) { if (sh[st]) nvn_gpu_shader_release(sh[st]); free(mem[st]); }

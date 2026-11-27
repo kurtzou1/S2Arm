@@ -149,8 +149,7 @@ static void tree_hash(const char *root, int committed, char *out, int *nfiles) {
 static void save_dir_hash(char *out, int *nfiles) { char root[2048]; save_root(root, sizeof root); tree_hash(root, 1, out, nfiles); }   // 玩家游戏存档的已提交部分（系统存档每次开局服务层都会提交，不算）
 static void save_full_hash(char *out, int *nfiles) { char root[2048]; save_root(root, sizeof root); tree_hash(root, 0, out, nfiles); }
 // 恢复：把快照里的整棵存档树原地写回（同一文件就地截断重写，服务层打开着的文件句柄不失效；快照里没有的删掉）
-static int save_tree_put(const char *src) {
-    char root[2048]; save_root(root, sizeof root);
+static int save_tree_put_at(const char *src, const char *root) {
     char **v = NULL; int n = 0, cap = 0, e = 0, w = 0, del = 0; tree_files(src, "", &v, &n, &cap);
     static uint8_t buf[1 << 20];
     for (int i = 0; i < n; i++) {
@@ -164,6 +163,16 @@ static int save_tree_put(const char *src) {
     for (int i = 0; i < nc; i++) { int hit = 0; for (int j = 0; j < n && !hit; j++) hit = !strcmp(cur[i], v[j]); if (!hit) { char b[4096]; snprintf(b, sizeof b, "%s/%s", root, cur[i]); unlink(b); del++; } free(cur[i]); }
     for (int i = 0; i < n; i++) free(v[i]); free(v); free(cur);
     LOG("%s即时存档恢复：存档树写回 %d 个文件、删多余 %d 个", e ? "【红】" : "", w, del); return e ? -1 : 0;
+}
+static int save_tree_put(const char *src) { char root[2048]; save_root(root, sizeof root); return save_tree_put_at(src, root); }
+// 恢复中途失败时撤销「退回存档」（#2292 kurikoo23：玩家确认退回、存档树已写回快照那一刻、随后恢复失败，界面说「游戏存档没受影响」，
+//   实际快照之后的手动存档已被删、重开后玩的就是退回后的存档）。bk = 退回前整棵存档的备份（snap_save_backup/<时刻>）：按它原样写回、多出来的删掉；
+//   bk 空 = 退回前本来没有存档目录：写进去的全删掉。回 0 = 存档已放回退回之前的样子
+static int save_undo_at(const char *bk, const char *root) {
+    if (bk && *bk) return save_tree_put_at(bk, root);
+    char **v = NULL; int n = 0, cap = 0, e = 0; tree_files(root, "", &v, &n, &cap);
+    for (int i = 0; i < n; i++) { char b[4096]; snprintf(b, sizeof b, "%s/%s", root, v[i]); if (unlink(b)) e++; free(v[i]); }
+    free(v); return e ? -1 : 0;
 }
 static char g_exe_hash[65];
 static void exe_hash(void) {
@@ -759,6 +768,8 @@ static int man_get(const char *dir, const char *key, char *out, size_t n) {
 // 恢复不成时给玩家的说法（0.6.0 做界面入口时读这个文件；不靠日志）：文档根下 snap_result.tsv，「结果 / 分类 / 给玩家的话」三行
 static int g_snap_old, g_snap_save_moved, g_snap_where;   // g_snap_where：清单「窗口」与这一局不同（落点不同，快照本身是好的）
 static int g_snap_save_rollback;   // 玩家已确认退回存档（当前存档已备份或本来没有）：恢复时重放之前先把存档树写回快照那一刻
+static char g_snap_save_bk[2048];  // 退回前的备份目录（空 = 退回前本来没有存档目录）
+static int g_snap_save_applied;    // 这次恢复已开始把存档树写回快照那一刻：恢复失败要撤销（s2a_snap_restore）
 void s2a_snap_mark_old(void) { g_snap_old = 1; }
 void s2a_snap_result_note(int ok) {
     char p[2048]; s2a_docs_path(p, sizeof p, "snap_result.tsv"); FILE *f = fopen(p, "w"); if (!f) return;
@@ -891,9 +902,9 @@ int s2a_snap_restore_check(const char *dir) {
                 char root[2048], bk[2048], nm[64]; save_root(root, sizeof root); snprintf(nm, sizeof nm, "snap_save_backup/%lld", (long long)time(NULL)); s2a_docs_path(bk, sizeof bk, "%s", nm);
                 { char par[2048]; s2a_docs_path(par, sizeof par, "%s", "snap_save_backup"); mkdir(par, 0755); }
                 struct stat rs;   // 当前没有存档目录（快照之后存档被删 / 换了数据根）：没有可备份的，直接按快照写回
-                if (lstat(root, &rs) && errno == ENOENT) { LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前没有存档目录（%s），不用备份", root); g_snap_save_rollback = 1; continue; }
+                if (lstat(root, &rs) && errno == ENOENT) { LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前没有存档目录（%s），不用备份", root); g_snap_save_bk[0] = 0; g_snap_save_rollback = 1; continue; }
                 if (clonefile(root, bk, 0)) { LOG("【红】即时存档恢复：玩家确认退回存档，但备份当前存档失败（errno %d，%s），不恢复", errno, bk); bad++; continue; }
-                LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前存档已备份到 %s", bk); g_snap_save_rollback = 1; continue; }
+                LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前存档已备份到 %s", bk); snprintf(g_snap_save_bk, sizeof g_snap_save_bk, "%s", bk); g_snap_save_rollback = 1; continue; }
             if (i == 3) g_snap_where = 1;
             LOG("【红】即时存档恢复：%s不符（快照 %s，当前 %s），拒绝恢复", it[i].key, v, it[i].cur); bad++; }
     }
@@ -1074,7 +1085,20 @@ static void *grab_thread(void *arg) {
     LOG("即时存档恢复：验证截图已存（%s/b_after_*.png）", d); return NULL;
 }
 static int restore_body(const char *dir);
+static int snap_restore_body(const char *dir);
+// 恢复失败（任一步）而存档树已开始写回快照那一刻：先撤销退回再返回——两处调用方（host_main.c 首次起局 / 进程内重建）随即重新开局，
+//   给玩家的「游戏存档没受影响」这时才成立。撤销失败打红并点名备份目录（存档整棵在那里，可从存档管理导入找回）
 int s2a_snap_restore(const char *dir) {
+    int rc = snap_restore_body(dir);
+    if (rc && g_snap_save_applied) {
+        char root[2048]; save_root(root, sizeof root);
+        if (save_undo_at(g_snap_save_bk, root)) LOG("【红】即时存档恢复失败，撤销退回存档也没做成：退回前的存档在 %s（存档管理里导入这个文件夹可找回）", g_snap_save_bk[0] ? g_snap_save_bk : "（退回前没有存档）");
+        else LOG("即时存档恢复失败：已撤销退回存档，存档放回退回之前的样子（%s）", g_snap_save_bk[0] ? "按备份" : "退回前本来没有存档，写进去的已删");
+    }
+    g_snap_save_applied = 0;
+    return rc;
+}
+static int snap_restore_body(const char *dir) {
     // 自动玩家闸：恢复开始即停手、恢复前定的那一下作废（gen+1）；失败一律放开——进程内重建失败不退出进程，而是不带快照重新开局
     //   （host_main.c s2a_session_fresh_restart），hold 不清的话新开的那局自动玩家要干等 300 秒
     s2a_snap_ap_gen++; s2a_snap_ap_hold = 1;
@@ -1100,7 +1124,7 @@ static int restore_body(const char *dir) {
         char d[2048] = "", pv[2048] = ""; if (S2A_SnapDataRoot && S2A_SnapDataRoot(d, sizeof d) > 0) root_portable(d, pv, sizeof pv);
         if (g_root_hint_v[0] && strcmp(pv, g_root_hint_v)) { LOG("【红】即时存档恢复：服务层数据根与快照时不同（快照 %s，当前 %s），停下", g_root_hint_v, pv); return -1; } }
     // 玩家已确认退回：重放之前先写回存档树。重放会按快照那一刻重开存档里的文件，快照里有、当前没有的（存档目录整个没了 / 之后被删的文件）会开不了、重放失败
-    if (g_snap_save_rollback) { char src[2048]; snprintf(src, sizeof src, "%s/save_tree", dir); if (save_tree_put(src)) return -1; LOG("即时存档恢复：玩家已确认退回，重放前先把存档树写回快照那一刻"); }
+    if (g_snap_save_rollback) { char src[2048]; snprintf(src, sizeof src, "%s/save_tree", dir); g_snap_save_applied = 1; if (save_tree_put(src)) return -1; LOG("即时存档恢复：玩家已确认退回，重放前先把存档树写回快照那一刻"); }
     double t0 = now_s(); char st0[80]; int sn0; save_dir_hash(st0, &sn0);
     FILE *f = open_in(dir, "svcmem.bin", "rb"); if (!f || s2a_snap_svcmem_load(f)) { if (f) fclose(f); return -1; } fclose(f);
     { int s2a_snap_far_load(FILE *); f = open_in(dir, "far.bin", "rb"); if (!f || s2a_snap_far_load(f)) { if (f) fclose(f); return -1; } fclose(f); }

@@ -3,9 +3,10 @@
 #include <stdint.h>
 _Atomic long g_tick_calls, g_tick_first_done = -1, g_tick_first_total = -1, g_tick_full; long g_tick_enter_at, g_tick_total;
 int g_tick_absent;   // 1 = 装作没链前端（回 -1，同 nvn_mtl.m 的弱定义）：E2 看没有前端时上限照旧
+int g_tick_first_ret;   // 开始那次的回值（缺省 0）：H 例 1 = 之后的启动，前端开等第一拍就放行（loadprog.c GO_LATER）
 int s2a_front_warm_tick(long done, long total) {
     long k = atomic_fetch_add(&g_tick_calls, 1);
-    if (k == 0) { atomic_store(&g_tick_first_done, done); atomic_store(&g_tick_first_total, total); return g_tick_absent ? -1 : 0; }
+    if (k == 0) { atomic_store(&g_tick_first_done, done); atomic_store(&g_tick_first_total, total); return g_tick_absent ? -1 : g_tick_first_ret; }
     if (done == total && total == g_tick_total) atomic_fetch_add(&g_tick_full, 1);
     if (g_tick_absent) return -1;
     return g_tick_enter_at && k >= g_tick_enter_at ? 1 : 0;

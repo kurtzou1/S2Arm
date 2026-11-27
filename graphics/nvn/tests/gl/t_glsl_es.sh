@@ -118,4 +118,14 @@ ck "㉜ ES 1.00 拿 3.x 内建名当名字：升版前改名" rewrite frag
 #   ㉝ 反证：3.10 原文里的 texture 是内建调用，不改名
 printf '#version 310 es\nprecision highp float;\nuniform sampler2D t;\nin vec2 v;\nout vec4 o;\nvoid main() { o = texture(t, v); }\n' > "$T/in"; cp "$T/in" "$T/want"
 ck "㉝ 3.10 原文的 texture 是内建、不动" rewrite frag
+# ㉞ D-RWJY（#2304）：文件作用域多余分号（函数体后「};」、「;;」、行首「;」）删掉；struct / 接口块后的「;」、函数体里的空语句「;;」、函数声明的「;」留着
+printf '#version 310 es\nprecision highp float;;\nvoid f();\nvoid g() { };\nstruct S { float a; };\nuniform B { float b; } ub;\nvoid main() { float x = 1.0;; }\n;\n' > "$T/in"
+printf '#version 310 es\nprecision highp float;\nvoid f();\nvoid g() { }\nstruct S { float a; };\nuniform B { float b; } ub;\nvoid main() { float x = 1.0;; }\n\n' > "$T/want"
+ck "㉞ 文件作用域多余分号删掉、声明的分号留着" rewrite frag
+#   ㉟ ES 1.00 升版路同样删；预处理指令行之后紧跟的「;」也删
+printf 'attribute vec4 a;\nvoid main() { gl_Position = a; };\n' > "$T/in"
+printf '#version 310 es\nprecision highp float;\nprecision highp int;\nin vec4 a;\nvoid main() { gl_Position = a; }\n' > "$T/want"
+ck "㉟ ES 1.00 函数体后多余分号" rewrite vert
+printf '#version 310 es\n#extension GL_OES_texture_3D : enable\n;\nvoid main() {}\n' > "$T/in"; printf '#version 310 es\n#extension GL_OES_texture_3D : enable\n\nvoid main() {}\n' > "$T/want"
+ck "㊱ 指令行后面的「;」" rewrite frag
 [ $bad = 0 ] && echo "✓ t_glsl_es：$n 项全过" || { echo "✗ t_glsl_es：$n 项，失败 $bad"; exit 1; }

@@ -539,10 +539,11 @@
       ],
       "paths": [
         "README.md",
-        "README.zh-CN.md"
+        "README.zh-CN.md",
+        "README.tr.md"
       ],
       "regex": "(?i)mario",
-      "line_regex": "\\*\\*(?:联合开发者|Co-developers)\\*\\*.*\\[@imariohiro\\]\\(https://github\\.com/imariohiro\\)",
+      "line_regex": "\\*\\*(?:联合开发者|Co-developers|Ortak geliştiriciler)\\*\\*.*\\[@imariohiro\\]\\(https://github\\.com/imariohiro\\)",
       "reason": "README 联合开发者名单里的 GitHub 账号名 imariohiro 含 mario 字样（贡献者真实账号，不是游戏名）：命中文字须正好是 mario、所在行须是名单行且含这个账号链接才放；名单外照拦。"
     }
   ],

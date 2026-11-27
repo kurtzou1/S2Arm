@@ -4135,6 +4135,29 @@ static void fps_rows(int phase) {
  *     双路下那块原代码不动、内存里还是原字，照搬 LDR 读到的是原字：这一路改成直接把值装进 Rt（整数 movz / movk；浮点经 x16 中转再 fmov，x16 存取同跳板） */
 #define CP_SLOT 2046
 #define CP_VAR_MAX 8
+/* 社区补丁代码洞（v 行，11-27 D-3AF8 / D-F6ZC 一款大型 3D 游戏转横屏必闪退）：补丁从代码段跳到它自己写在代码段外（ro / data）的一段新代码。
+ * 模拟器不管页的执行权限，那段能跑；我们这里那段是装载器写的数据页、不是签名过的可执行代码，一执行就被系统杀。
+ * pack/cpatch.py caves 顺着控制流认出洞里的代码字（常量不算），每字一行 v <模块> <偏移> <原字> <新字>；这里把它们按偏移顺序整组搬进补丁区，
+ * 各字经 cp_emit 重定位（B / BL / 条件跳 / ADR 的目标在洞里的换成搬后的位置，ADRP / 字面量 LDR 仍指原地址：洞里的常量照旧由装载器写在原处）。
+ * p 行跳板（cp_emit）与 w 行里跳进洞的直接跳转改指搬后的位置；整组搬不成就把洞的每个字与跳进洞的点都记缺口，pack/cpatch.py prune 剔掉那几份重来 */
+typedef struct {
+  A off, at; /* at：搬进补丁区后的地址 */
+  uint32_t w;
+} CaveW;
+static CaveW* g_cave;
+static int g_ncave, g_ccave, g_cave_ok;
+static int cave_find(A t) {
+  int lo = 0, hi = g_ncave;
+  while (lo < hi) {
+    int m = (lo + hi) / 2;
+    if (g_cave[m].off < t) lo = m + 1; else hi = m;
+  }
+  return lo < g_ncave && g_cave[lo].off == t ? lo : -1;
+}
+static A cave_xlat(A t) {
+  int i = g_cave_ok ? cave_find(t) : -1;
+  return i >= 0 ? g_cave[i].at : t;
+}
 static const char* cp_check(uint32_t w, A a) {
   if ((w & 0x7c000000u) == 0x14000000u || (w & 0xff000010u) == 0x54000000u || (w & 0x7e000000u) == 0x34000000u ||
       (w & 0x7e000000u) == 0x36000000u || (w & 0x1f000000u) == 0x10000000u)
@@ -4149,7 +4172,7 @@ static const char* cp_check(uint32_t w, A a) {
 }
 static void cp_emit(uint32_t w, A a) { /* 把原在 a 的指令字 w 等价地发进跳板（PC 相对的重定位；先过 cp_check） */
   if ((w & 0x7c000000u) == 0x14000000u) { /* B / BL */
-    A t = a + ((int64_t)((int32_t)(w << 6)) >> 4);
+    A t = cave_xlat(a + ((int64_t)((int32_t)(w << 6)) >> 4));
     emit(branch(here(), t) | (w & 0x80000000u));
     return;
   }
@@ -4157,6 +4180,7 @@ static void cp_emit(uint32_t w, A a) { /* 把原在 a 的指令字 w 等价地�
     A t; uint32_t nw;
     if ((w & 0x7e000000u) == 0x36000000u) { t = a + ((int64_t)((int32_t)(w << 13)) >> 18 << 2 >> 0); nw = (w & 0xfff8001fu) | (2u << 5); }
     else { t = a + (((int64_t)((int32_t)(w << 8)) >> 13) << 2); nw = (w & 0xff00001fu) | (2u << 5); }
+    t = cave_xlat(t);
     emit(nw); emit(branch(here(), here() + 8)); emit(branch(here(), t));
     return;
   }
@@ -4164,7 +4188,7 @@ static void cp_emit(uint32_t w, A a) { /* 把原在 a 的指令字 w 等价地�
     int rd = (int)(w & 31); int64_t imm = (int64_t)((((w >> 5) & 0x7ffffu) << 2) | ((w >> 29) & 3));
     if (imm & (1 << 20)) imm -= 1 << 21;
     if (w >> 31) { emit(adrp(rd, here(), (a & ~(A)0xfff) + (imm << 12))); return; }
-    A t = a + imm; emit(adrp(rd, here(), t)); emit(ADDI((uint32_t)rd, (uint32_t)rd, (uint32_t)(t & 0xfff), 0u));
+    A t = cave_xlat(a + imm); emit(adrp(rd, here(), t)); emit(ADDI((uint32_t)rd, (uint32_t)rd, (uint32_t)(t & 0xfff), 0u));
     return;
   }
   if ((w & 0x3b000000u) == 0x18000000u) { /* LDR 字面量 */
@@ -4217,6 +4241,21 @@ static void cp_lit(uint32_t w, uint64_t v) { /* 把 LDR (literal) w 换成「Rt 
   emit(opc ? (0x9e670000u | (16u << 5) | rt) : (0x1e270000u | (16u << 5) | rt)); /* fmov d<rt>, x16 / fmov s<rt>, w16 */
   emit(LDRPOST(16u, 31u, 16));
 }
+static int cp_size(uint32_t w) { /* cp_emit 发几条字（代码洞搬家前排位用；与 cp_emit 的分支一一对应） */
+  if ((w & 0x7c000000u) == 0x14000000u) return 1;
+  if ((w & 0xff000010u) == 0x54000000u || (w & 0x7e000000u) == 0x34000000u || (w & 0x7e000000u) == 0x36000000u) return 3;
+  if ((w & 0x1f000000u) == 0x10000000u) return w >> 31 ? 1 : 2;
+  if ((w & 0x3b000000u) == 0x18000000u) return !((w >> 26) & 1) ? ((w >> 30) == 3 ? 0 : 3) : 5;
+  return 1;
+}
+static void gen_caves(void* p) { /* 整组搬：先按 cp_size 排好每个字的新地址（洞内互跳要知道后面字的位置），再逐字 cp_emit */
+  (void)p;
+  A at = here();
+  for (int i = 0; i < g_ncave; i++) { g_cave[i].at = at; at += 4 * cp_size(g_cave[i].w); }
+  g_cave_ok = 1;
+  for (int i = 0; i < g_ncave; i++) cp_emit(g_cave[i].w, g_cave[i].off);
+  REQUIRE(here() == at);
+}
 static void gen_cpatch(void* q) {
   CpRow* c = q;
   A off = c->off, start = here();
@@ -4261,14 +4300,31 @@ static void cpatch_rows(int phase) {
   char line[512];
   CpRow* cps = NULL;
   int ncp = 0, ccp = 0;
+  CaveW* wfix = NULL; /* 跳进代码洞的 w 行（off、新字） */
+  int nwfix = 0, cwfix = 0;
+  if (phase == 0) g_ncave = g_cave_ok = 0;
   while (fgets(line, sizeof(line), f)) {
     char* h = strchr(line, '#');
     if (h) *h = 0;
     char *k = strtok(line, " \t\r\n"), *mod = strtok(NULL, " \t\r\n"), *offs = strtok(NULL, " \t\r\n"), *origs = strtok(NULL, " \t\r\n"),
          *news = strtok(NULL, " \t\r\n"), *bits = strtok(NULL, " \t\r\n");
-    if (!k || !(eq(k, "w") || eq(k, "p")) || !mod || !eq(mod, g->r.module) || !offs || !origs || !news) continue;
+    if (!k || !(eq(k, "w") || eq(k, "p") || eq(k, "v")) || !mod || !eq(mod, g->r.module) || !offs || !origs || !news) continue;
     A off = strtoll(offs, NULL, 16);
+    if (eq(k, "v")) { /* 代码洞的字：第 1 阶段收齐，下面整组搬进补丁区 */
+      if (phase == 1) {
+        if (g_ncave == g_ccave) { g_ccave = g_ccave ? g_ccave * 2 : 64; g_cave = realloc(g_cave, (size_t)g_ccave * sizeof *g_cave); if (!g_cave) fail("代码洞行分配失败"); }
+        g_cave[g_ncave].off = off; g_cave[g_ncave].at = 0; g_cave[g_ncave++].w = (uint32_t)strtoul(news, NULL, 16);
+      }
+      continue;
+    }
     if (phase == 0 && g_ncpclaim < (int)(sizeof g_cpclaim / sizeof g_cpclaim[0])) g_cpclaim[g_ncpclaim++] = off;
+    if (phase == 1 && eq(k, "w") && !(bits && eq(bits, "@k"))) { /* 第 0 阶段已原样写下的 w 行：直接跳转跳进代码洞的，洞搬好后改指 */
+      uint32_t w = (uint32_t)strtoul(news, NULL, 16);
+      if ((w & 0x7c000000u) == 0x14000000u || (w & 0xff000010u) == 0x54000000u || (w & 0x7e000000u) == 0x34000000u || (w & 0x7e000000u) == 0x36000000u) {
+        if (nwfix == cwfix) { cwfix = cwfix ? cwfix * 2 : 64; wfix = realloc(wfix, (size_t)cwfix * sizeof *wfix); if (!wfix) fail("代码洞改指分配失败"); }
+        wfix[nwfix].off = off; wfix[nwfix].at = 0; wfix[nwfix++].w = w;
+      }
+    }
     if (eq(k, "p") != (phase == 1)) continue;
     uint32_t orig = (uint32_t)strtoul(origs, NULL, 16), nw = (uint32_t)strtoul(news, NULL, 16);
     if (phase == 0) {
@@ -4319,9 +4375,65 @@ static void cpatch_rows(int phase) {
     cps[j].litn[cps[j].n] = (char)litn; cps[j].lit[cps[j].n] = lit; cps[j].n++;
   }
   fclose(f);
+  if (phase == 1 && g_ncave) { /* 代码洞：按偏移排好去重（兄弟补丁共用同一个洞），逐字核能不能原样重定位，再整组搬 */
+    for (int i = 1; i < g_ncave; i++)
+      for (int j = i; j > 0 && g_cave[j - 1].off > g_cave[j].off; j--) { CaveW t = g_cave[j]; g_cave[j] = g_cave[j - 1]; g_cave[j - 1] = t; }
+    int n = 0, bad = 0;
+    for (int i = 0; i < g_ncave; i++) {
+      if (n && g_cave[n - 1].off == g_cave[i].off) {
+        if (g_cave[n - 1].w != g_cave[i].w) { gap(g_cave[i].off, "cpatch", "代码洞同一字两份补丁写的不一样（0x%08x / 0x%08x）", g_cave[n - 1].w, g_cave[i].w); bad = 1; }
+        continue;
+      }
+      g_cave[n++] = g_cave[i];
+    }
+    g_ncave = n;
+    for (int i = 0; i < g_ncave; i++) {
+      uint32_t w = g_cave[i].w;
+      const char* why = g_cave[i].off % 4 || (g_cave[i].off >= 0 && g_cave[i].off < (A)g->text) ? "不在代码段外或没对齐" : cp_check(w, g_cave[i].off);
+      /* 不落下的字：B（非 BL）/ BR / RET；别的字后面必须紧跟洞里的下一字（pack/cpatch.py caves 已保证，这里兜底） */
+      int stop = (w & 0xfc000000u) == 0x14000000u || (w & 0xfffffc1fu) == 0xd61f0000u || (w & 0xfffffc1fu) == 0xd65f0000u;
+      if (!why && !stop && (i + 1 == g_ncave || g_cave[i + 1].off != g_cave[i].off + 4)) why = "后面没有洞里的下一字（会落进洞外）";
+      if (why) { gap(g_cave[i].off, "cpatch", "代码洞的字 0x%08x 不能搬进补丁区（%s）", w, why); bad = 1; }
+    }
+    if (!bad) {
+      g->guarding = 1;
+      int ok = unit_run(g_cave[0].off, gen_caves, NULL, NULL);
+      g->guarding = 0;
+      if (!ok) {
+        g_cave_ok = 0;
+        for (int i = 0; i < g_ncave; i++) gap(g_cave[i].off, "cpatch", "代码洞搬不进补丁区：%s", g->error);
+      } else {
+        msg("%s 社区补丁代码洞 %d 字搬进补丁区（0x%" PRIx64 " 起）\n", g->r.module, g_ncave, (uint64_t)g_cave[0].at);
+        bump("cpatch_cave");
+      }
+    }
+  }
+  for (int i = 0; i < nwfix; i++) { /* w 行里跳进洞的直接跳转：洞搬好了改指新位置，没搬成记缺口（不能留着跳进数据页） */
+    uint32_t w = wfix[i].w; A off = wfix[i].off, t;
+    int uncond = (w & 0x7c000000u) == 0x14000000u;
+    if (uncond) t = off + ((int64_t)((int32_t)(w << 6)) >> 4);
+    else if ((w & 0x7e000000u) == 0x36000000u) t = off + ((int64_t)((int32_t)(w << 13)) >> 18 << 2);
+    else t = off + (((int64_t)((int32_t)(w << 8)) >> 13) << 2);
+    if (cave_find(t) < 0) continue;
+    A to = cave_xlat(t), d = to - off;
+    if (!g_cave_ok) { gap(off, "cpatch", "w 行跳进代码洞 0x%" PRIx64 "，洞没搬成", (uint64_t)t); continue; }
+    if (!uncond || !(d >= -(1LL << 27) && d < (1LL << 27))) { gap(off, "cpatch", "w 行跳进代码洞 0x%" PRIx64 "：%s", (uint64_t)t, uncond ? "搬后越射程" : "条件跳改指不了"); continue; }
+    put(off, branch(off, to) | (w & 0x80000000u));
+  }
+  free(wfix);
   /* 同点各行收齐后再生成（同点多变体编进同一个跳板） */
   for (int k = 0; k < ncp; k++) {
     A off = cps[k].off;
+    if (phase == 1 && g_ncave && !g_cave_ok) { /* 洞没搬成：跳进洞的那一路不能生成（cp_emit 会照原地址跳进数据页） */
+      int into = 0;
+      for (int i = 0; i < cps[k].n && !into; i++) {
+        uint32_t w = cps[k].nw[i];
+        if ((w & 0x7c000000u) == 0x14000000u) into = cave_find(off + ((int64_t)((int32_t)(w << 6)) >> 4)) >= 0;
+        else if ((w & 0xff000010u) == 0x54000000u || (w & 0x7e000000u) == 0x34000000u) into = cave_find(off + (((int64_t)((int32_t)(w << 8)) >> 13) << 2)) >= 0;
+        else if ((w & 0x7e000000u) == 0x36000000u) into = cave_find(off + ((int64_t)((int32_t)(w << 13)) >> 18 << 2)) >= 0;
+      }
+      if (into) { gap(off, "cpatch", "p 点跳进代码洞，洞没搬成"); continue; }
+    }
     if (site_at(off) || consumed(off)) { gap(off, "cpatch", "p 点已是改写点（宽屏点 / x18 / 跳转表等），两套改动叠在同一条指令上"); continue; }
     const char* why = cp_check(cps[k].orig, off);
     if (why) { gap(off, "cpatch", "p 点原指令%s", why); continue; }

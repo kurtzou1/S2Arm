@@ -537,7 +537,7 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
 
 // 绘制替身：着色器来源给一份固定布局的程序；后端记下管线描述、绑定和绘制参数
 struct nvn_gpu_shader_s { int x; }; struct nvn_gpu_pipe_s { int x; };
-static struct nvn_gpu_shader_s g_fsh[3]; static struct nvn_gpu_pipe_s g_fpipe;
+static struct nvn_gpu_shader_s g_fsh[5]; static struct nvn_gpu_pipe_s g_fpipe;
 static struct rp_prog g_fprog, g_variant_prog; static struct nvn_gpu_shader_s g_variant_fs; static int g_rt_variant;
 static int g_resolves, g_resolve_rc; static struct rp_shader_req g_last_req;
 static struct rp_prog g_gprog2; static const struct rp_prog *g_gresolve_next;   // 图形出库回退用例：拒收后解析交「现编版」g_gprog2
@@ -567,7 +567,7 @@ void rp_shader_reset(void) {}
 static int g_pipe_rc; static const char *g_pipe_why;   // 替身建管线的返回码与原文（原文给失败分类用例）
 static int g_pipe_gets, g_set_pipes, g_set_dyns, g_gdraws; static nvn_gpu_pipe_desc g_last_pdesc; static nvn_gpu_dyn g_last_dyn; static nvn_gpu_draw_args g_last_da;
 static struct { uint32_t stream; uint64_t off; } g_vb[4]; static int g_nvb;
-static nvn_gpu_binding g_fb[3][16]; static uint32_t g_nfb[3];
+static nvn_gpu_binding g_fb[5][16]; static uint32_t g_nfb[5];
 static _Alignas(16) uint8_t g_arena[1 << 18]; static uint64_t g_arena_used; static struct nvn_gpu_buf_s g_arena_buf = { .bytes = sizeof g_arena, .cpu = g_arena };
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) { (void)mode; g_pipe_gets++; g_last_pdesc = *d; *out = g_pipe_rc ? NULL : &g_fpipe; if (err) { memset(err, 0, sizeof *err); err->rc.code = g_pipe_rc; if (g_pipe_rc && g_pipe_why) snprintf(err->why, sizeof err->why, "%s", g_pipe_why); } return (nvn_gpu_rc){g_pipe_rc}; }
 void nvn_gpu_set_pipe(nvn_gpu_cmd c, nvn_gpu_pipe p) { (void)c; (void)p; g_set_pipes++; }
@@ -594,7 +594,7 @@ void nvn_gpu_copy_bufs_uniform(nvn_gpu_cmd c, const nvn_gpu_buf_copy *v, uint32_
 void nvn_gpu_dispatch(nvn_gpu_cmd c, nvn_gpu_pipe cp, uint32_t x, uint32_t y, uint32_t z, nvn_gpu_buf ind, uint64_t ind_off) { (void)c; g_disp_ind = ind; g_disp_off = ind_off; g_ndisp++; g_disp[0] = x; g_disp[1] = y; g_disp[2] = z; g_disp_pipe = cp; }
 void nvn_gpu_set_dyn(nvn_gpu_cmd c, const nvn_gpu_dyn *d) { (void)c; g_set_dyns++; g_last_dyn = *d; }
 void nvn_gpu_set_vbuf(nvn_gpu_cmd c, uint32_t stream, nvn_gpu_buf b, uint64_t off) { (void)c; if (g_order_active && stream == 0) { g_order_vbuf = b; g_order_voff = off; } if (g_nvb < 4) { g_vb[g_nvb].stream = stream; g_vb[g_nvb].off = off; } g_nvb++; }
-static int g_bind_calls[3];   // 图形两个阶段各发了几次绑定
+static int g_bind_calls[5];   // 图形各阶段各发了几次绑定
 void nvn_gpu_bind(nvn_gpu_cmd c, nvn_gpu_stage st, const nvn_gpu_binding *b, uint32_t n) { (void)c;
     for (uint32_t i = 0; i < n; i++) if (b[i].cls == NVN_GPU_RES_TBUF && b[i].u.view) {
         nvn_gpu_view v = b[i].u.view; g_tbuf_binds[st]++;
@@ -605,8 +605,8 @@ void nvn_gpu_bind(nvn_gpu_cmd c, nvn_gpu_stage st, const nvn_gpu_binding *b, uin
         nvn_gpu_view v = b[i].u.view; g_itbuf_bound.buf = v->buf; g_itbuf_bound.off = v->off; g_itbuf_bound.bytes = v->bytes; g_itbuf_bound.format = v->format;
     }
     if (st == NVN_GPU_SH_CS) { g_cbinds++; g_ncb = n; memcpy(g_cb, b, (n < 16 ? n : 16) * sizeof *b); return; }
-    CHECK(st >= NVN_GPU_SH_VS && st <= NVN_GPU_SH_GS);
-    if (st < NVN_GPU_SH_VS || st > NVN_GPU_SH_GS) return;
+    CHECK(st >= NVN_GPU_SH_VS && st <= NVN_GPU_SH_TES);
+    if (st < NVN_GPU_SH_VS || st > NVN_GPU_SH_TES) return;
     if (!g_pass_open) g_bind_outside++;
     int i = (int)st; g_bind_calls[i]++; g_nfb[i] = n; memcpy(g_fb[i], b, (n < 16 ? n : 16) * sizeof *b); }
 void nvn_gpu_draw(nvn_gpu_cmd c, const nvn_gpu_draw_args *a) {
@@ -632,9 +632,9 @@ void nvn_gpu_draw(nvn_gpu_cmd c, const nvn_gpu_draw_args *a) {
 static uint32_t g_caps_remove;
 static uint32_t g_caps_extra;   // 用例临时打开的能力位（如间接计数多绘）
 static uint32_t g_caps_min_ssbo; static uint64_t g_caps_max_ssbo;   // 用例临时设的 minStorageBufferOffsetAlignment / maxStorageBufferRange（0 = 不报，其余用例的口径）
-static uint32_t g_caps_min_texel, g_caps_max_texel; static uint64_t g_caps_max_ubo;   // g_caps_max_ubo：用例临时设的 maxUniformBufferRange（0 = 不报）   // 用例临时设的 minTexelBufferOffsetAlignment / maxTexelBufferElements（0 = 不报）
+static uint32_t g_caps_min_texel, g_caps_max_texel; static uint64_t g_caps_max_ubo; static uint32_t g_caps_max_patch;   // g_caps_max_ubo / g_caps_max_patch：用例临时设的上限（0 = 不报）
 void nvn_gpu_caps_get(nvn_gpu_caps *out) { memset(out, 0, sizeof *out); out->min_ubo_align = 64; out->caps = (NVN_GPU_CAP_BLIT_SCALED | g_caps_extra) & ~g_caps_remove; out->min_ssbo_align = g_caps_min_ssbo; out->max_ssbo_range = g_caps_max_ssbo;
-    out->min_texel_align = g_caps_min_texel; out->max_texel_elems = g_caps_max_texel; out->max_ubo_range = g_caps_max_ubo; }
+    out->min_texel_align = g_caps_min_texel; out->max_texel_elems = g_caps_max_texel; out->max_ubo_range = g_caps_max_ubo; out->max_patch_size = g_caps_max_patch; }
 static int g_arena697_fail;
 nvn_gpu_rc nvn_gpu_arena_alloc(nvn_gpu_cmd c, uint64_t bytes, uint32_t align, nvn_gpu_slice *out, nvn_gpu_err *err) { (void)c; (void)err;
     if(g_arena697_fail) { memset(out,0,sizeof *out);memset(err,0,sizeof *err);
@@ -3169,7 +3169,7 @@ static void t_report_position(void) {
 // 最小的可画环境：一个不带属性、不带绑定的程序，一张 64x36 的颜色目标
 static tex_t g_qrt;
 static void q_env(stream *s) {
-    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_INLINE_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.color_out_mask = 0xffffffffu;
     g_qrt = mk_tex(91, 0, NVN_FORMAT_RGBA8, 64, 36, 1, 0);
     put_set_rt(s, &g_qrt, NULL);
     p_viewports *vp = put(s, OP_VIEWPORTS, sizeof *vp); vp->n = 1; vp->v[0][2] = 64; vp->v[0][3] = 36;
@@ -3807,24 +3807,32 @@ static void t_gs_dirty_and_topology(void) {
       pr = put(&u, OP_PRIM_RESTART, sizeof *pr); pr->on = 0;
       end(&u); submit1(&u); fake_complete(NVN_GPU_DONE_OK);
       CHECK(g_gdraws == 6 && g_last_da.prim == 4 && g_last_da.itype == 2 && g_last_da.base_vertex == 4 && g_last_pdesc.prim_restart == 0);
-      { const uint32_t e[9] = {10, 11, 12, 20, 21, 22, 22, 21, 23}; CHECK(g_last_da.count == 9 && !memcmp(g_arena + g_last_da.ioff, e, sizeof e)); }
-      // 间接的三角带：参数在 GPU 上、CPU 展开不了，按原生三角带交给 GS（不再整笔跳）
-      memset(g_pmem + 3 * PG + 2560, 0, 16);
-      stream v = {0}; p_draw *ts = put(&v, OP_DRAW, sizeof *ts); ts->prim = 5; ts->ind = base + 3 * PG + 2560;
-      end(&v); submit1(&v); fake_complete(NVN_GPU_DONE_OK);
-      CHECK(g_gdraws == 7 && g_last_da.prim == 5 && g_last_pdesc.prim == 5); }
-    // 三角扇：原生交给 GS
+      { const uint32_t e[9] = {10, 11, 12, 20, 21, 22, 22, 21, 23}; CHECK(g_last_da.count == 9 && !memcmp(g_arena + g_last_da.ioff, e, sizeof e)); } }
+    // 三角扇规范化为两三角形，GS 输入 0 始终是扇心。
     { stream u = {0}; p_draw *ts = put(&u, OP_DRAW, sizeof *ts); ts->prim = 6; ts->count = 4; ts->instances = 1;
       end(&u); submit1(&u); fake_complete(NVN_GPU_DONE_OK);
-      CHECK(g_gdraws == 8 && g_last_da.prim == 6 && g_last_pdesc.prim == 6); }
-    // 邻接三角形（0xC）：设备开了 geometryShader 时原生交给后端（后端映射 *_WITH_ADJACENCY）；没开时具名跳过（Vulkan 不许）
+      const uint32_t expected[6] = {0, 1, 2, 0, 2, 3};
+      CHECK(g_gdraws == 7 && g_last_da.prim == 4 && g_last_pdesc.prim == 4);
+      CHECK(g_last_da.count == 6 && !memcmp(g_arena + g_last_da.ioff, expected, sizeof expected)); }
+    // 邻接三角形按启用的 geometryShader 能力准入。
     { stream u = {0}; p_draw *ts = put(&u, OP_DRAW, sizeof *ts); ts->prim = 0xC; ts->count = 6; ts->instances = 1;
       end(&u); submit1(&u); fake_complete(NVN_GPU_DONE_OK);
-      CHECK(g_gdraws == 8 && nvn_unimpl_count("draw", "adjacency_without_geometry_feature") == 1);
+      CHECK(g_gdraws == 7 && nvn_unimpl_count("draw", "adjacency_without_geometry_feature") == 1);
       g_caps_extra = NVN_GPU_CAP_GEOMETRY;
       submit1(&u); fake_complete(NVN_GPU_DONE_OK);
       g_caps_extra = 0;
-      CHECK(g_gdraws == 9 && g_last_da.prim == 0xC && g_last_pdesc.prim == 0xC && nvn_unimpl_count("draw", "adjacency_without_geometry_feature") == 1); }
+      CHECK(g_gdraws == 8 && g_last_da.prim == 0xC && g_last_pdesc.prim == 0xC && nvn_unimpl_count("draw", "adjacency_without_geometry_feature") == 1); }
+    // #696：间接参数留在 GPU，三角带和扇沿用原生输入装配，绘制不得跳过。
+    const uint64_t ind_addr = (uintptr_t)g_pmem + 3 * PG + 2560;
+    const uint32_t commands[4] = {4, 1, 7, 0};
+    memcpy(g_pmem + 3 * PG + 2560, commands, sizeof commands);
+    for (int prim = 5; prim <= 6; prim++) {
+        stream u = {0};
+        p_draw *d = put(&u, OP_DRAW, sizeof *d); d->prim = prim; d->ind = ind_addr;
+        end(&u); submit1(&u); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_gdraws == prim + 4 && g_last_da.ind && !g_last_da.ibuf &&
+              g_last_da.prim == (uint32_t)prim && g_last_pdesc.prim == (uint32_t)prim);
+    }
     CHECK(nvn_unimpl_count("draw", "geometry_topology_unimplemented") == 0);
     g_snap_prog = NULL; pass_fresh();
 }
@@ -3853,6 +3861,79 @@ static void t_gs_bind(void) {
         CHECK(g_fb[st][0].u.b.len == 64 && g_arena[g_fb[st][0].u.b.off] == expected);
     } else CHECK(0);
     g_snap_prog = NULL; pass_fresh();
+}
+// 曲面细分（TCS / TES / PATCHES）：缺能力、缺配对阶段、非 PATCHES 拓扑、patch_size 超设备上限各具名跳过；
+// 能力齐备时 PATCHES + OP_SET_PATCH_SIZE + TCS/TES UBO 绑定与脏位重解析全部打通。
+static void t_tessellation(void) {
+    pass_fresh(); g_gdraws = g_resolves = g_resolve_rc = 0; g_arena_used = 0; nvn_unimpl_reset();
+    memset(g_bind_calls, 0, sizeof g_bind_calls); memset(g_nfb, 0, sizeof g_nfb);
+    memset(g_pmem, 0, sizeof g_pmem); nvn_be_pool_add(g_pmem, sizeof g_pmem);
+    uint64_t base = (uint64_t)(uintptr_t)g_pmem;
+    memset(g_pmem + PG, 0x55, 64); memset(g_pmem + PG + 64, 0x66, 64); memset(g_pmem + PG + 128, 0x77, 64);
+
+    prog_t pt = {0}; pt.magic = MAGIC('P','R','O','G'); pt.serial = 998; pt.nstage = 4;
+    g_snap_prog = &pt; g_snap_ok = 0x1bu; memset(g_snap_keys, 0, sizeof g_snap_keys); memset(g_snap_stage, 0xff, sizeof g_snap_stage);
+    static const uint8_t st4[4] = {0, 1, 3, 4};
+    for (int i = 0; i < 4; i++) { g_snap_stage[i] = st4[i]; g_snap_keys[i][0] = (uint8_t)(st4[i] + 1); }
+
+    // 1) 缺 NVN_GPU_CAP_TESSELLATION：具名跳过 patches_without_tessellation_feature
+    g_caps_extra = 0; g_caps_max_patch = 0;
+    { stream s = {0}; q_env(&s);
+      p_bind_program_id *id = put(&s, OP_BIND_PROGRAM, sizeof *id); id->prog = &pt; id->serial = pt.serial; id->stages = 0x1f;
+      p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_PATCHES; d->count = 3; d->instances = 1;
+      end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_gdraws == 0 && nvn_unimpl_count("draw", "patches_without_tessellation_feature") == 1);
+
+    // 2) 开能力 + 配对 TCS/TES + OP_SET_PATCH_SIZE=4 + TCS/TES UBO 绑定与脏位
+    g_caps_extra = NVN_GPU_CAP_TESSELLATION; g_caps_max_patch = 32;
+    g_fprog.sh[NVN_GPU_SH_TCS] = &g_fsh[NVN_GPU_SH_TCS];
+    g_fprog.sh[NVN_GPU_SH_TES] = &g_fsh[NVN_GPU_SH_TES];
+    struct rp_tess_layout tess_layout[RP_PROG_STAGES - RP_PROG_INLINE_STAGES] = {0};
+    g_fprog.tess = tess_layout;
+    for (int st = NVN_GPU_SH_TCS; st <= NVN_GPU_SH_TES; st++) {
+        g_fprog.nent[st] = 1;
+        tess_layout[st - RP_PROG_INLINE_STAGES].ent[0].cls = NVN_GPU_RES_UBO;
+        tess_layout[st - RP_PROG_INLINE_STAGES].ent[0].src_kind = NVN_RB_CBUF;
+    }
+    { stream s = {0};
+      p_set_patch_size *ps = put(&s, OP_SET_PATCH_SIZE, sizeof *ps); ps->size = 4;
+      p_bind_buf *ub = put(&s, OP_BIND_UBO, sizeof *ub); ub->stage = NVN_GPU_SH_TCS; ub->index = 0; ub->addr = base + PG; ub->size = 64;
+      ub = put(&s, OP_BIND_UBO, sizeof *ub); ub->stage = NVN_GPU_SH_TES; ub->index = 0; ub->addr = base + PG + 64; ub->size = 64;
+      p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_PATCHES; d->count = 4; d->instances = 1;
+      // 仅改 TCS UBO 必须标脏并触发重新解析与重绑
+      ub = put(&s, OP_BIND_UBO, sizeof *ub); ub->stage = NVN_GPU_SH_TCS; ub->index = 0; ub->addr = base + PG + 128; ub->size = 64;
+      d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_PATCHES; d->count = 4; d->instances = 1;
+      end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_gdraws == 2 && g_resolves == 2);
+    CHECK(g_last_da.prim == NVN_DRAW_PRIMITIVE_PATCHES && g_last_pdesc.prim == NVN_DRAW_PRIMITIVE_PATCHES && g_last_pdesc.patch_size == 4);
+    CHECK(g_last_pdesc.st[NVN_GPU_SH_TCS].sh == &g_fsh[NVN_GPU_SH_TCS] && g_last_pdesc.st[NVN_GPU_SH_TES].sh == &g_fsh[NVN_GPU_SH_TES]);
+    CHECK(g_bind_calls[NVN_GPU_SH_TCS] == 2 && g_bind_calls[NVN_GPU_SH_TES] == 1);
+    CHECK(g_nfb[NVN_GPU_SH_TCS] == 1 && g_arena[g_fb[NVN_GPU_SH_TCS][0].u.b.off] == 0x77);
+    CHECK(g_nfb[NVN_GPU_SH_TES] == 1 && g_arena[g_fb[NVN_GPU_SH_TES][0].u.b.off] == 0x66);
+
+    // 3) 非法组合均具名跳过：a) 绑着 TCS/TES 却画 TRIANGLES；b) patch_size 超上限；c) 只绑 TCS 缺 TES
+    { stream s = {0};
+      p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_TRIANGLES; d->count = 3; d->instances = 1;
+      end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "tessellation_without_patches_topology") == 1);
+
+    g_caps_max_patch = 3;
+    { stream s = {0};
+      p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_PATCHES; d->count = 4; d->instances = 1;
+      end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "patch_size_exceeds_device_limit") == 1);
+    g_caps_max_patch = 32;
+
+    prog_t pt1 = {0}; pt1.magic = MAGIC('P','R','O','G'); pt1.serial = 999; pt1.nstage = 3;
+    g_snap_prog = &pt1; g_snap_ok = 0xbu; memset(g_snap_stage, 0xff, sizeof g_snap_stage);
+    g_snap_stage[0] = 0; g_snap_stage[1] = 1; g_snap_stage[2] = 3;
+    { stream s = {0};
+      p_bind_program_id *id = put(&s, OP_BIND_PROGRAM, sizeof *id); id->prog = &pt1; id->serial = pt1.serial; id->stages = 0x1f;
+      p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = NVN_DRAW_PRIMITIVE_PATCHES; d->count = 4; d->instances = 1;
+      end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "incomplete_tessellation_stages") == 1);
+
+    g_caps_extra = 0; g_caps_max_patch = 0; g_snap_prog = NULL; pass_fresh();
 }
 // 常量缓冲暂存交后端异步填（rp_draw.c alloc_fill）：替身挂起填充、到等 / 代拷 / 提交才拷。
 // 第一笔绑 A（512 字节，全 0x11）→ OP_UPDATE_UB 改 A 头 8 字节为 0xB2：改之前第一笔的填充必须已做完，所以第一片拷到的是 0x11；
@@ -6997,7 +7078,7 @@ static void t_draw(void) {   // 绘制：状态在绘制时才变成后端的管
     pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; memset(g_pmem, 0, sizeof g_pmem); g_arena_used = 0;
     g_pipe_gets = g_set_pipes = g_set_dyns = g_gdraws = g_nvb = g_resolves = g_resolve_rc = 0; memset(g_nfb, 0, sizeof g_nfb);
     uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem);
-    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_INLINE_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
     g_fprog.nent[0] = 2; g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][0].src_kind = NVN_RB_SUPPORT;
     g_fprog.ent[0][1].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][1].src_kind = NVN_RB_CBUF; g_fprog.ent[0][1].src_reg = 2;
     g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
@@ -7188,7 +7269,7 @@ static void t_bind_reuse(void) {   // 按脏位少发绑定：没变的阶段不
     pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; memset(g_pmem, 0, sizeof g_pmem); g_arena_used = 0;
     g_gdraws = g_resolve_rc = 0; memset(g_nfb, 0, sizeof g_nfb);
     uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem);
-    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_INLINE_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
     g_fprog.nent[0] = 2; g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][0].src_kind = NVN_RB_SUPPORT;
     g_fprog.ent[0][1].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][1].src_kind = NVN_RB_CBUF; g_fprog.ent[0][1].src_reg = 2;
     g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
@@ -8470,7 +8551,7 @@ int main(int argc, char **argv) {
     t_logic_op_accounting();
     t_pipe_fail_table();
     t_gs_dirty_and_topology();
-    t_gs_bind(); t_ub_fill_async(); t_ub_fill_steal_all(); t_storage_null_binding(); t_storage_sync_before_pass(); t_stage_dropped_clears_binds(); t_sbuf_window(); t_sbuf_past_pool_end();
+    t_gs_bind(); t_tessellation(); t_ub_fill_async(); t_ub_fill_steal_all(); t_storage_null_binding(); t_storage_sync_before_pass(); t_stage_dropped_clears_binds(); t_sbuf_window(); t_sbuf_past_pool_end();
     t_graphics_high_slots();
     t_graphics_pool();
     t_tbuf_replay();

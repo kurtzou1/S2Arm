@@ -567,6 +567,9 @@ public final class S2ArmShellHostModel {
         }
         try? Data().write(to: gamesRoot.appendingPathComponent(id).appendingPathComponent(Self.playedMark))   // 点开过：蓝点消掉
         if let i = allGames.firstIndex(where: { $0.id == id }) { allGames[i].game.isNew = false }
+        // 加载页的游戏名跟封面一字不差（#502：原先加载页自己从 control.nacp 固定按简中优先取，法语 / 英语玩家看到中文）：
+        //   封面上正显示的名字（这台手机上改过的名 → 清单里的名）交给宿主，ios/loadpage_title.h 优先用它
+        setenv("S2A_GAME_NAME", g.game.title, 1)
         play(id)
     }
 

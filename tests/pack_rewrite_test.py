@@ -26,6 +26,7 @@ spec.loader.exec_module(rewriter)
 STAGE_INPUTS = (
     "pack/stage_rewrite.sh", "pack/stage_caps.sh", "pack/gen_caps.sh", "pack/roots.sh", "pack/stage_keyfiles.sh",
     "pack/stage_inputs/equiv.tsv", "pack/patch_ship.sh", "pack/rewriter.py", "pack/cpatch.py", "pack/pkg_srcs.py",
+    "pack/fn_match.py", "graphics/nvn/tools/lz4blk.py",
     "pack/resource_input_key.py", "pack/rewrite_degrade.py", "pack/orch/current.py",
     "runtime/rewriter/CMakeLists.txt", "runtime/rewriter/main.c", "runtime/rewriter/rewriter.c", "runtime/rewriter/rewriter.h",
     "runtime/rewriter/prepare_deps.py", "runtime/rewriter/nro_to_nso.py",

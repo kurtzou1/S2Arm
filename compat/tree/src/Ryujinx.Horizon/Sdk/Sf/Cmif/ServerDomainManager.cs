@@ -164,12 +164,18 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
                 {
                     EntryManager.Entry entry = null;
                     var forced = S2AHorizonHooks.SnapForceDomainIds;
-                    if (forced != null && forced.Count > 0 && (entry = _manager._entryManager.S2AAllocateEntry(forced.Dequeue())) == null)
+                    int want = 0;
+                    if (forced != null && forced.Count > 0 && (entry = _manager._entryManager.S2AAllocateEntry(want = forced.Dequeue())) == null)
                     {
                         S2AHorizonHooks.SnapForceDomainIdMiss++;
                     }
 
+                    bool missed = want != 0 && entry == null;
                     entry ??= _manager._entryManager.AllocateEntry();
+                    if (missed && entry != null)
+                    {   // 原号被占：点名原号与改分到的号（同 HLE IpcService.Add）
+                        Console.Error.WriteLine($"[s2a] 【黄】即时存档恢复：Horizon 域对象原号 {want} 已被占，改分到 {entry.Id}（游戏按原号发的请求会落到占着的那个对象上）");
+                    }
                     if (entry == null)
                     {
                         return SfResult.OutOfDomainEntries;

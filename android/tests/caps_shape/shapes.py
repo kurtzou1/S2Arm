@@ -41,6 +41,7 @@ EXT_FEATURES = (('shaderDrawParameters', 'shaderDrawParameters'), ('timelineSema
                 ('vertexAttributeInstanceRateZeroDivisor', 'vertexAttributeInstanceRateZeroDivisor'),
                 ('formatA4B4G4R4', 'formatA4B4G4R4'), ('formatA4R4G4B4', 'formatA4R4G4B4'),
                 ('depthClipControl', 'depthClipControl'), ('swapchainMaintenance1', 'swapchainMaintenance1'),
+                ('hostQueryReset', 'hostQueryReset'),
                 ('runtimeDescriptorArray', 'diRuntimeArray'), ('descriptorBindingPartiallyBound', 'diPartiallyBound'),
                 ('shaderSampledImageArrayNonUniformIndexing', 'diSampledNonUniform'),
                 ('shaderStorageImageArrayNonUniformIndexing', 'diStorageNonUniform'),
@@ -160,12 +161,19 @@ def oracle(name, got_path):
     want = json.load(open(os.path.join(DEVICES, stem + '.json')))
     got = json.load(open(got_path))
     # 档案里写 null（来源没读数）的格式，假驱动按「能力未知 = 按不支持」回答；device_caps.c 里由这些格式决定的格式族因此不比，点名列出
-    null_fmts = {k for k, v in load(name)['vulkan']['formats'].items() if v is None}
+    prof_v = load(name)['vulkan']
+    null_fmts = {k for k, v in prof_v['formats'].items() if v is None}
     unknown = {('formats', group) for group, fmts in caps_format_groups().items() if fmts & null_fmts}
     bad = []
     for sect in ('limits', 'features', 'formats', 'memory'):
         for k, v in want[sect].items():
             if sect == 'features' and k in ('geometryShader', 'geometryShaderOcclusionQuery'): continue   # capprobe 判定，不是能力形态
+            if sect == 'features' and k == 'tessellationShader':
+                # devices/{8e,9000}.json 采于 vk_device.c 启用 tessellationShader 之前；按物理档核对本构建启用值，不篡改历史真机采样档
+                want_tess = bool(prof_v['features'].get('tessellationShader')) and int(prof_v['properties']['limits'].get('maxTessellationPatchSize') or 0) > 0
+                g = got.get(sect, {}).get(k)
+                if g != want_tess: bad.append('%s.%s：物理档期望 %r / 本构建 %r' % (sect, k, want_tess, g))
+                continue
             if (sect, k) in unknown: continue
             g = got.get(sect, {}).get(k)
             if (abs(g - v) > 1e-6 if isinstance(v, float) else g != v): bad.append('%s.%s：真机 %r / 本构建 %r' % (sect, k, v, g))
@@ -204,7 +212,7 @@ def compare(name, got_path):
         if k not in g: bad.append('%s：档案 %r / 生成的没有这项' % (k, v)); continue   # null 也算：值不知道，但这项该现查到
         if v is None: skipped += 1; continue
         if g[k] != v: bad.append('%s：档案 %r / 生成 %r' % (k, v, g[k]))
-    extra = sorted(k for k in g if k not in w)
+    extra = sorted(k for k in g if k not in w and k != '.vulkan.features.hostQueryReset')
     bad += ['%s：生成的多出这项（%r），档案里没有' % (k, g[k]) for k in extra]
     if bad:
         print('FAIL: [%s] 生成的设备档案和 devprofiles/%s.json 不一致（%d 处）：\n  %s' % (name, name, len(bad), '\n  '.join(bad[:40])))
@@ -217,7 +225,7 @@ def compare(name, got_path):
 # 版本门槛变体（dev_facts.c：timeline / 描述符索引「列了扩展或 ≥ 1.2」、有效版本 = min(应用申请的 1.1, 设备)：不列扩展时 1.2 / 1.3 转正的都不用、4444 特性位只在列了扩展时记、低于 1.1 整条扩展查询链不挂）：
 #   由 adreno 档派生，去掉这三个已转正扩展再改设备版本；期望只由变体自己的版本号决定
 PROMOTED = ('VK_KHR_timeline_semaphore', 'VK_EXT_descriptor_indexing', 'VK_EXT_4444_formats')
-VARIANTS = {'v-api10': '1.0.0', 'v-api11-noext': '1.1.0', 'v-api12-noext': '1.2.0', 'v-api13-noext': '1.3.0', 'v-khr-alias': '1.3.0'}
+VARIANTS = {'v-api10': '1.0.0', 'v-api11-noext': '1.1.0', 'v-api12-noext': '1.2.0', 'v-api13-noext': '1.3.0', 'v-khr-alias': '1.3.0', 'v-hqr': '1.3.0'}
 # KHR 别名正控：只列 KHR 版的 index_type_uint8 / swapchain_maintenance1（同一个特性结构），照样挂、照样记，假驱动不判红
 KHR_ALIAS = {'VK_EXT_index_type_uint8': 'VK_KHR_index_type_uint8', 'VK_EXT_swapchain_maintenance1': 'VK_KHR_swapchain_maintenance1'}
 
@@ -234,6 +242,11 @@ def variants(out):
                 assert e in ex, '基准档没列 ' + e
                 ex[k] = ex.pop(e)
             p['vulkan']['extensions'] = dict(sorted(ex.items()))
+        elif name == 'v-hqr':
+            p['vulkan']['extensions']['VK_EXT_host_query_reset'] = 1
+            p['vulkan']['extensions'] = dict(sorted(p['vulkan']['extensions'].items()))
+            p['vulkan']['features']['hostQueryReset'] = 1
+            p['vulkan']['features'] = dict(sorted(p['vulkan']['features'].items()))
         else:
             for e in PROMOTED: p['vulkan']['extensions'].pop(e, None)
         p['factsDigest'] = lint.digest(p)
@@ -253,6 +266,14 @@ def check_variant(name, got_path):
         if bad:
             print('FAIL: [%s] KHR 别名正控：\n  %s' % (name, '\n  '.join(bad))); return 1
         print('PASS: [%s] 只列 KHR 版 index_type_uint8 / swapchain_maintenance1：照样挂结构、记特性，假驱动放行' % name); return 0
+    if name == 'v-hqr':
+        bad = []
+        if f.get('hostQueryReset') != 1:
+            bad.append('hostQueryReset：期望 1 / 生成 %r' % (f.get('hostQueryReset'),))
+        bad += ['生成的档案不合格：' + b for b in lint.check(got)]
+        if bad:
+            print('FAIL: [%s] host_query_reset 变体：\n  %s' % (name, '\n  '.join(bad))); return 1
+        print('PASS: [%s] VK_EXT_host_query_reset：特性位查询与建设备启用一致' % name); return 0
     # 直连实例只申请 1.1（S2A_VK_APP_API_VERSION）：有效版本 = min(1.1, 设备)。变体都不列这三个已转正扩展，
     #   1.2 / 1.3 转正的东西（timeline、描述符索引、A4B4G4R4 格式）一概不能用，不论设备版本多高；4444 特性结构没转正，更不能挂
     want = {'timelineSemaphore 记了': False, 'runtimeDescriptorArray 记了': False,

@@ -339,7 +339,7 @@ LJ=(); LJN=(); TKS=(); job() {   # job <编号> <命令> <上限>：先排令牌
   case $rc in 0) ;; 3) echo "143 0" > "$L/$1.rc"; return 0;;
     *) echo "75 0" > "$L/$1.rc"; echo "环境未就绪：拿不到门禁令牌（持锁进程起不来）" > "$L/$1.log"; return 0;; esac
   echo $((SECONDS - w0)) > "$L/$1.wait"; [ -n "$tk" ] && TKS+=("$tk")
-  ( : > "$L/$1.started"; s0=$SECONDS
+  ( printf '%s\n' "$2" > "$L/$1.started"; s0=$SECONDS   # .started 记本步命令（门禁被停时 term_dump 报「谁还在跑」用）
   export S2A_GATE_STEP=1   # 本进程树是某一步（不是门禁自己的规划 / 路由）：新门禁按它只采集步本身读的文件
   trap "_sigrc '$1' 143 TERM" TERM; trap "_sigrc '$1' 130 INT" INT; trap "_sigrc '$1' 129 HUP" HUP; trap 'tok_put "$tk"' EXIT
   # 末尾另起一行 exit $?：bash 5 对「-c 串的最后一条简单命令」直接 exec，组长会变成被测命令本身、命令行里没有 .pg 路径，
@@ -356,7 +356,14 @@ tok_putall() { local t; for t in ${TKS[@]+"${TKS[@]}"}; do tok_put "$t"; done; T
 # 门禁被停（列车收到 TERM 转来）时各步一起停：每步的 timeout 自成进程组、不随门禁退出，逐个 TERM 它（timeout 转给整组）；gate-host 那份停本机的 维护方工具
 # *.tp 只记「还在跑的」步的进程号：步一结束就删（11-11 合入运维线：本机每秒新建约 1250 个进程、进程号约 80 秒转一圈，
 #   原先跑完不删，门禁被 TERM / 收尸进程收尾时对早跑完那些步的进程号逐个发信号，号已分给别人——入队预检里 cores_lanes_test 被杀成 rc=143；tests/gate_stale_pid_test.sh）
-trap 'for f in "$L"/*.tp; do [ -f "$f" ] && kill -TERM "$(cat "$f")" 2> /dev/null; done; [ -n "${TW:-}" ] && kill -TERM "$TW" 2> /dev/null; tok_putall; exit 143' TERM
+# 门禁被停时把仍在跑的步的日志尾打出来再退（11-27 present_settings：门禁到点整份 TERM，5 次红日志只有门禁进度行，测试自己被 TERM 时写的
+#   【卡】摘要留在 $L 的步日志里随临时目录删掉）。先 TERM 各步，等它们写完收尾（≤ GATE_TERM_DUMP_S 秒，缺省 2，步都退了就不等满），
+#   再逐步打「✗ 门禁被停时仍在跑：<命令>」+ 日志末 GATE_TERM_DUMP_N（缺省 30）行；红摘要按「✗」收得到。外层要给门禁留出这几秒（gate2 执行器宽限）
+term_dump() { local f id n=0 w=0; for id in "$@"; do n=$((n + 1)); done; [ $n -gt 0 ] || return 0
+  while [ $w -lt $(( ${GATE_TERM_DUMP_S:-2} * 10 )) ]; do n=0; for id in "$@"; do [ -f "$id.rc" ] || n=$((n + 1)); done; [ $n = 0 ] && break; sleep 0.1; w=$((w + 1)); done
+  for id in "$@"; do echo "✗ 门禁被停时仍在跑：$(head -c 200 "$id.started" 2> /dev/null | head -1)"
+    grep -av '^[[:space:]]*$' "$id.log" 2> /dev/null | tail -"${GATE_TERM_DUMP_N:-30}" | cut -c1-240 | sed 's/^/    ┆ /'; done; }
+trap 'RUNI=(); for f in "$L"/*.tp; do [ -f "$f" ] && { RUNI+=("${f%.tp}"); kill -TERM "$(cat "$f")" 2> /dev/null; }; done; [ -n "${TW:-}" ] && kill -TERM "$TW" 2> /dev/null; tok_putall; term_dump ${RUNI[@]+"${RUNI[@]}"}; exit 143' TERM
 HOST=${GATE_HOST:-local}; [ -n "$PLANM" ] && HOST=local; WHY=
 # GATE_HOST=spare-host（10-25 列车提速：远端门禁只有 gate-host 一台，列车门禁 + 各线自检挤一个队）：与 gate-host 同一套远端流程，只是 维护方工具 带 --host spare-host、Spare-host 8 核只开 1 个槽；
 #   下文 HOST=gate-host 表示「远端模式」，RHN 是实际机器名（日志与结论行用）

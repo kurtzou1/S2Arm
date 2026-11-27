@@ -74,7 +74,7 @@ void s2a_guest_freeze(int on); void guest_clock_freeze_for(int reason, int on); 
 // 失焦（Cmd-Tab、点到别的窗口、打开键位窗口）：报给服务层转成游戏的焦点消息；游戏要求「失焦就暂停」（SetOutOfFocusSuspendingEnabled）时
 //   冻结客机线程与游戏时钟（时钟按原因 3 冻），回焦点再放开（缺口扫描族 1 / 审计 P2-64：原先 Mac 失焦游戏照跑）
 static BOOL focus_frozen;
-// 玩家可关（#989，启动设置「切到别的窗口时暂停」关 → S2A_FOCUS_PAUSE=0）：Mac 上切出去看攻略 / 第二块屏是常事，关掉后失焦只报焦点消息、不冻结
+// 玩家可关（#989，启动设置「切到别的窗口时暂停」关 → S2A_FOCUS_PAUSE=0）：Mac 上切出去看攻略 / 第二块屏是常事，关掉后普通失焦不冻结也不给游戏报 OutOfFocus（避免主动监听 FocusStateChanged 的游戏自停）
 static int g_focus_pause_off = -1;   // -1 = 还没读环境变量（单测直接设 0 / 1）
 static BOOL focus_pause_off(void) { if (g_focus_pause_off < 0) { const char *e = getenv("S2A_FOCUS_PAUSE"); g_focus_pause_off = e && !strcmp(e, "0"); } return g_focus_pause_off; }
 static BOOL focused;
@@ -83,10 +83,11 @@ static BOOL focused;
 static BOOL pads_live(void) { return focused || focus_pause_off(); }
 // 关窗 / 收尾也发布「没焦点」，但不冻结（may_freeze = NO）：收尾要等客机线程退出
 static void display_focus_publish_ex(BOOL active, BOOL may_freeze) {
-    s2a_mac_ns2_focus(active || (may_freeze && focus_pause_off()));   // NS2 手柄同手柄这一路（pads_live）；关窗 / 收尾照旧断开
+    BOOL keep_active = active || (may_freeze && focus_pause_off());
+    s2a_mac_ns2_focus(keep_active);   // NS2 手柄同手柄这一路（pads_live）；关窗 / 收尾照旧断开
     if (active && !atomic_load(&display_focused)) atomic_store(&display_focus_since, now_ns());
     atomic_store(&display_focused, active);
-    s2a_host_focus_set(active);
+    s2a_host_focus_set(keep_active);
     if (!active && may_freeze && !focus_frozen && !focus_pause_off() && s2a_focus_suspend()) { focus_frozen = YES; guest_clock_freeze_for(3, 1); s2a_guest_freeze(1); fprintf(stderr, "[s2a] Mac 失焦：游戏要求失焦暂停，冻结客机\n"); }
     else if ((active || !may_freeze) && focus_frozen) { focus_frozen = NO; s2a_guest_freeze(0); guest_clock_freeze_for(3, 0); fprintf(stderr, "[s2a] Mac 回到焦点 / 收尾：放开客机\n"); }
 }
@@ -1140,15 +1141,14 @@ static uint64_t betop_pro_registry_id(GCController *controller) {
     if (physical) objc_setAssociatedObject(controller, &registryCacheKey, @[entry, @(physical)], OBJC_ASSOCIATION_RETAIN);
     return physical ?: service;
 }
-static void sample_left_stick(GCController *controller, GCControllerDirectionPad *left, float *x, float *y) {
-    int16_t axes[2];
-    if (s2a_mac_hid_betop_left(betop_pro_registry_id(controller), axes)) {
-        *x = axes[0] / 32767.0f;
-        *y = axes[1] / 32767.0f;
-        return;
-    }
-    *x = left.xAxis.value;
-    *y = left.yAxis.value;
+static void sample_sticks(GCController *controller, GCControllerDirectionPad *left, GCControllerDirectionPad *right,
+                          float *lx, float *ly, float *rx, float *ry) {
+    *lx = left.xAxis.value; *ly = left.yAxis.value;
+    *rx = right.xAxis.value; *ry = right.yAxis.value;
+    int16_t axes[4];
+    int count = s2a_mac_hid_betop_sticks(betop_pro_registry_id(controller), axes);
+    if (count >= 2) { *lx = axes[0] / 32767.0f; *ly = axes[1] / 32767.0f; }
+    if (count == 4) { *rx = axes[2] / 32767.0f; *ry = axes[3] / 32767.0f; }
 }
 static void sample_pad_state(GCExtendedGamepad *pad, NSDictionary *cfg, uint32_t *out_buttons, int32_t sticks[4]) {
     // GameController 通常按物理方位上报（buttonA 在南侧）；Switch Pro 手柄在 macOS 上按键面字母上报（A 在东侧、X 在北侧）
@@ -1166,10 +1166,9 @@ static void sample_pad_state(GCExtendedGamepad *pad, NSDictionary *cfg, uint32_t
     if (pad.rightThumbstickButton) inputs[@"rightStick"] = pad.rightThumbstickButton;
     NSMutableDictionary *all = [NSMutableDictionary new];
     for (NSString *code in inputs) all[code] = @([inputs[code] isPressed]);
-    float lx, ly;
-    sample_left_stick(pad.controller, pad.leftThumbstick, &lx, &ly);
-    map_pad_inputs(cfg, all, @{@"leftX": @(lx), @"leftY": @(ly),
-                          @"rightX": @(pad.rightThumbstick.xAxis.value), @"rightY": @(pad.rightThumbstick.yAxis.value)}, out_buttons, sticks);
+    float lx, ly, rx, ry;
+    sample_sticks(pad.controller, pad.leftThumbstick, pad.rightThumbstick, &lx, &ly, &rx, &ry);
+    map_pad_inputs(cfg, all, @{@"leftX": @(lx), @"leftY": @(ly), @"rightX": @(rx), @"rightY": @(ry)}, out_buttons, sticks);
 }
 // 只有通用物理描述的手柄：按标准键名读，位序与扩展手柄同一套（s2a_pad_abxy_order，类型按 productCategory 判）
 static void sample_profile_state(GCController *c, NSDictionary *cfg, uint32_t *out_buttons, int32_t sticks[4]) {
@@ -1186,9 +1185,9 @@ static void sample_profile_state(GCController *c, NSDictionary *cfg, uint32_t *o
     for (NSString *code in named) all[code] = @(btn(named[code]).isPressed);
     GCControllerDirectionPad *dpad = p.dpads[GCInputDirectionPad], *ls = p.dpads[GCInputLeftThumbstick], *rs = p.dpads[GCInputRightThumbstick];
     all[@"dpadLeft"] = @(dpad.left.isPressed); all[@"dpadRight"] = @(dpad.right.isPressed); all[@"dpadUp"] = @(dpad.up.isPressed); all[@"dpadDown"] = @(dpad.down.isPressed);
-    float lx, ly;
-    sample_left_stick(c, ls, &lx, &ly);
-    map_pad_inputs(cfg, all, @{@"leftX": @(lx), @"leftY": @(ly), @"rightX": @(rs.xAxis.value), @"rightY": @(rs.yAxis.value)}, out_buttons, sticks);
+    float lx, ly, rx, ry;
+    sample_sticks(c, ls, rs, &lx, &ly, &rx, &ry);
+    map_pad_inputs(cfg, all, @{@"leftX": @(lx), @"leftY": @(ly), @"rightX": @(rx), @"rightY": @(ry)}, out_buttons, sticks);
 }
 // 槽位计划 s2a_slot_plan 在 runtime/src/pad.c（iOS ios/controller.m 共用同一份规则）
 // R5：原始键态 → HID 键盘区（s2a_kb_update，键码表 mac_key_hid）。位图是 (keys, modifiers, caps_locked, muted) 的

@@ -180,6 +180,36 @@ static int hybrid_prefetch(const pso_key *k, NvShader *vs, NvShader *fs) {   // 
     }
     return -1;
 }
+// 首装放行之后的后台预热先建基础（11-27 维护者：「没编好的先用基础版本顶上」）：同 hybrid_prefetch 先查随包，查不中就在调用它的预热工人上现建
+//   （Metal 4 编译器，同 hybrid_get 的后台建法），放进 g_pbase。一对一种采样 / 拓扑类一条，比精确管线条数少得多：先把清单剩下的对都建上基础，
+//   之后首遇的绘制大多直接按本笔特化先画、精确管线照旧后台编，不再跳过 / 等编译。随包没有基础的款（手机直导、只在云端种子里的对）同样盖住。
+//   → 1 有了（随包或现建）、0 建不出、-1 没做（已有 / 在建 / 建过 / 不走混合管线 / 额度到线）
+static _Atomic uint64_t g_hy_pb_pkg, g_hy_pb_built, g_hy_pb_fail, g_hy_pb_ns;   // 先建基础：随包取到 / 现建 / 建不出 / 现建耗时合计
+static int hybrid_prebuild(const pso_key *k, NvShader *vs, NvShader *fs) {
+    if (!vs || !fs || !vs->has_pull || k->fc || k->fsfn || !hybrid_on()) return -1;
+    if (pb_prefetch_full()) return -1;   // 管线额度到预热线：不再先建（不占额度），首遇时照旧在后台建
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        if (!hybrid_comp()) return -1;
+        MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
+        if (!hybrid_fits(d, vs, fs)) return -1;
+        pbase_key bk = pbase_key_of(d, vs, fs);
+        NSData *tk = [NSData dataWithBytes:&bk length:sizeof bk];
+        os_unfair_lock_lock(&g_pbase_lock);
+        int skip = hm_get_id(&g_pbase, &bk) != nil || [g_hy_pre_tried containsObject:tk];   // 已有、hybrid_get 在后台建（NSNull 占位）、查 / 建过
+        if (!skip) { if (!g_hy_pre_tried) g_hy_pre_tried = [NSMutableSet set]; [g_hy_pre_tried addObject:tk]; hm_put_id(&g_pbase, &bk, NSNull.null); }   // 占位：首遇不重复踢后台建
+        os_unfair_lock_unlock(&g_pbase_lock);
+        if (skip) return -1;
+        id bd = pull_desc4(d, vs, fs, 1); NSError *e = nil; uint64_t t0 = bp_now();
+        id<MTLRenderPipelineState> ps = hybrid_pkg_base(bd, vs, fs); int pkg = ps != nil;
+        if (!ps) ps = [g_hy_comp newRenderPipelineStateWithDescriptor:bd compilerTaskOptions:nil error:&e];
+        if (!pkg) atomic_fetch_add(&g_hy_pb_ns, bp_now() - t0);
+        if (!ps) { uint64_t n = atomic_fetch_add(&g_hy_pb_fail, 1) + 1; if (n <= 8) MLOG("【红】 hybrid pipelines: building the pulling base ahead for vertex %s fragment %s failed: %s (that pair's first uses wait)", vs->key, fs->key, e.localizedDescription.UTF8String); return 0; }   // 占位留着：同 hybrid_get 建不出的那对
+        atomic_fetch_add(pkg ? &g_hy_pb_pkg : &g_hy_pb_built, 1);
+        os_unfair_lock_lock(&g_pbase_lock); pb_base_put_locked(&bk, ps); os_unfair_lock_unlock(&g_pbase_lock);
+        return 1;
+    }
+    return -1;
+}
 // 拉取基础管线的后台队列（串行、utility）：查随包归档与现建都在这里；单测 dispatch_sync 一个空块等它做完
 static dispatch_queue_t hybrid_q(void) {
     static dispatch_queue_t q; static dispatch_once_t once;

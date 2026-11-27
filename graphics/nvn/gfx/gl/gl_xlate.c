@@ -25,7 +25,7 @@
 #include <string.h>
 #include "gl_glsl_es.c"   // 改写层（离线链同一份源码，见文件头）
 
-#define S2A_GL_XLATE_REV 2   // 翻译规则改了加 1：运行时缓存（<DM_MSL_FALLBACK>/gl/*.row）按口径串作废重翻（2：MSL 3.1，审计 #1534 P1-66）
+#define S2A_GL_XLATE_REV 3   // 翻译规则改了加 1：运行时缓存（<DM_MSL_FALLBACK>/gl/*.row）按口径串作废重翻（2：MSL 3.1，审计 #1534 P1-66；3：文件作用域多余分号剥掉，D-RWJY）
 #define XSTR(x) STR(x)
 #define STR(x) #x
 

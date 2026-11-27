@@ -11,7 +11,7 @@ struct cs_shape {
     // 扩展特性结构里的位（shapes.py EXT_FEATURES；di* = 描述符索引支持位）
     int shaderDrawParameters, timelineSemaphore, indexTypeUint8, customBorderColors, customBorderColorWithoutFormat,
         vertexAttributeInstanceRateDivisor, vertexAttributeInstanceRateZeroDivisor,
-        formatA4B4G4R4, formatA4R4G4B4, depthClipControl, swapchainMaintenance1,
+        formatA4B4G4R4, formatA4R4G4B4, depthClipControl, swapchainMaintenance1, hostQueryReset,
         diRuntimeArray, diPartiallyBound, diSampledNonUniform, diStorageNonUniform, diVariableCount, diSampledUpdateAfterBind;
     int driver_id;
     const char *driver_name;

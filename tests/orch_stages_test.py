@@ -317,7 +317,7 @@ class StageTest(unittest.TestCase):
         original = stages.REPO
         mirror = self.home / 'key-repo'
         listed = subprocess.check_output(['git', '-C', str(original), 'ls-files', '-z', '--',
-            'pack/roots.sh', 'pack/stage_rewrite.sh', 'pack/stage_keyfiles.sh', 'pack/rewriter.py',
+            'pack/roots.sh', 'pack/stage_rewrite.sh', 'pack/stage_keyfiles.sh', 'pack/rewriter.py', 'pack/fn_match.py', 'graphics/nvn/tools/lz4blk.py',
             'pack/cpatch.py', 'runtime/rewriter', 'graphics/widen/scan', 'tools/addr_need.py',
             'tools/stage_deps.py', 'tools/stage_deps_hook', 'graphics/nvn/tools/romfs_list.py',
             'tools/nso_plain.py', 'pack/pkg_srcs.py', 'tools/pool_workers.py', 'tools/progress.py'])   # 11-06：10b9156f3 起 addr_need.py 顶层 import nso_plain、stages.selected_tables 加载 pack/pkg_srcs.py，镜像少这两个 8 例红；#1332 起 wide_scan / romfs_list / stages 经 tools/pool_workers.py 取核数与进程池路数

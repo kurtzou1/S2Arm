@@ -8,6 +8,8 @@
 #import "s2a_l10n.h"
 #import "bundle_icon.h"
 #include "s2a_loadprog.h"
+#include "native.h"   // LOG（测试开关 S2A_LOADPAGE_SKIP 的日志行）
+#import "loadpage_title.h"   // 加载页游戏名的取法（#502）
 uint64_t now_ns(void);
 
 // 剩余时间小字：档位同 runtime/src/loadprog.c s2a_load_eta_text（<0 估算中 / <5 秒 / 逐秒 / 分秒 / 整分），文字按 App 语言取字符串表（#316），中文值与那份 C 原句逐字相同
@@ -25,14 +27,12 @@ static NSString *game_data_dir(void) {
     if (gd && *gd) return @(gd);
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/资源包"];
 }
-// NACP 标题：16 种语言各 0x300 字节（名称 0x200 + 发行商 0x100）；简体中文 14、繁体中文 13、日文 2、美式英文 0，先到先得，都没有取第一个非空
+// 游戏名：壳交来的封面名（S2A_GAME_NAME）优先，没有按系统语言取 control.nacp（ios/loadpage_title.h），都没有用 App 显示名
 static NSString *nacp_title(void) {
+    const char *shown = getenv("S2A_GAME_NAME");
     NSData *d = [NSData dataWithContentsOfFile:[game_data_dir() stringByAppendingPathComponent:@"ctl/control.nacp"]];
-    if (d.length >= 0x3000) {
-        const char *p = d.bytes; int order[] = {14, 13, 2, 0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15};
-        for (int i = 0; i < 16; i++) { const char *s = p + order[i] * 0x300; size_t n = strnlen(s, 0x200);
-            if (n) { NSString *t = [[NSString alloc] initWithBytes:s length:n encoding:NSUTF8StringEncoding]; if (t.length) return t; } }
-    }
+    NSString *t = s2a_loadpage_title(shown ? @(shown) : nil, d, NSLocale.preferredLanguages);
+    if (t) return t;
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: @"";
 }
 static UIImage *game_icon(void) {
@@ -55,7 +55,7 @@ UIImage *s2a_game_icon(void) { return game_icon(); }   // 提示 / 出错页（n
 @property (nonatomic) UIButton *skip;
 @property (nonatomic) UIActivityIndicatorView *spinner;
 @property (nonatomic) NSTimer *timer;
-@property (nonatomic) int firstRun, lastStage, lastLoading;
+@property (nonatomic) int firstRun, lastStage;
 @end
 
 static UILabel *label(CGFloat size, UIFontWeight w, UIColor *c) {
@@ -66,7 +66,7 @@ static UILabel *label(CGFloat size, UIFontWeight w, UIColor *c) {
 @implementation S2ALoadPage
 - (instancetype)initWithFrame:(CGRect)f firstRun:(int)first {
     if (!(self = [super initWithFrame:f])) return nil;
-    _firstRun = first; _lastStage = -1; _lastLoading = -1;
+    _firstRun = first; _lastStage = -1;
     self.backgroundColor = UIColor.blackColor; self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.layer.zPosition = 2000;   // 压过虚拟手柄（1000）与直连出图层（11-02 怪猎：出图层原先压在加载页上，冷首启只见黑屏与手柄），低于开发浮层（10000）
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -154,12 +154,6 @@ static UILabel *label(CGFloat size, UIFontWeight w, UIColor *c) {
     if (v.stage == S2A_LOAD_DONE) { [self.timer invalidate]; self.timer = nil;
         [UIView animateWithDuration:0.35 animations:^{ self.alpha = 0; } completion:^(BOOL f) { (void)f; [self removeFromSuperview]; }]; return; }
     if (!self.firstRun) return;
-    // 「优化」与「载入中」（loadprog.c：之后的启动从管线归档载入为主时是「载入中」，不说「优化」；现编够了会转回「优化」）
-    if (v.loading != self.lastLoading) { self.lastLoading = v.loading; int L = v.loading;
-        self.subtitle.text = (L ? S2AL(@"loadpage.subtitle.load") : S2AL(@"loadpage.subtitle"));
-        self.stepLabels[1].text = (L ? S2AL(@"loadpage.step.load") : S2AL(@"loadpage.step.optimize"));
-        self.footnote.text = (L ? S2AL(@"loadpage.footnote.load") : S2AL(@"loadpage.footnote"));
-        UIButtonConfiguration *c = self.skip.configuration; c.title = (L ? S2AL(@"loadpage.skip.load") : S2AL(@"loadpage.skip")); self.skip.configuration = c; }
     [self.bar setProgress:(float)v.frac animated:YES];
     for (int i = 0; i < 3; i++) {
         int done = v.stage > i, cur = v.stage == i;
@@ -171,10 +165,17 @@ static UILabel *label(CGFloat size, UIFontWeight w, UIColor *c) {
     NSNumberFormatter *nf = [NSNumberFormatter new]; nf.numberStyle = NSNumberFormatterDecimalStyle;
     if (v.stage == S2A_LOAD_DATA) { self.detail.text = S2AL(@"loadpage.data"); self.eta.text = @""; }
     else if (v.stage == S2A_LOAD_OPTIMIZE) {
-        self.detail.text = [NSString stringWithFormat:(v.loading ? S2AL(@"loadpage.loaded") : S2AL(@"loadpage.optimized")), [nf stringFromNumber:@(v.done)], [nf stringFromNumber:@(v.total)]];
+        self.detail.text = [NSString stringWithFormat:S2AL(@"loadpage.optimized"), [nf stringFromNumber:@(v.done)], [nf stringFromNumber:@(v.total)]];
         NSString *b = eta_text(v.eta_s); self.eta.text = v.eta_s >= 0 ? [NSString stringWithFormat:S2AL(@"loadpage.remaining"), b] : b;
-    } else { self.detail.text = v.go_reason == S2A_LOAD_GO_DONE ? (v.loading ? S2AL(@"loadpage.go.done.load") : S2AL(@"loadpage.go.done")) : (v.loading ? S2AL(@"loadpage.go.early.load") : S2AL(@"loadpage.go.early")); self.eta.text = @""; }
-    if (v.can_skip && self.skip.hidden) { self.skip.hidden = NO; [UIView animateWithDuration:0.4 animations:^{ self.skip.alpha = 1; }]; }
+    } else { self.detail.text = v.go_reason == S2A_LOAD_GO_DONE ? S2AL(@"loadpage.go.done") : S2AL(@"loadpage.go.early"); self.eta.text = @""; }
+    if (v.can_skip && self.skip.hidden) { self.skip.hidden = NO; [UIView animateWithDuration:0.4 animations:^{ self.skip.alpha = 1; }];
+        // 测试开关 S2A_LOADPAGE_SKIP=1（发版真机冒烟按 60 秒判首帧，首装云端种子大的款首帧前要编几分钟，同 app.m S2A_LIBRARY_AUTOPLAY）：按钮淡入后 1 秒替玩家点一次
+        //   「先开始玩」，走玩家点按钮的同一个动作（s2a_load_user_skip）；只点一次。不设开关行为不变
+        const char *e = getenv("S2A_LOADPAGE_SKIP"); static int clicked;
+        if (e && !strcmp(e, "1") && !clicked) { clicked = 1; UIButton *b = self.skip;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (b.hidden) return;   // 1 秒内已不能点（编完 / 已放行）：不点
+                LOG("加载页：测试开关 S2A_LOADPAGE_SKIP，替玩家点先开始玩"); [b sendActionsForControlEvents:UIControlEventPrimaryActionTriggered]; }); } }
     else if (!v.can_skip && !self.skip.hidden) { [UIView animateWithDuration:0.2 animations:^{ self.skip.alpha = 0; } completion:^(BOOL f) { (void)f; self.skip.hidden = YES; }]; }
 }
 @end

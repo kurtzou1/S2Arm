@@ -82,6 +82,8 @@ namespace S2A.DirectCompiler
             bool linkMapDiag = JsonStrict.OptionalBool(root, "linkMapDiag", "request", false);
             if (linkMapDiag && !linked)
                 throw new DirectCompileException("UNSUPPORTED_PROGRAM", "linkMapDiag requires requiresLinkedVaryingInterface");
+            if (program.StageOf("tcs") != null && !profile.TessellationShader)
+                throw new DirectCompileException("UNSUPPORTED_PROGRAM", "tessellationShader is not enabled in the profile");
             if (program.StageOf("gs") is DirectStage gs)
             {
                 if (!profile.Caps.SupportsGeometryShader)
@@ -139,8 +141,8 @@ namespace S2A.DirectCompiler
                 }
                 else
                 {
-                    // NVN 槽序 VS/FS/GS 与执行序不同；解码后按实际管线顺序显式串联。
-                    var ordered = new[] { (name: "vs", index: 1), (name: "gs", index: 4), (name: "fs", index: 5) };
+                    // NVN 槽序与执行序不同；解码后按实际管线顺序串联。
+                    var ordered = new[] { (name: "vs", index: 1), (name: "tcs", index: 2), (name: "tes", index: 3), (name: "gs", index: 4), (name: "fs", index: 5) };
                     var contexts = new List<(DirectStage stage, DirectGpuAccessor accessor, TranslatorContext context)>();
                     foreach (var item in ordered)
                     {
@@ -152,9 +154,10 @@ namespace S2A.DirectCompiler
                     }
                     for (int i = contexts.Count - 2; i >= 0; i--)
                     {
-                        // Only a directly paired VS->FS uses the actual fragment inputs.
-                        // Keep VS->GS and standalone-stage translation policy unchanged.
+                        // 直接接片元的细分求值阶段使用实际的片元输入位置。
+                        // 其余细分接口沿用 Ryujinx 的阶段链接（含逐控制点与逐补丁属性）。
                         if (contexts[i].stage.Stage == "gs" ||
+                            (contexts[i].stage.Stage == "tes" && contexts[i + 1].stage.Stage == "fs") ||
                             (linked && contexts[i].stage.Stage == "vs" && contexts[i + 1].stage.Stage == "fs"))
                             contexts[i].context.S2ASetNextStageActual(contexts[i + 1].context);
                         else contexts[i].context.SetNextStage(contexts[i + 1].context);

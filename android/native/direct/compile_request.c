@@ -403,24 +403,21 @@ int s2a_compile_request_build(const struct s2a_compile_request_input *in,
     if (!in->profile_json || in->profile_bytes < 2 || in->profile_json[0] != '{' ||
         in->profile_json[in->profile_bytes - 1] != '}') return -1;
     if (!in->request_id || !*in->request_id || !in->translator_closure) return -1;
-    if (in->stage_count < 1 || in->stage_count > 3) return -1;
-    int v2 = in->stage_count == 3;
-    if (v2 && (!in->stages[0].stage || strcmp(in->stages[0].stage, "vs") ||
-               !in->stages[1].stage || strcmp(in->stages[1].stage, "fs") ||
-               !in->stages[2].stage || strcmp(in->stages[2].stage, "gs"))) return -1;
+    if (in->stage_count < 1 || in->stage_count > 5) return -1;
+    static const char *const stage_names[] = {"vs", "fs", "gs", "tcs", "tes"};
+    uint32_t stage_mask = 0;
+    int slot = 0;
     for (int i = 0; i < in->stage_count; i++) {
         const struct s2a_compile_stage_src *s = &in->stages[i];
         if (!s->stage || !s->code || !s->code_bytes || !s->control || !s->control_bytes) return -1;
+        while (slot < 5 && strcmp(s->stage, stage_names[slot])) slot++;
+        if (slot == 5) return -1;
+        stage_mask |= 1u << slot++;
     }
+    const int span = s2a_direct_graphics_stage_span(stage_mask);
+    if (!span) return -1;
+    const int v2 = span >= 3;
     if (in->requires_linked_varying_interface != 0 && in->requires_linked_varying_interface != 1) return -1;
-    uint32_t stage_mask = 0;
-    for (int i = 0; i < in->stage_count; ++i) {
-        const char *stage = in->stages[i].stage;
-        uint32_t bit = !strcmp(stage, "vs") ? 1u : !strcmp(stage, "fs") ? 2u :
-            !strcmp(stage, "gs") ? 4u : !strcmp(stage, "cs") ? 32u : 0u;
-        if (!bit || (stage_mask & bit)) return -1;
-        stage_mask |= bit;
-    }
     const int linked = s2a_direct_requires_linked_varying_interface(stage_mask);
     // Preserve the wire protocol stage order independently of the shared policy.
     if (linked && (strcmp(in->stages[0].stage, "vs") || strcmp(in->stages[1].stage, "fs"))) return -1;
@@ -469,9 +466,11 @@ int s2a_compile_request_build(const struct s2a_compile_request_input *in,
     sb_json_string(&b, "program");
     sb_puts(&b, ":{\"kind\":\"graphics\",\"stages\":[");
 
-    for (int i = 0; i < in->stage_count; i++) {
-        const struct s2a_compile_stage_src *s = &in->stages[i];
+    const int slots = v2 ? 5 : span;
+    for (int i = 0, src = 0; i < slots; i++) {
         if (i) sb_puts(&b, ",");
+        if (!(stage_mask & (1u << i))) { sb_puts(&b, "null"); continue; }
+        const struct s2a_compile_stage_src *s = &in->stages[src++];
         sb_puts(&b, "{");
         sb_key_string(&b, "stage", s->stage);
         sb_puts(&b, ",");
@@ -487,7 +486,6 @@ int s2a_compile_request_build(const struct s2a_compile_request_input *in,
         sb_key_u32(&b, "constantBufferUse", s->constant_buffer_use);
         sb_puts(&b, "}");
     }
-    if (v2) sb_puts(&b, ",null,null");
     sb_puts(&b, "],");
 
     // graphicsState：只写有真实来源的字段；缺失的组逐项记进 gaps（编译器会按同一契约报 MISSING_FIELD）。
@@ -513,7 +511,7 @@ int s2a_compile_request_build(const struct s2a_compile_request_input *in,
         GS_STR("tessSpacing", 1, spacing[(tm >> 4) & 3]);
     } else {
         (void)append_gap(gaps, gaps_size, "graphicsState.tessCw/tessPatchType/tessSpacing",
-                         "控制段 +0x744 的 TessMode");
+                         "域着色器控制段的曲面模式");
     }
     if (in->gfx.has_alpha_to_coverage) {
         GS_BOOL("alphaToCoverageEnable", 1, in->gfx.alpha_to_coverage_enable);

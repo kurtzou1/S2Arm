@@ -43,9 +43,14 @@ VT="${S2A_WIDEN_DIR:-$R/graphics/widen/tables}/verified.tsv"; VR=$([ -f "$VT" ] 
 #   11-18：我方帧率表（改指令 c 行打进游戏代码，如去掉游戏自己的 30 帧下限）只在内部对照口径 S2A_CAPS_OWN=1 才进包。11-13 撤我方 60 帧后运行时只把槽写成关值，
 #   但 c 行照样打进程序：玩家 60 帧关着游戏也能跑到 60，按 30 帧口径写死的时钟（布料 / 头发）快一倍（#1607 过场加速）。不进包 = 程序与原版一致、社区帧率补丁照常收
 #   只有 build / speed 行的表（实时步长表，至少一行 speed）不放开帧率、不改指令，只让宿主每次出图把实测帧时写进键页槽：缺省口径也进包（同 pack/orch/stages.py step_only_table）
-FT="$R/runtime/fps/${BID:0:16}.tsv"; { [ -f "${FT}" ] && { [ "${S2A_CAPS_OWN:-}" = 1 ] || awk '{ sub(/#.*/, "") } NF { if ($1 == "speed") s = 1; else if ($1 != "build") b = 1 } END { exit !(s && !b) }' "${FT}"; }; } || FT=
+# 逐款表（pack/fn_match.py tables，同 pack/orch/stages.py）：本构建号的精确表优先；没有就按 runtime/{fix,fps}/match/<程序号>.tsv 的函数指纹
+#   在这一版 main 里定位、展开成精确行（写进 ${AD}，退出即清）。下面 FT / XT 的取舍规则不变
+FMO=$("$PY" "$R/pack/fn_match.py" tables "$PID" "$CUR/exefs/main" "$AD/fn_match") || { echo "【红】$G 逐款表：pack/fn_match.py 失败"; exit 1; }
+FT=$(awk -F'\t' '$1 == "fps" { print $2 }' <<< "$FMO"); [ "$FT" = - ] && FT=
+XT=$(awk -F'\t' '$1 == "fix" { print $2 }' <<< "$FMO"); [ "$XT" = - ] && XT=
+{ [ -n "${FT}" ] && { [ "${S2A_CAPS_OWN:-}" = 1 ] || awk '{ sub(/#.*/, "") } NF { if ($1 == "speed") s = 1; else if ($1 != "build") b = 1 } END { exit !(s && !b) }' "${FT}"; }; } || FT=
 # 游戏缺陷修补表（11-16，runtime/fix/README.md）：仓库 runtime/fix/<main 构建号前 16 位>.tsv 有就交改写器（S2A_FIX_TSV，fix_rows），按内容进键；不进产物根
-XT="$R/runtime/fix/${BID:0:16}.tsv"; [ -f "${XT}" ] || XT=
+#   （XT 已在上面由 pack/fn_match.py tables 给出）
 # 社区画面补丁（pack/cpatch.py）：匹配上的补丁编成「双路 + 槽」进包，开关在运行时。
 #   11-12 维护者拍板：出包时自动对接公开库（pack/jobs/patches.py 按真构建号查索引、取文件，交 S2A_CPATCH_DIRS），查到的全部进包、缺省关、玩家在启动设置里开；
 #   10-30「公开发布的包不带上游补丁字节」作废。我方不托管补丁字节，只在玩家本机按需下载

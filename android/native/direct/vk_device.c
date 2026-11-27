@@ -317,7 +317,9 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     // 只链 vk_device.c 的宿主探针照旧能链接（NULL→关 GS，与无判定文件同向安全）。
     enabled_features.geometryShader =
         s2a_vk_gs_path && s2a_vk_gs_path(features.geometryShader, NULL) ? VK_TRUE : VK_FALSE;
-    enabled_features.tessellationShader = VK_FALSE;
+    enabled_features.tessellationShader =
+        (features.tessellationShader && out->properties.limits.maxTessellationPatchSize > 0)
+            ? VK_TRUE : VK_FALSE;
     // C2 生成的 SPIR-V 会声明这些能力；只在实际支持时启用，不支持则留给 shader 校验显式失败。
     enabled_features.shaderImageGatherExtended = features.shaderImageGatherExtended;
     enabled_features.shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats;
@@ -414,6 +416,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     VkPhysicalDeviceDepthClipControlFeaturesEXT dcc = {0};
     dcc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
     const int has_dcc = has_device_extension(out->physical, "VK_EXT_depth_clip_control");
+    // VK_EXT_host_query_reset（三机 8E/9400/9000 与 lavapipe 全支持）：主机侧直接重置查询池，
+    // 省去命令缓冲内 vkCmdResetQueryPool 及 report_ts 的独立前置缓冲 init_cb + ALL_COMMANDS 全管线屏障。
+    VkPhysicalDeviceHostQueryResetFeaturesEXT hqr = {0};
+    hqr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+    const int has_hqr = has_device_extension(out->physical, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME);
     // 设备按 Vulkan 1.1 创建：扩展的 properties2 / maintenance3 依赖由 1.1 满足。
     // 扩展不可枚举时保持未知；仅在列出且物理设备版本满足依赖时查询。
     char device_fault_why[96];
@@ -443,6 +450,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         if (has_u8) { *tail = &index_u8; tail = &index_u8.pNext; *tail = NULL; }
         if (has_4444) { *tail = &f4444; tail = &f4444.pNext; *tail = NULL; }
         if (has_dcc) { *tail = &dcc; tail = &dcc.pNext; *tail = NULL; }
+        if (has_hqr) { *tail = &hqr; tail = &hqr.pNext; *tail = NULL; }
         query.pNext = &draw_parameters;
         if (out->has_swapchain_maintenance1) {
             maintenance.pNext = &draw_parameters;
@@ -486,8 +494,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     const int descriptor_enable = descriptor_query && out->descriptor_indexing_runtime &&
                                   out->descriptor_indexing_partial && out->descriptor_indexing_sampled_nonuniform &&
                                   out->descriptor_indexing_storage_nonuniform;
-    const char *device_ext[24];
+    const int want_hqr = prop_int("debug.s2a.nvk_host_query_reset", 1) != 0;
+    const int hqr_enable = has_hqr && hqr.hostQueryReset == VK_TRUE && want_hqr;
+    const char *device_ext[25];
     uint32_t device_ext_count = 0;
+    if (hqr_enable) device_ext[device_ext_count++] = VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME;
     // 反馈没有独立的 feature 位。实例仍申请 1.1，物理设备报 1.3 也须实际启用 EXT。
     const int pipe_feedback_core = s2a_vk_effective_api(out->properties.apiVersion) >= VK_API_VERSION_1_3;
     const int pipe_feedback_ext = !pipe_feedback_core &&
@@ -719,8 +730,21 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         descriptor_enabled.pNext = (void *)device_info.pNext;
         device_info.pNext = &descriptor_enabled;
     }
+    VkPhysicalDeviceHostQueryResetFeaturesEXT hqr_enabled = {0};
+    hqr_enabled.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+    if (hqr_enable) {
+        hqr_enabled.hostQueryReset = VK_TRUE;
+        hqr_enabled.pNext = (void *)device_info.pNext;
+        device_info.pNext = &hqr_enabled;
+    }
     if (vkCreateDevice(out->physical, &device_info, NULL, &out->device) != VK_SUCCESS)
         return fail(why, why_size, "vkCreateDevice failed");
+    if (hqr_enable) {
+        out->reset_query_pool = (PFN_vkResetQueryPoolEXT)vkGetDeviceProcAddr(out->device, "vkResetQueryPoolEXT");
+        out->host_query_reset_enabled = out->reset_query_pool != NULL;
+    }
+    S2A_DLOG("[s2a] vk host query reset: ext=%d feature=%d want=%d entry=%d enabled=%d\n",
+             has_hqr, hqr.hostQueryReset == VK_TRUE, want_hqr, out->reset_query_pool != NULL, out->host_query_reset_enabled);
     out->pipeline_creation_feedback_enabled = pipe_feedback_core || pipe_feedback_ext;
     out->descriptor_indexing_enabled = descriptor_enable;
     S2A_DLOG("[s2a] vk descriptor indexing: ext_state=%d queried=%d runtime=%d partial=%d sampled_nonuniform=%d "

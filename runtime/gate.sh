@@ -165,16 +165,22 @@ depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就
   [ ${#c[@]} -gt 0 ] || { [ -n "$bo" ] && [ ${#h[@]} -gt 0 ] && echo "$*"; return 0; }   # 只编：改的头文件没有源用到 → 一组都不用编
   st=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_depskip; day=$(date +%Y%m%d); mkdir -p "$st" 2> /dev/null || return 0
   [ -n "$bo" ] || [ -f "$st/full.$day" ] || { : > "$st/full.$day"; return 0; }   # 每天这台机器第一次：全跑（只编不做这一步：编译结果不随天变）
-  key=$(cat Makefile */build.mk runtime/tests/mk/*.mk 2> /dev/null | shasum | cut -c1-16); cd=$st/src.$key
+  # 缓存键带格式版本（v2：清单改存相对路径 + 共用前置清单）：旧版缓存里是绝对路径，跟 GATE_CHANGED 的相对路径永远对不上 → 有清单的组一律被跳（11-27 假绿根因）
+  key=$({ cat Makefile */build.mk runtime/tests/mk/*.mk 2> /dev/null; echo depskip-v2; } | shasum | cut -c1-16); cd=$st/src.$key
   if [ ! -f "$cd/.done" ]; then b=$(mktemp -d "${TMPDIR:-/tmp}/s2a_depskip_XXXXXX"); mkdir -p "$cd"
     # 并行算（J 路，同组并行数）：串行 345 组约 400 秒，mk 一变就要重算，不并行会把省下的时间吃回去
-    printf '%s\n' "$@" | xargs -P "$J" -I{} sh -c 'make -n -B BUILD="$1" "native-test-$2" 2> /dev/null | grep -oE "[A-Za-z0-9_./+-]+\.(c|m|mm|cpp|cc|S|s)\b" | sed "s#^\./##" | sort -u > "$0/$2.txt"' "$cd" "$b" {}
+    #   清单一律存仓库相对路径（11-27 假绿根因：make -n 打出的是工作树绝对路径 /…/trees/N/graphics/…，跟 GATE_CHANGED 的相对路径对不上，
+    #   每组都判「没改到」被跳，contrib/pr2270-rb 一轮 0 组判绿、编译错进了 main）；共用前置（native-test-prereq）另存 _prereq.txt，
+    #   用前置的组（uses_pre）按「自己的 ∪ 前置的」比（前置由钩子单独先建，不在该组自己的干跑输出里：改 nvn_mtl.m 原先一组都对不上）
+    { printf '%s\n' "$@"; echo prereq; } | xargs -P "$J" -I{} sh -c 'make -n -B BUILD="$1" "native-test-$2" 2> /dev/null | grep -oE "[A-Za-z0-9_./+-]+\.(c|m|mm|cpp|cc|S|s)\b" | sed "s#^$3/##; s#^$4/##; s#^\./##" | sort -u > "$0/$2.txt"' "$cd" "$b" {} "$PWD" "$(pwd -P)"
+    mv -f "$cd/prereq.txt" "$cd/_prereq.txt" 2> /dev/null
     rm -rf "${b:?}"; : > "$cd/.done"; fi
   # 规则里自己再调 $(MAKE) 的组（graphics_session 编整个带 S2A_CS 的宿主、nvn_abba、input_config_apple）：干跑列不全它们的源（11-14 实测
   #   graphics_session 串行干跑 0 个源、并行干跑 2 个），一律照跑。按规则文本静态认，不靠干跑输出
   local rec; rec=" $(grep -l '\$(MAKE)' runtime/tests/mk/*.mk 2> /dev/null | sed 's#.*/##; s#\.mk$##' | tr '\n' ' ') $(awk '/^native-test-[a-z_0-9]+:/{t=substr($1, 13); sub(/:$/, "", t)} /\$\(MAKE\)/{if (t) print t}' Makefile */build.mk 2> /dev/null | tr '\n' ' ') "
   # 只编：这几组自己再编整个宿主（graphics_session 一组 776 秒），宿主本身合入前已由「宿主构建」那段编过；拿出只编、留给合入后完整门禁
-  local out=; for k in "$@"; do case $rec in *" $k "*) [ -n "$bo" ] && out="$out $k"; continue;; esac; [ -s "$cd/$k.txt" ] || continue; grep -qxFf <(printf '%s\n' "${c[@]}") "$cd/$k.txt" || out="$out $k"; done
+  local out=; for k in "$@"; do case $rec in *" $k "*) [ -n "$bo" ] && out="$out $k"; continue;; esac; [ -s "$cd/$k.txt" ] || continue
+    if uses_pre "$k"; then [ -s "$cd/_prereq.txt" ] || continue; cat "$cd/$k.txt" "$cd/_prereq.txt"; else cat "$cd/$k.txt"; fi | grep -qxFf <(printf '%s\n' "${c[@]}") || out="$out $k"; done
   echo "${out# }"
 }
 summary() { local b=; [ "$BON" -gt 0 ] && b="；只编判不了 $BON 组"; [ $R = 0 ] && echo "绿 $G 组$b" || echo "绿 $G 组、红 $R 组（${WHY#、}）$b"; }

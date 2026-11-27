@@ -427,6 +427,7 @@ static void query_vulkan(VkPhysicalDevice physical, struct s2a_dev_facts *f) {
     f->di.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
     f->vdiv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
     f->swapchain_m1.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
+    f->hqr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
     // 低于 1.1 的设备：本实例按 1.1 建，Features2 / Properties2 对它不成立（后端也建不了它）——整条扩展查询链都不挂，只记核心查询
     // 已转正的扩展：设备版本够（timeline / 描述符索引 1.2）就算有，不要求再列扩展名。4444 例外：1.3 只转正了格式枚举，
     //   VkPhysicalDevice4444FormatsFeaturesEXT 没有核心版，没列扩展时挂进链不合规（驱动多半忽略，位停在 0 被当成「实测不支持」），只在列了扩展时挂
@@ -444,6 +445,7 @@ static void query_vulkan(VkPhysicalDevice physical, struct s2a_dev_facts *f) {
         if ((f->have_di = listed(f, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) || api >= VK_API_VERSION_1_2)) LINK(chain, &f->di);
         if ((f->have_vdiv = listed(f, "VK_EXT_vertex_attribute_divisor"))) LINK(chain, &f->vdiv);   // 只认 EXT：下面属性链挂的是 EXT 的属性结构（KHR 版属性结构是另一个类型）
         if ((f->have_swapchain_m1 = listed(f, "VK_EXT_swapchain_maintenance1") || listed(f, "VK_KHR_swapchain_maintenance1"))) LINK(chain, &f->swapchain_m1);
+        if ((f->have_hqr = listed(f, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME) || api >= VK_API_VERSION_1_2)) LINK(chain, &f->hqr);
     }
     if (chain) {
         VkPhysicalDeviceFeatures2 q = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = chain };
@@ -707,6 +709,7 @@ static void emit_vulkan(struct jw *w, const struct s2a_dev_facts *f) {
             B("vertexAttributeInstanceRateZeroDivisor", f->vdiv.vertexAttributeInstanceRateZeroDivisor);
         }
         if (f->have_swapchain_m1) B("swapchainMaintenance1", f->swapchain_m1.swapchainMaintenance1);
+        if (f->have_hqr) B("hostQueryReset", f->hqr.hostQueryReset);
 #undef B
         kv_emit(w, t, n);
     }

@@ -4,7 +4,7 @@
 #pragma once
 #include "nvn_backend.h"
 
-enum { RP_PROG_STAGES = 3, RP_PROG_ENT_MAX = 128 };   // 顶点、片元、几何
+enum { RP_PROG_STAGES = 5, RP_PROG_INLINE_STAGES = 3, RP_PROG_ENT_MAX = 128 };   // 0 顶点 1 片元 2 几何 3 细分控制 4 细分求值
 // 句柄放在游戏用户常量缓冲里的绑定（NVN_RB_TEXU / NVN_RB_TBUFU，语义照 iOS nvn_refl.h / nvn_mtl.m ubo_packed）的来源。
 //   一个字：用户常量槽 reg 的字节 off 处的 32 位字；sid = 它是采样器号（读出后左移 20）；pair = 同一 Ryujinx 句柄的另一半
 //   （pair_reg / pair_off 处的字，pair_sid 时左移 20），两半相或 = 打包句柄：低 20 位纹理号、高 12 位采样器号。
@@ -25,13 +25,18 @@ struct rp_cold_proof {
     uint32_t fragment_ent, first_word, stride_words, count;
     uint32_t prefix_ent, prefix_byte, prefix_mask;
 };
+struct rp_tess_layout {
+    nvn_gpu_layout_ent ent[RP_PROG_ENT_MAX];
+    uint8_t dtt[RP_PROG_ENT_MAX], dcls[RP_PROG_ENT_MAX], difmt[RP_PROG_ENT_MAX];
+};
 struct rp_prog {
-    nvn_gpu_shader sh[RP_PROG_STAGES];                        // 0 顶点 1 片元 2 几何
-    nvn_gpu_layout_ent ent[RP_PROG_STAGES][RP_PROG_ENT_MAX];  // 与交给后端装载的布局同一份：核心按 src_kind / src_reg 逐项绑定
-    uint8_t dtt[RP_PROG_STAGES][RP_PROG_ENT_MAX];             // 声明目标 + 1；0 = 未知，沿用登记视图
-    uint8_t dcls[RP_PROG_STAGES][RP_PROG_ENT_MAX];            // 0 float，1 uint，2 sint，3 depth 比较
-    uint8_t difmt[RP_PROG_STAGES][RP_PROG_ENT_MAX];           // 存储图像声明的 SPIR-V Image Format（0 = Unknown；计算阶段与图形阶段的 imageBuffer 填，见 nvk_shader.c sampled_decl）
-    uint8_t sampler_unused[RP_PROG_STAGES][RP_PROG_ENT_MAX];   // 已从 SPIR-V 证明该组合描述符不读取采样器
+    nvn_gpu_shader sh[RP_PROG_STAGES];                        // 0 顶点 1 片元 2 几何 3 细分控制 4 细分求值
+    nvn_gpu_layout_ent ent[RP_PROG_INLINE_STAGES][RP_PROG_ENT_MAX];  // 与交给后端装载的布局同一份：核心按 src_kind / src_reg 逐项绑定
+    uint8_t dtt[RP_PROG_INLINE_STAGES][RP_PROG_ENT_MAX];             // 声明目标 + 1；0 = 未知，沿用登记视图
+    uint8_t dcls[RP_PROG_INLINE_STAGES][RP_PROG_ENT_MAX];            // 0 float，1 uint，2 sint，3 depth 比较
+    uint8_t difmt[RP_PROG_INLINE_STAGES][RP_PROG_ENT_MAX];           // 存储图像声明的 SPIR-V Image Format（0 = Unknown；计算阶段与图形阶段的 imageBuffer 填，见 nvk_shader.c sampled_decl）
+    uint8_t sampler_unused[RP_PROG_INLINE_STAGES][RP_PROG_ENT_MAX];   // 已从 SPIR-V 证明该组合描述符不读取采样器
+    struct rp_tess_layout *tess;   // 仅有 TCS/TES 的程序持有两阶段的绑定表
     uint32_t nent[RP_PROG_STAGES];
     uint32_t support_bytes;                                   // NVN_RB_SUPPORT 那一项的缓冲长度
     uint32_t attr_mask;                                       // 顶点着色器实际读的属性位
@@ -52,6 +57,18 @@ struct rp_prog {
     uint8_t identity[32];
     const struct rp_cold_proof *cold;
 };
+static inline const nvn_gpu_layout_ent *rp_prog_ent(const struct rp_prog *p, unsigned st) {
+    return st < RP_PROG_INLINE_STAGES ? p->ent[st] : p->tess[st - RP_PROG_INLINE_STAGES].ent;
+}
+static inline const uint8_t *rp_prog_dtt(const struct rp_prog *p, unsigned st) {
+    return st < RP_PROG_INLINE_STAGES ? p->dtt[st] : p->tess[st - RP_PROG_INLINE_STAGES].dtt;
+}
+static inline const uint8_t *rp_prog_dcls(const struct rp_prog *p, unsigned st) {
+    return st < RP_PROG_INLINE_STAGES ? p->dcls[st] : p->tess[st - RP_PROG_INLINE_STAGES].dcls;
+}
+static inline const uint8_t *rp_prog_difmt(const struct rp_prog *p, unsigned st) {
+    return st < RP_PROG_INLINE_STAGES ? p->difmt[st] : p->tess[st - RP_PROG_INLINE_STAGES].difmt;
+}
 struct rp_shader_req {
     uint32_t prim;              // NVNdrawPrimitive
     int rt_count;               // 当前颜色目标个数

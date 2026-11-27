@@ -375,6 +375,8 @@ s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/shader_write_barrier_mutation_
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/cbuf_prep_mutation_test.py"
 # 原创 Maxwell 经生产请求、真实编译器与生产结果解析；GPU 像素由 Vulkan 门禁另验。
 s2a_gate_step "$PY" "$android_dir/tests/gs_compiler_chain_test.py"
+# 细分请求保留 GS 空槽，用真实统一编译器生成并装载 TCS/TES。
+s2a_gate_step "$PY" "$android_dir/tests/tess_compiler_chain_test.py"
 # BUFFER texture: real producer, Maxwell compiler and SPIR-V parser.
 s2a_gate_step "$PY" "$android_dir/tests/tbuf_compiler_chain_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/libpack_tbuf_withdraw_test.py"

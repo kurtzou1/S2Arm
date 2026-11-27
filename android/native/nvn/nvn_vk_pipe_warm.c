@@ -810,7 +810,7 @@ int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec) {
     // 记录里记着哪些阶段（st[].sh 的存在位），必须和程序实际的阶段一致：对不上就是旧布局 / 别的层的
     // 记录，建出来的就不是这条配方——宁可不建，也不建一条「差不多」的。
     uint8_t want = rec->desc[0];
-    for (int st = 0; st < 3; st++) {
+    for (int st = 0; st < RP_PROG_STAGES; st++) {
         int have = prog->sh[st] != NULL;
         if (((want >> st) & 1) != have) {
             __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
@@ -818,11 +818,11 @@ int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec) {
             goto out;
         }
     }
-    if ((want & ~0x7u) != 0) {   // GS 以外的阶段（TCS / TES）本层不产生：有就是坏记录
+    if ((want & ~0x1fu) != 0) {
         __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
         goto out;
     }
-    for (int st = 0; st < 3; st++) pd.st[st].sh = prog->sh[st];
+    for (int st = 0; st < RP_PROG_STAGES; st++) pd.st[st].sh = prog->sh[st];
     if (nvn_gpu_pipe_warm_scope) nvn_gpu_pipe_warm_scope(1);
     nvn_gpu_pipe pipe = NULL;
     nvn_gpu_err err = {0};

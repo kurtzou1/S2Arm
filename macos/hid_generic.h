@@ -90,6 +90,12 @@ static inline int s2a_hidg_is_betop_ns(int vid, int pid, const char *transport, 
     }
     return !strncasecmp(address, "00:90:E0", 8) || !strncasecmp(address, "00-90-E0", 8);
 }
+// 鲲鹏20竞技版 NS USB/接收器使用 Nintendo VID/PID，但系统四个摇杆半轴缺失。
+// 严格匹配实际观察到的两个 USB 产品名，不能误接原厂 Pro 或其它第三方手柄。
+static inline int s2a_hidg_is_kp20_ns_usb(int vid, int pid, const char *transport, const char *name) {
+    return vid == 0x057e && pid == 0x2009 && transport && !strcasecmp(transport, "USB") && name &&
+        (!strcasecmp(name, "BTP-KP20E NS WIRED") || !strcasecmp(name, "BTP-KP20E NS DONGLE"));
+}
 // 一代机身认法（joycon_imu.m 六轴轴向、拆不拆单只都照它）：产品号报左 / 右 Joy-Con（0x2006 / 0x2007）、名字却是「Pro Controller」且不带 Joy-Con 的
 //   是冒用 Joy-Con 产品号的第三方 Pro（D-52Z8：0x2006 + 「Pro Controller」被按左只侧握换算六轴，体感瞄准反向）：按 Pro（0x2009）认；其余照产品号
 static inline int s2a_hidg_jc_body_pid(int pid, const char *name) {

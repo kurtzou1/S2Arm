@@ -1,0 +1,79 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index de1340554dad9f1fd1a9914177132e07a8885c12..a6527fd767375c045a93f891a16765ea97a21cf8 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -588,6 +588,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
+                 long catchUps = Interlocked.Exchange(ref AudioProcessor.S2ACatchUps, 0);   // #1957：在途不到目标一半时越过墙钟上限追设备的渲染拍数
++                long drains = Interlocked.Exchange(ref AudioProcessor.S2ADrains, 0);   // 11-27：在途高于目标、多等一拍的次数（排掉卡顿留下的多余在途）
+                 long nanSamples = Interlocked.Exchange(ref Ryujinx.Audio.Renderer.Dsp.Command.DeviceSinkCommand.S2ANaNSamples, 0);
+                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
+                 HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
+@@ -656,7 +657,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+                         $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口与交还迟到）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、追设备 {catchUps} 拍、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、追设备 {catchUps} 拍、退设备 {drains} 拍、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     HudAudio(d.Index, gap * 1000 / d._rate, 0);
+ 
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 7d834cf50ed07ffeb53b9d11f477334737e8ab0c..b04698f9ab2832d53f0fcbe6e56d7e35cf374f3c 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -297,6 +297,21 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         private int _s2aCatchUp, _s2aCatchUpTick;
+         public static long S2ACatchUps;   // 诊断：追设备的渲染次数（10 秒行读取清零）
+ 
++        // S2Arm (11-27 落地声比画面晚约半秒，M1 Pro 内置扬声器 IO 周期 4096 帧): the mirror case. Above the target the wall-clock bound
++        //   below ("4 periods past due", for a device that stopped draining) still renders one period per period, so whatever the device
++        //   did not play during a hitch (a late callback or a load stall: −1248 / −1008 frames in one 10 s window, ~3400 frames in a load)
++        //   stays queued for good, in the ring and then the AudioSampleQueue in front of it (4 rings ≈ 683 ms at IO 4096). While the output
++        //   holds more than the target plus S2ADrainMargin, one render per S2ACatchUpEvery waits one period longer (−3.1%): the surplus
++        //   drains at about 1500 frames a second, nothing is dropped, and a dead device still gets a render at most 5 periods past due
++        private int _s2aDrain;
++
++        // How far above the target the drain stops: a third of the target, at least two periods (1440-frame target: 480; IO 4096: 2048 ≈ 43 ms).
++        //   Held at the target on that device (11-27, same route, drain down to target + 2 periods): the ring kept ~1300 frames after each
++        //   callback and 5 of ~24 windows had a short real gap (60–629 frames), each with a render period 3–16 ms late. The surplus a hitch
++        //   leaves is kept up to this margin as a cushion for those
++        private static long S2ADrainMargin(long depthFrames) => Math.Max(2 * Constants.TargetSampleCount, depthFrames / 3);
++        public static long S2ADrains;   // 诊断：在途高于目标、多等一拍的次数（10 秒行读取清零）
++
+         // S2Arm (11-22 门禁偶发红): 节拍读的钟与睡的钟。单测（S2A.Services.Tests AudioDepthPaceTest）换成可控的虚拟钟：
+         //   原先单测用真墙钟，机器忙时测试线程分不到 CPU，假设备照墙钟吃帧、渲染跟不上，判据量到的是调度而不是节拍逻辑。
+         //   S2ATestClock 为 null（宿主恒为 null）= 真墙钟；设了就由它给「现在」、由它「睡到」某一刻（虚拟钟直接把时间拨过去）
+@@ -378,11 +393,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
+ 
+             bool catchUp = false;
++            bool drained = false;   // at most one drain per render (see _s2aDrain): with 4 credits saved up, one hitch would otherwise hold a render ~8 periods
+ 
+             if (++_s2aCatchUpTick >= S2ACatchUpEvery)
+             {
+                 _s2aCatchUpTick = 0;
+                 _s2aCatchUp = Math.Min(_s2aCatchUp + 1, 4);
++                _s2aDrain = Math.Min(_s2aDrain + 1, 4);
+             }
+ 
+             while (true)
+@@ -402,6 +419,17 @@ namespace Ryujinx.Audio.Renderer.Dsp
+                     break;
+                 }
+ 
++                // Well above the target at the bound: hold one more period instead of rendering (see _s2aDrain)
++                if (timeNow >= _s2aVirt + 4 * increment && buffered >= depthFrames + S2ADrainMargin(depthFrames) && _s2aDrain > 0 && !drained)
++                {
++                    _s2aDrain--;
++                    drained = true;
++                    _s2aVirt += increment;
++                    Interlocked.Increment(ref S2ADrains);
++
++                    continue;
++                }
++
+                 // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)
+                 if ((timeNow >= _s2aVirt && buffered < depthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
+                 {

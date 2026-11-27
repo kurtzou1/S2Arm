@@ -90,6 +90,10 @@ int main(int argc, char **argv) {
     const int di = cs_has_ext(s, "VK_EXT_descriptor_indexing") && s->props.apiVersion >= VK_API_VERSION_1_1 &&
                    s->diRuntimeArray && s->diPartiallyBound && s->diSampledNonUniform && s->diStorageNonUniform;
     EXPECT(d.descriptor_indexing_enabled == di, "descriptor_indexing_enabled=%d，期望 %d", d.descriptor_indexing_enabled, di);
+    // host_query_reset：扩展列出且 hostQueryReset 特性位为真时启用且入口非空
+    const int hqr = cs_has_ext(s, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME) && s->hostQueryReset;
+    EXPECT(d.host_query_reset_enabled == hqr && (d.reset_query_pool != NULL) == hqr,
+           "host_query_reset_enabled=%d entry=%d，期望 %d", d.host_query_reset_enabled, d.reset_query_pool != NULL, hqr);
     // BC 路由（C6，#1199）：bit i ↔ NVN 格式 0x41+i，逐格式查原生采样位，缺的走计算解码；两者互补。
     //   期望按 NVN 格式映射（nvn_vk_format.c）逐位由形态档的 optimal 采样位推出，不另抄 vk_device.c 的表；半有半无（拼装档 Xclipse 920 的 BC1–3）也覆盖
     uint32_t bc_want = 0;
@@ -114,8 +118,12 @@ int main(int argc, char **argv) {
            "vertexPipelineStoresAndAtomics 启用=%u，支持=%u", d.core_features.vertexPipelineStoresAndAtomics, s->features.vertexPipelineStoresAndAtomics);
     EXPECT(d.core_features.shaderClipDistance == s->features.shaderClipDistance, "shaderClipDistance 启用=%u，支持=%u",
            d.core_features.shaderClipDistance, s->features.shaderClipDistance);
-    EXPECT(!d.core_features.shaderFloat64 && !d.core_features.shaderInt64 && !d.core_features.tessellationShader,
-           "64 位 / 曲面细分不该启用（%u %u %u）", d.core_features.shaderFloat64, d.core_features.shaderInt64, d.core_features.tessellationShader);
+    EXPECT(!d.core_features.shaderFloat64 && !d.core_features.shaderInt64,
+           "64 位特性不该启用（%u %u）", d.core_features.shaderFloat64, d.core_features.shaderInt64);
+    const VkBool32 tess_want = (s->features.tessellationShader && s->props.limits.maxTessellationPatchSize > 0) ? VK_TRUE : VK_FALSE;
+    EXPECT(d.core_features.tessellationShader == tess_want,
+           "tessellationShader 启用=%u，期望=%u（支持=%u maxPatch=%u）",
+           d.core_features.tessellationShader, tess_want, s->features.tessellationShader, s->props.limits.maxTessellationPatchSize);
     // 几何着色器（#1456 / #1482）：判定已放行，开不开 = 设备支不支持
     EXPECT(d.core_features.geometryShader == s->features.geometryShader, "geometryShader 启用=%u，支持=%u（判定放行）",
            d.core_features.geometryShader, s->features.geometryShader);

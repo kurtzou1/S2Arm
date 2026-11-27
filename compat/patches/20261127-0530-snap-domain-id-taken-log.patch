@@ -1,0 +1,39 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/IpcService.cs b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+index 930f087238ef35d72b40ae9cb12f5304e53e3320..7cf2b2b6cb356eaca5328d91b1f91777b41402e2 100644
+--- a/src/Ryujinx.HLE/HOS/Services/IpcService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+@@ -350,6 +350,10 @@ namespace Ryujinx.HLE.HOS.Services
+                 }
+ 
+                 S2AHooks.SnapForceDomainIdMiss++;
++                // 原号被占：点名谁占着、本该是谁、改分到几号（2002-6457 恢复局两份诊断都有「原号被占」，只有计数看不出错位到哪个对象）
++                int got = DomainObjects.Add(obj);
++                Console.Error.WriteLine($"[s2a] 【黄】即时存档恢复：域对象原号 {id} 已被 {DomainObjects.GetData(id)?.GetType().Name ?? "?"} 占着，{obj.GetType().Name} 改分到 {got}（游戏按原号发给它的请求会落到占着的那个对象上）");
++                return got;
+             }
+ 
+             return DomainObjects.Add(obj);
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
+index 24a297ee935aec9b90a570709dd8bdefe121bf54..a95ab18bc25be2412608286a893b9f7b548d71cd 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
+@@ -164,12 +164,18 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+                 {
+                     EntryManager.Entry entry = null;
+                     var forced = S2AHorizonHooks.SnapForceDomainIds;
+-                    if (forced != null && forced.Count > 0 && (entry = _manager._entryManager.S2AAllocateEntry(forced.Dequeue())) == null)
++                    int want = 0;
++                    if (forced != null && forced.Count > 0 && (entry = _manager._entryManager.S2AAllocateEntry(want = forced.Dequeue())) == null)
+                     {
+                         S2AHorizonHooks.SnapForceDomainIdMiss++;
+                     }
+ 
++                    bool missed = want != 0 && entry == null;
+                     entry ??= _manager._entryManager.AllocateEntry();
++                    if (missed && entry != null)
++                    {   // 原号被占：点名原号与改分到的号（同 HLE IpcService.Add）
++                        Console.Error.WriteLine($"[s2a] 【黄】即时存档恢复：Horizon 域对象原号 {want} 已被占，改分到 {entry.Id}（游戏按原号发的请求会落到占着的那个对象上）");
++                    }
+                     if (entry == null)
+                     {
+                         return SfResult.OutOfDomainEntries;

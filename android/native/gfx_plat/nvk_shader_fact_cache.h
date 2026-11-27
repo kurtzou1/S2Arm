@@ -85,7 +85,7 @@ static int fact_cache_mask(const uint8_t *bytes, size_t len, const struct rp_pro
     /* Reflected resource use is included even if a future translator elides a
      * redundant query. Indirect/array resources need a separate contract. */
     for (unsigned st = 0; st < 3; st++) for (unsigned i = 0; i < pg->nent[st]; i++) {
-        const nvn_gpu_layout_ent *e = &pg->ent[st][i];
+        const nvn_gpu_layout_ent *e = &rp_prog_ent(pg, st)[i];
         if (e->src_kind == NVN_RB_TEX) {
             if (e->count != 1 || e->src_reg >= 32 || e->src_reg2 != UINT16_MAX) return 0;
             mask[st] |= 1u << e->src_reg;

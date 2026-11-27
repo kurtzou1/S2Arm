@@ -25,6 +25,17 @@ int main(void) {
           !s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "00:90:E0:ZZ:34:56") &&
           !s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", NULL), "缺失和无效地址");
 
+    const char *wired = "BTP-KP20E NS WIRED", *dongle = "BTP-KP20E NS DONGLE";
+    CHECK(s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "USB", wired), "鲲鹏20 NS 有线启用四轴补偿");
+    CHECK(s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "USB", dongle), "鲲鹏20 NS 接收器启用四轴补偿");
+    CHECK(!s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "USB", "Pro Controller"), "原厂同 VID/PID 不启用补偿");
+    CHECK(!s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "USB", "BTP-KP20E NS"), "不按名称前缀匹配");
+    CHECK(!s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "Bluetooth", dongle), "同名蓝牙设备不启用 USB 补偿");
+    CHECK(!s2a_hidg_is_kp20_ns_usb(0x045e, 0x2009, "USB", wired) &&
+          !s2a_hidg_is_kp20_ns_usb(0x057e, 0x2007, "USB", wired), "同名但 VID 或 PID 不同");
+    CHECK(!s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, NULL, wired) &&
+          !s2a_hidg_is_kp20_ns_usb(0x057e, 0x2009, "USB", NULL), "缺少传输类型或产品名");
+
     // 缺省按钮：八位堂 D-input 编号 1 A、2 B、4 X、5 Y、7 / 8 L / R、9 / 10 ZL / ZR、11 −、12 +、14 / 15 摇杆按下；按位置给（右 A 下 B 上 X 左 Y）
     //   1 号是八位堂的 A（下）→ 位置 B；2 号（右）→ A；4 号（左）→ Y；5 号（上）→ X
     CHECK(press(NULL, 2) == A && press(NULL, 1) == B && press(NULL, 5) == X && press(NULL, 4) == Y, "缺省四颗面键按位置");

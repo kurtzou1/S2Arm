@@ -297,6 +297,21 @@ namespace Ryujinx.Audio.Renderer.Dsp
         private int _s2aCatchUp, _s2aCatchUpTick;
         public static long S2ACatchUps;   // 诊断：追设备的渲染次数（10 秒行读取清零）
 
+        // S2Arm (11-27 落地声比画面晚约半秒，M1 Pro 内置扬声器 IO 周期 4096 帧): the mirror case. Above the target the wall-clock bound
+        //   below ("4 periods past due", for a device that stopped draining) still renders one period per period, so whatever the device
+        //   did not play during a hitch (a late callback or a load stall: −1248 / −1008 frames in one 10 s window, ~3400 frames in a load)
+        //   stays queued for good, in the ring and then the AudioSampleQueue in front of it (4 rings ≈ 683 ms at IO 4096). While the output
+        //   holds more than the target plus S2ADrainMargin, one render per S2ACatchUpEvery waits one period longer (−3.1%): the surplus
+        //   drains at about 1500 frames a second, nothing is dropped, and a dead device still gets a render at most 5 periods past due
+        private int _s2aDrain;
+
+        // How far above the target the drain stops: a third of the target, at least two periods (1440-frame target: 480; IO 4096: 2048 ≈ 43 ms).
+        //   Held at the target on that device (11-27, same route, drain down to target + 2 periods): the ring kept ~1300 frames after each
+        //   callback and 5 of ~24 windows had a short real gap (60–629 frames), each with a render period 3–16 ms late. The surplus a hitch
+        //   leaves is kept up to this margin as a cushion for those
+        private static long S2ADrainMargin(long depthFrames) => Math.Max(2 * Constants.TargetSampleCount, depthFrames / 3);
+        public static long S2ADrains;   // 诊断：在途高于目标、多等一拍的次数（10 秒行读取清零）
+
         // S2Arm (11-22 门禁偶发红): 节拍读的钟与睡的钟。单测（S2A.Services.Tests AudioDepthPaceTest）换成可控的虚拟钟：
         //   原先单测用真墙钟，机器忙时测试线程分不到 CPU，假设备照墙钟吃帧、渲染跟不上，判据量到的是调度而不是节拍逻辑。
         //   S2ATestClock 为 null（宿主恒为 null）= 真墙钟；设了就由它给「现在」、由它「睡到」某一刻（虚拟钟直接把时间拨过去）
@@ -378,11 +393,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
             _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
 
             bool catchUp = false;
+            bool drained = false;   // at most one drain per render (see _s2aDrain): with 4 credits saved up, one hitch would otherwise hold a render ~8 periods
 
             if (++_s2aCatchUpTick >= S2ACatchUpEvery)
             {
                 _s2aCatchUpTick = 0;
                 _s2aCatchUp = Math.Min(_s2aCatchUp + 1, 4);
+                _s2aDrain = Math.Min(_s2aDrain + 1, 4);
             }
 
             while (true)
@@ -400,6 +417,17 @@ namespace Ryujinx.Audio.Renderer.Dsp
                     catchUp = true;
 
                     break;
+                }
+
+                // Well above the target at the bound: hold one more period instead of rendering (see _s2aDrain)
+                if (timeNow >= _s2aVirt + 4 * increment && buffered >= depthFrames + S2ADrainMargin(depthFrames) && _s2aDrain > 0 && !drained)
+                {
+                    _s2aDrain--;
+                    drained = true;
+                    _s2aVirt += increment;
+                    Interlocked.Increment(ref S2ADrains);
+
+                    continue;
                 }
 
                 // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)

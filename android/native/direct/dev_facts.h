@@ -46,6 +46,7 @@ struct s2a_dev_facts {
     int have_di; VkPhysicalDeviceDescriptorIndexingFeaturesEXT di;
     int have_vdiv; VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT vdiv; uint32_t vdiv_max;
     int have_swapchain_m1; VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT swapchain_m1;
+    int have_hqr; VkPhysicalDeviceHostQueryResetFeaturesEXT hqr;
     int have_minmax; VkBool32 minmax_single, minmax_mapping;
     int have_host_import; VkDeviceSize host_align;
     VkDeviceSize max_alloc; uint32_t max_per_set;            // maintenance3（have_core11）

@@ -14,6 +14,7 @@
       读各模块 <模块>.gaps.tsv 里的 cpatch 缺口，把出缺口的补丁记进 <产物根>/cpatch_excluded.tsv；退出码 0 = 没有要剔的，
       10 = 剔了：调用方重跑 plan（冲突重新判：被剔的那份让出位置，先前因与它冲突落选的可以轮上）再重跑改写
 cpatch_rows.tsv：w|p <模块> <偏移> <原字> <新字> [位] # <编号>
+  v <模块> <偏移> <原字> <新字> # <编号[,编号…]>：代码洞（补丁写在代码段外、从代码直接跳过去的新代码，见 caves）的代码字，改写器整组搬进补丁区（rewriter.c gen_caves）
 cpatch.tsv：编号 / 模块 / 位 / 类别 / 段名 / 许可 / 来源 / 数据写入（偏移:原字节:新字节，空格分隔；偏移是模块映像偏移）/ 缺省开（0/1）/ 目标帧率 / 画幅（宽 ÷ 高）
 编号：<widescreen|fps|gfx>:<补丁内容 sha256 前 16 位，没有用包内路径散列>，与启动器 pack/jobs/community.py 同一算法
 pchtxt：@nsobid-<构建号>；行首偏移是含 0x100 文件头的偏移，@flag offset_shift <整数> 从该行起加位移（常见 0x100 即行首就是映像偏移）；@enabled / @disabled 开一段、空行收段、@stop 整个文件到此为止；
@@ -1608,6 +1609,50 @@ def tail_hazard(word):
     return ''
 
 
+def cave_hazard(word):
+    """代码洞里的字（改写器整组原样搬进补丁区、只做 PC 相对重定位，不做翻译）→ 原因或 ''。比 tail_hazard 严：
+    尾巴里的计时器 / svc / 线程寄存器有改写器 scan() 翻译，洞里没有，所以 svc / hvc / brk / 系统寄存器读写 / x18 / 解不出的都挡"""
+    if (word & 0xff000000) == 0xd4000000: return f'{word:08x} 是 svc / hvc / brk 一类（洞里不翻译）'
+    if (word & 0xffc00000) == 0xd5000000 and (word & 0xfffff01f) != 0xd503201f and (word & 0xfffff0ff) not in (0xd503309f, 0xd50330bf, 0xd50330df):
+        return f'{word:08x} 是系统指令（读写系统寄存器，洞里不翻译）'
+    ins = next(_cs_one().disasm(struct.pack('<I', word), 0), None)
+    if ins is None or ins.mnemonic == 'udf': return f'{word:08x} 解不出'
+    if re.search(r'\b[xw]18\b', ins.op_str): return f'{word:08x}（{ins.mnemonic} {ins.op_str}）用到 x18'
+    return ''
+
+
+def caves(im, code_end, words, data):
+    """代码洞（11-27 D-3AF8 / D-F6ZC 一款大型 3D 游戏的 21:9 宽屏补丁转横屏必闪退）：补丁从代码里直接跳到它自己写在代码段外（ro / data）的一段新代码。
+    模拟器不管页的执行权限、那段能跑；我们这里那段是装载器写的数据页，执行即被系统杀。这里认出洞里的代码字，交改写器整组搬进补丁区（v 行，rewriter.c gen_caves）；
+    洞里的常量不搬，照旧由装载器写在原处（洞里 ADRP / 字面量 LDR 搬后仍指原地址）。
+    入口：本份改动的代码字（words）里的直接跳转（B / BL / 条件跳），目标 ≥ code_end。从入口顺控制流走：顺序 / 条件跳 / 调用往下一字走，
+    无条件跳与 ret / br 停；洞里的跳转目标 ≥ code_end 的也当入口。走到的字须四字节全由本份补丁写（data），且过 cave_hazard。
+    → ({偏移: 新字}, 原因)；原因非空 = 这份补丁不能收（不让跳转落进数据页）"""
+    def word_at(o):
+        if o < 0 or o % 4 or any(o + i not in data for i in range(4)): return None
+        return int.from_bytes(bytes(data[o + i] for i in range(4)), 'little')
+    todo = []
+    for w0, nb in sorted(words.items()):
+        new = int.from_bytes(nb, 'little')
+        if new == int.from_bytes(im[w0:w0 + 4], 'little'): continue
+        t = _dec(new, w0)[3]
+        if t is not None and t >= code_end: todo.append((w0, t))
+    out = {}
+    while todo:
+        src, o = todo.pop()
+        while o not in out:
+            w = word_at(o)
+            if w is None: return {}, f'{src:#x} 跳到代码段外 {o:#x}，那里不是这份补丁写的完整指令（代码洞走出了补丁写入范围）'
+            h = cave_hazard(w)
+            if h: return {}, f'代码洞 {o:#x} 的 {h}'
+            out[o] = w
+            _, _, kind, t = _dec(w, o)
+            if t is not None and t >= code_end: todo.append((o, t))
+            if kind in ('b', 'end'): break
+            o += 4
+    return out, ''
+
+
 def _cs_one():
     global _cs
     if _cs is None:
@@ -1795,6 +1840,11 @@ def plan(root, default_on, index_dirs):
             pool0 = literal_pool(im, words)[1]   # 字面量池的常量字是数据、不会被执行，不当指令查旁路
             ch = {w0: (int.from_bytes(im[w0:w0 + 4], 'little'), int.from_bytes(nb, 'little')) for w0, nb in words.items() if bytes(nb) != im[w0:w0 + 4] and w0 not in pool0}
             if ch: why = flow_hazard(im, text_end, mod, ch, branch_cache)
+        cave = {}
+        if not why:   # 代码洞（见 caves）：洞里的代码字出 v 行交改写器搬进补丁区；认不全 / 搬不了的整份不收、报红（11-27 D-3AF8 转横屏必闪退）
+            cave, cw = caves(im, code_end, words, data)
+            if cw or (cave and cheat): why = cw or '金手指的代码洞写在 ro 之后（暂不搬）'
+            if why: print(f'【红】社区补丁 {uid}（{mod}，{u["name"][:40]}）不收：{why}', file=sys.stderr)
         if why: log.append(f'不收\t{uid}\t{mod}\t{u["name"][:40]}\t{why}'); continue
         if cheat:   # 位等全部收完再按「共用这条改动的条目集合」分（见下）
             for o in words: claim[(mod, o)] = (uid, True, bytes(words[o]), True)
@@ -1817,13 +1867,19 @@ def plan(root, default_on, index_dirs):
             else:
                 rows.append(f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{bit}' + ('\t@k' if marks.get(w0) == 'kv' else f'\t={lits[w0]:x}' if w0 in lits else '') + f'\t# {uid}')
                 npath[(mod, w0)] = npath.get((mod, w0), 0) + 1
+        for o, w in sorted(cave.items()):   # 代码洞的字：兄弟补丁（同一洞的各画幅变体）共用一行，注释里记全部共用者（prune 按行剔时都剔）
+            r = f'v\t{mod}\t{o:x}\t{int.from_bytes(im[o:o + 4], "little"):08x}\t{w:08x}'
+            i = next((k for k, x in enumerate(rows) if x.startswith(r + '\t')), None)
+            if i is None: rows.append(f'{r}\t# {uid}')
+            elif uid not in rows[i].rsplit('# ', 1)[-1].split(','): rows[i] += f',{uid}'
         runs, cur = [], None
         for o in sorted(data):
             if cur and o == cur[0] + len(cur[1]): cur[1].append(data[o]); continue
             cur = [o, bytearray([data[o]])]; runs.append(cur)
         dw = ' '.join([f'{o:x}:{im[o:o + len(b)].hex()}:{bytes(b).hex()}' for o, b in runs] + [f'{o:x}:{im[o:o + n].hex()}:@{k}{n}' for o, n, k in adata] + [f'{o}::@{k}{n}' for o, n, k in ad.get('adata', []) if str(o).startswith('k')])
         table.append((uid, mod, bit, u, dw))
-        log.append(f'收\t{uid}\t{mod}\t{u["name"][:40]}\t' + (f'位 {bit}' if needs_bit else '不占位（只写填充 / 数据）') + f'，代码 {len(words)} 字、数据 {len(data)} 字节')
+        log.append(f'收\t{uid}\t{mod}\t{u["name"][:40]}\t' + (f'位 {bit}' if needs_bit else '不占位（只写填充 / 数据）') + f'，代码 {len(words)} 字、数据 {len(data)} 字节'
+                   + (f'，代码洞 {len(cave)} 字（{min(cave):#x} 起，搬进补丁区）' if cave else ''))
     # 金手指的位：一条改有效指令的 p 行属于「写它的全部条目」，按这个条目集合分位（同一集合的 p 行共用一位）；条目开着 = 它所在的各集合的位置 1
     #   （runtime/src/cpatch.c 按「位」列的逗号表求掩码）。共享挂钩被几条共用时，任一条开着挂钩就生效，各条的效果由各自的开关字（数据写入）决定
     owners = {}

@@ -767,7 +767,7 @@ int main(void) {
         CHECK(s2a_libpack_open(&cl, g_dir) == 1 && cl, "open compute v2 pack");
         uint8_t *j = NULL; size_t jl = 0; char why[192] = "";
         int v2_why = -1;
-        int rc = cl ? s2a_libpack_compute_v1(cl, key, 1, "h", "c", 32768, &j, &jl, why, sizeof why, &v2_why) : -1;
+        int rc = cl ? s2a_libpack_compute_v1(cl, key, 1, "h", "c", 32768, NULL, &j, &jl, why, sizeof why, &v2_why) : -1;
         if (variant == SUPPORT_WRONG_OWNER) {
             CHECK(rc == S2A_LIBPACK_REJECT && !j && strstr(why, "binding 23 is owned by support_buffer"),
                   "compute v2 rejects guest uniform ownership of support binding");
@@ -1061,7 +1061,7 @@ int main(void) {
         uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
         uint64_t h0 = s2a_libpack_hits();
         int hit_why = -1;
-        int rc = cl ? s2a_libpack_compute_v1(cl, kc, 1, "h", "c", 32768, &j, &jl, w, sizeof w, &hit_why) : -9;
+        int rc = cl ? s2a_libpack_compute_v1(cl, kc, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, &hit_why) : -9;
         CHECK(rc == 0 && j && jl == strlen((const char *)j), "cs key → HIT");
         CHECK(hit_why == S2A_LIBPACK_WHY_NONE, "hit carries reason NONE");
         CHECK(s2a_libpack_hits() == h0 + 1, "compute hit counter +1");
@@ -1105,7 +1105,7 @@ int main(void) {
         const uint8_t kg[8] = { 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
         const uint64_t rg0 = s2a_libpack_rejects();
         int gm_why = -1;
-        rc = cl ? s2a_libpack_compute_v1(cl, kg, 1, "h", "c", 32768, &j, &jl, w, sizeof w, &gm_why) : -9;
+        rc = cl ? s2a_libpack_compute_v1(cl, kg, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, &gm_why) : -9;
         CHECK(rc == -1 && !j && strstr(w, "no consumable guest source") && strstr(w, "gmem_map"),
               "gmem_map 存储无 guest 映射 → REJECT（不产 slot -1 死绑定）");
         CHECK(gm_why == S2A_LIBPACK_WHY_OTHER, "unmappable binding kind → reason OTHER, not reflection and not shared memory");
@@ -1123,7 +1123,7 @@ int main(void) {
             CHECK(mk_pack(rs, 2, ps, ns, 1) == 0, "compute support-from-spv pack written");
             CHECK(s2a_libpack_open(&cl, g_dir) == 1 && cl, "open compute support-from-spv pack");
             const uint8_t ke[8] = { 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7 };
-            rc = cl ? s2a_libpack_compute_v1(cl, ke, 1, "h", "c", 32768, &j, &jl, w, sizeof w, NULL) : -9;
+            rc = cl ? s2a_libpack_compute_v1(cl, ke, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, NULL) : -9;
             if (rc) printf("  compute_v1: %s\n", w);
             CHECK(rc == 0 && has(j, "\"kind\":\"support\",\"stage\":\"program\",\"set\":0,\"binding\":47,\"count\":1}"),
                   ".spv 声明 support_buffer b47、_b.json 不列 → 补出 support b47 count 1");
@@ -1154,7 +1154,7 @@ int main(void) {
             w[0] = 0;
             const uint64_t rj0 = s2a_libpack_rejects();
             int f64_why = -1;
-            rc = cl ? s2a_libpack_compute_v1(cl, kf, 1, "h", "c", 32768, &j, &jl, w, sizeof w, &f64_why) : -9;
+            rc = cl ? s2a_libpack_compute_v1(cl, kf, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, &f64_why) : -9;
             CHECK(rc == -1 && !j && strstr(w, "fp64_type_used") && strstr(w, "Float64"), "模块用 OpTypeFloat 64 → 计算程序 REJECT（退回现编），原因 fp64_type_used");
             CHECK(f64_why == S2A_LIBPACK_WHY_REFLECT, "SPIR-V capability refusal → reason REFLECT");
             CHECK(s2a_libpack_rejects() == rj0 + 1, "能力核拒收走库拒收计数 +1");
@@ -1166,7 +1166,7 @@ int main(void) {
         uint64_t r0 = s2a_libpack_rejects(), m0 = s2a_libpack_misses();
         const uint8_t ka[8] = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33 };
         int miss_why = -1;
-        CHECK(cl && s2a_libpack_compute_v1(cl, ka, 1, "h", "c", 32768, &j, &jl, w, sizeof w, &miss_why) == 1 && !j, "缺席 cs 键 → MISS");
+        CHECK(cl && s2a_libpack_compute_v1(cl, ka, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, &miss_why) == 1 && !j, "缺席 cs 键 → MISS");
         CHECK(miss_why == S2A_LIBPACK_WHY_NONE, "a miss carries reason NONE");
         CHECK(s2a_libpack_misses() == m0 + 1, "compute miss counter +1");
         s2a_libpack_close(cl);
@@ -1181,7 +1181,7 @@ int main(void) {
         size_t nv[2] = { strlen(VS_JSON), sizeof libpack_vert_spv };
         CHECK(mk_pack(rv, 2, pv, nv, 1) == 0, "vs-only pack written");
         cl = NULL; w[0] = 0;
-        CHECK(s2a_libpack_open(&cl, g_dir) == 1 && s2a_libpack_compute_v1(cl, kv, 1, "h", "c", 32768, &j, &jl, w, sizeof w, NULL) == -1 && !j
+        CHECK(s2a_libpack_open(&cl, g_dir) == 1 && s2a_libpack_compute_v1(cl, kv, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, NULL) == -1 && !j
               && strstr(w, "stage is 'vs' not 'cs'"), "vs 键当 cs 取 → stage 不符 REJECT");
         s2a_libpack_close(cl);
         CHECK(s2a_libpack_rejects() == r0 + 1, "compute reject counter +1");
@@ -1236,7 +1236,7 @@ int main(void) {
             uint64_t k64 = (uint64_t)(i + 1) * 0x0101010101010101ULL;
             uint8_t k[8]; memcpy(k, &k64, 8);
             uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
-            int rc = dl ? s2a_libpack_compute_v1(dl, k, 1, "h", "c", 32768, &j, &jl, w, sizeof w, NULL) : -9;
+            int rc = dl ? s2a_libpack_compute_v1(dl, k, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, NULL) : -9;
             if (!(rc == -1 && !j && strstr(w, "no consumable guest source"))) printf("  dead binding %d: rc=%d why=%s\n", i, rc, w);
             CHECK(rc == -1 && !j && strstr(w, "no consumable guest source"), "dead binding → REJECT with named reason");
             free(j);
@@ -1245,7 +1245,7 @@ int main(void) {
             uint64_t k64 = 8 * 0x0101010101010101ULL;
             uint8_t k[8]; memcpy(k, &k64, 8);
             uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
-            int rc = dl ? s2a_libpack_compute_v1(dl, k, 1, "h", "c", 32768, &j, &jl, w, sizeof w, NULL) : -9;
+            int rc = dl ? s2a_libpack_compute_v1(dl, k, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, NULL) : -9;
             if (rc != 0) printf("  tex36: rc=%d why=%s\n", rc, w);
             CHECK(rc == 0 && j && has(j, "\"kind\":\"texture\",\"stage\":\"cs\",\"set\":0,\"binding\":5,\"count\":1,\"slot\":80}"),
                   "tex reg36 → b5 slot 72+2×4=80");
@@ -1416,16 +1416,16 @@ int main(void) {
         uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
         // 上限 32768 < Workgroup 45056：出库即拒、原因带两边数值（退回现编由调用方做）
         int why_code = -1;
-        int rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 32768, &j, &jl, w, sizeof w, &why_code) : -9;
+        int rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 32768, NULL, &j, &jl, w, sizeof w, &why_code) : -9;
         if (!(rc == -1 && !j && strstr(w, "compute shared memory 45056 exceeds device limit 32768"))) printf("  spill gate: rc=%d why=%s\n", rc, w);
         CHECK(rc == -1 && !j && strstr(w, "compute shared memory 45056 exceeds device limit 32768"), "spill WG>limit → REJECT 具名");
         // 原因码：共享内存超限由码标出，不靠 why 文本——不给文本缓冲（NULL / 0）码照样是 SHARED_LIMIT；诊断（nvk_shader.c）只读这个码
         CHECK(why_code == S2A_LIBPACK_WHY_SHARED_LIMIT, "spill WG>limit → reason code SHARED_LIMIT");
         why_code = -1;
-        rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 32768, &j, &jl, NULL, 0, &why_code) : -9;
+        rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 32768, NULL, &j, &jl, NULL, 0, &why_code) : -9;
         CHECK(rc == -1 && !j && why_code == S2A_LIBPACK_WHY_SHARED_LIMIT, "spill WG>limit with no text buffer at all → still SHARED_LIMIT");
         // 上限 65536 ≥ 45056：同一份记录照常出库（spill 是批翻链 MSL 侧事实，.spv 原样可用）
-        rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 65536, &j, &jl, w, sizeof w, &why_code) : -9;
+        rc = sl_ ? s2a_libpack_compute_v1(sl_, ks, 1, "h", "c", 65536, NULL, &j, &jl, w, sizeof w, &why_code) : -9;
         CHECK(rc == 0 && j && has(j, "\"kind\":\"compute\""), "WG≤limit → HIT（spill 标记不影响可用的 .spv）");
         CHECK(why_code == S2A_LIBPACK_WHY_NONE, "a hit right after a refusal on the same thread carries reason NONE, no stale code");
         free(j);
@@ -1471,7 +1471,7 @@ int main(void) {
         const uint8_t kv[8] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
         const uint8_t kp[8] = { 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe };
         memcpy(keys[0], kv, 8); memcpy(keys[1], kp, 8); memset(keys[2], 0x60, 8);   // 紧排：vs / fs / gs（NVN 位序 0 / 1 / 2）
-        const struct s2a_libpack_gfx tri_on = { "Triangles", PROFILE_GS_ON, strlen(PROFILE_GS_ON) };
+        const struct s2a_libpack_gfx tri_on = { .topology = "Triangles", .profile_json = PROFILE_GS_ON, .profile_bytes = strlen(PROFILE_GS_ON) };
         uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
 
         // 命中：三段齐、gs 绑定号 = arg×6+3、宿主解析出第 2 段（gs）
@@ -1503,18 +1503,18 @@ int main(void) {
 
         // 设备没开 geometryShader（profile 同字段 false）：照旧 miss，不合成
         uint64_t m0 = s2a_libpack_misses();
-        const struct s2a_libpack_gfx tri_off = { "Triangles", PROFILE_GS_OFF, strlen(PROFILE_GS_OFF) };
+        const struct s2a_libpack_gfx tri_off = { .topology = "Triangles", .profile_json = PROFILE_GS_OFF, .profile_bytes = strlen(PROFILE_GS_OFF) };
         w[0] = 0;
         CHECK(glp && s2a_libpack_program_v1(glp, keys, 0x7, &tri_off, 1, "h", "c", &j, &jl, w, sizeof w) == 1 && !j
               && strstr(w, "geometryShader"), "geometryShader 没开 → MISS（原因写明）");
         CHECK(glp && s2a_libpack_program_v1(glp, keys, 0x7, NULL, 1, "h", "c", &j, &jl, w, sizeof w) == 1 && !j,
               "没给绘制事实（gfx = NULL）→ 几何程序 MISS");
-        const struct s2a_libpack_gfx noprof = { "Triangles", NULL, 0 };
+        const struct s2a_libpack_gfx noprof = { .topology = "Triangles", .profile_json = NULL, .profile_bytes = 0 };
         CHECK(glp && s2a_libpack_program_v1(glp, keys, 0x7, &noprof, 1, "h", "c", &j, &jl, w, sizeof w) == 1 && !j,
               "profile 读不出 → 按没开 MISS");
         // 图元：线输入没有 _vg1 → miss；邻接离线不出 → miss
-        const struct s2a_libpack_gfx lines = { "Lines", PROFILE_GS_ON, strlen(PROFILE_GS_ON) };
-        const struct s2a_libpack_gfx adj = { "TrianglesAdjacency", PROFILE_GS_ON, strlen(PROFILE_GS_ON) };
+        const struct s2a_libpack_gfx lines = { .topology = "Lines", .profile_json = PROFILE_GS_ON, .profile_bytes = strlen(PROFILE_GS_ON) };
+        const struct s2a_libpack_gfx adj = { .topology = "TrianglesAdjacency", .profile_json = PROFILE_GS_ON, .profile_bytes = strlen(PROFILE_GS_ON) };
         CHECK(glp && s2a_libpack_program_v1(glp, keys, 0x7, &lines, 1, "h", "c", &j, &jl, w, sizeof w) == 1 && !j,
               "线输入、库里只有三角那份 → MISS");
         CHECK(glp && s2a_libpack_program_v1(glp, keys, 0x7, &adj, 1, "h", "c", &j, &jl, w, sizeof w) == 1 && !j,

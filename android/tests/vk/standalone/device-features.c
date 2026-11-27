@@ -147,7 +147,7 @@ void __wrap_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physical, VkPhysicalDe
 // 独立硬编码的允许集合；robustBufferAccess 有意保留（#1581 P 的 OOB 审计）。
 #define ALLOWED(F) \
     F(robustBufferAccess) F(fullDrawIndexUint32) F(imageCubeArray) F(independentBlend) \
-    F(geometryShader) F(sampleRateShading) F(dualSrcBlend) F(logicOp) F(multiDrawIndirect) \
+    F(geometryShader) F(tessellationShader) F(sampleRateShading) F(dualSrcBlend) F(logicOp) F(multiDrawIndirect) \
     F(drawIndirectFirstInstance) F(depthClamp) F(depthBiasClamp) F(fillModeNonSolid) \
     F(largePoints) F(multiViewport) F(samplerAnisotropy) F(textureCompressionETC2) \
     F(textureCompressionASTC_LDR) F(textureCompressionBC) F(occlusionQueryPrecise) \

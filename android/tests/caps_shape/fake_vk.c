@@ -119,6 +119,8 @@ static const char *feature_struct_bad(int st, const struct cs_shape *s) {
         return cs_has_ext(s, "VK_KHR_timeline_semaphore") || eff >= VK_API_VERSION_1_2 ? NULL : "timeline 特性结构（1.2 核心 / VK_KHR_timeline_semaphore）";
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES:
         return cs_has_ext(s, "VK_EXT_descriptor_indexing") || eff >= VK_API_VERSION_1_2 ? NULL : "descriptor_indexing 特性结构（1.2 核心 / VK_EXT_descriptor_indexing）";
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT:
+        return cs_has_ext(s, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME) || eff >= VK_API_VERSION_1_2 ? NULL : "host_query_reset 特性结构（1.2 核心 / VK_EXT_host_query_reset）";
     default: return NULL;
     }
 }
@@ -161,6 +163,8 @@ static void features_chain(void *next, int for_create, const struct cs_shape *s)
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT:
             // 档案里的位（真机档：device_caps.c 只在特性也开着时把扩展写进 enabledExtensions，转换时据此记 1）
             BIT(((VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT *)b)->swapchainMaintenance1, s->swapchainMaintenance1 && cs_any_ext(s, "VK_EXT_swapchain_maintenance1", "VK_KHR_swapchain_maintenance1"), "swapchainMaintenance1"); break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT:
+            BIT(((VkPhysicalDeviceHostQueryResetFeaturesEXT *)b)->hostQueryReset, s->hostQueryReset && cs_has_ext(s, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME), "hostQueryReset"); break;
         default: break;   // 别的结构（placed 映射等）：没有读数，保持调用方清零的 0（= 无）
         }
 #undef BIT
@@ -238,9 +242,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyCommandPool(VkDevice d, VkCommandPool c, con
 static VKAPI_ATTR void VKAPI_CALL fake_draw_count(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkBuffer cb, VkDeviceSize co, uint32_t m, uint32_t st) {
     (void)c; (void)b; (void)o; (void)cb; (void)co; (void)m; (void)st;
 }
+static VKAPI_ATTR void VKAPI_CALL fake_reset_query_pool(VkDevice d, VkQueryPool qp, uint32_t first, uint32_t count) {
+    (void)d; (void)qp; (void)first; (void)count;
+}
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice d, const char *name) {
     (void)d;
     if (!strcmp(name, "vkCmdDrawIndirectCountKHR") || !strcmp(name, "vkCmdDrawIndexedIndirectCountKHR")) return (PFN_vkVoidFunction)fake_draw_count;
+    if (!strcmp(name, "vkResetQueryPoolEXT")) return (PFN_vkVoidFunction)fake_reset_query_pool;
     return NULL;
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance i, const char *name) {

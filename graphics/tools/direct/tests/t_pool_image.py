@@ -9,7 +9,7 @@
 #   ③ 格式 r32ui 的图像缓冲池 → 同上
 #   ④ 负对照：同名形状但不够池长（32 项，POOL_MIN 33 以下）→ 原样
 #   ⑤ 负对照：句柄库不是 cb0（cp_i2d_cb2_40000000_rgba8）→ 原样
-#   反证：DSH_CMP_DLL 指向改动前的翻译器时 ①②③ 红（成员不变、反射不是 tex_pool）。用法：python3 t_pool_image.py
+#   ⑥–⑧ 池元素上的原生原子（D-GMKW / D-F6ZC，见下）。反证：DSH_CMP_DLL 指向改动前的翻译器时 ①②③ 红（成员不变、反射不是 tex_pool）。用法：python3 t_pool_image.py
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); import dshfn
 
@@ -46,6 +46,33 @@ for (name, nm, el, ln, use, pooled), src, r, rf in zip(cases, srcs, res, refl):
             b = rf.get('ok'); b = b[0] if isinstance(b, list) and b else b
             got = (b.get('kind'), b.get('elem')) if isinstance(b, dict) else b
             err = None if got == ('tex_pool', el) else f'反射 {got}，应 (tex_pool, {el})'
+    bad += err is not None
+    print(f'{"✓" if err is None else "✗"} {name}{"" if err is None else "：" + err}')
+# 池元素上的原生原子（D-GMKW / D-F6ZC 计算着色器 ffeb5f2b8abc6dc3：cp_ib_cb0_40000000_r32ui[int(_1875)].atomic_*，改写后接收者是 (&…->e[0])[下标]）：
+#   ⑥ R32 整数读写图像缓冲池 → 改写后反射通过、kind tex_pool（宿主建 R32 整数可写缓冲贴图时就带原子用途）
+#   ⑦ 负对照：2D 图像池上原子 → reflect failed，原因点名池与元素类型（2D 贴图不保证带原子用途）
+#   ⑧ 负对照：缓冲池格式空（名字以「_」收尾，不知是不是 R32）→ 同样拒
+#   反证：改动前 ⑥ 报「could not parse every native texture atomic receiver (0 of 1)」
+I2R = 'cp_i2d_cb0_40000000_r32ui'
+POOL_ATOM = 'native texture atomic on a pool element is supported only for read_write R32 integer buffer images: '
+acases = [
+    ('⑥ R32 整数读写图像缓冲池上原子：反射通过', IR, 'texture_buffer<uint, access::read_write>', f'uint _9 = spvDescriptorSet0.{IR}[int(_5)].atomic_fetch_add(uint(0), 1u).x;', None),
+    ('⑦ 负对照：2D 图像池上原子', I2R, 'texture2d<uint, access::read_write>', f'uint _9 = spvDescriptorSet0.{I2R}[int(_5)].atomic_fetch_add(uint2(0), 1u).x;',
+     POOL_ATOM + I2R + ' (texture2d<uint, access::read_write>)'),
+    ('⑧ 负对照：格式空的缓冲池上原子', IB, 'texture_buffer<uint, access::read_write>', f'uint _9 = spvDescriptorSet0.{IB}[int(_5)].atomic_fetch_add(uint(0), 1u).x;',
+     POOL_ATOM + IB + ' (texture_buffer<uint, access::read_write>)'),
+]
+asrcs = [kernel(f'array<{el}, 1048576> {nm}', use) for _, nm, el, use, _ in acases]
+ares = dshfn.batch([('pool_arrays', [s]) for s in asrcs])
+arefl = dshfn.batch([('reflect_detail', ['cs', r.get('ok'), {'sbufs': []}]) if isinstance(r.get('ok'), str) else ('reflect_detail', ['cs', '', {}]) for r in ares])
+for (name, nm, el, use, want_err), r, rf in zip(acases, ares, arefl):
+    n += 1; out = r.get('ok'); got = rf.get('ok')
+    if not isinstance(out, str) or f'(&spvDescriptorSet0.{nm}->e[0])[dm_pool_mark(' not in out: err = f'池改写没发生：{str(out)[:120]}'
+    elif want_err is None:
+        b = got[0] if isinstance(got, list) and got else got
+        err = None if isinstance(b, dict) and (b.get('kind'), b.get('elem')) == ('tex_pool', el) else f'反射 {got}，应 (tex_pool, {el})'
+    else:
+        err = None if isinstance(got, dict) and got.get('err') == 'reflect failed' and got.get('detail') == want_err else f'应拒「{want_err}」，真结果 {got}'
     bad += err is not None
     print(f'{"✓" if err is None else "✗"} {name}{"" if err is None else "：" + err}')
 print(f'图像整池回退数组：{n - bad}/{n} 例过')

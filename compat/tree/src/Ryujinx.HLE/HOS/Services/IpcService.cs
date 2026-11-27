@@ -350,6 +350,10 @@ namespace Ryujinx.HLE.HOS.Services
                 }
 
                 S2AHooks.SnapForceDomainIdMiss++;
+                // 原号被占：点名谁占着、本该是谁、改分到几号（2002-6457 恢复局两份诊断都有「原号被占」，只有计数看不出错位到哪个对象）
+                int got = DomainObjects.Add(obj);
+                Console.Error.WriteLine($"[s2a] 【黄】即时存档恢复：域对象原号 {id} 已被 {DomainObjects.GetData(id)?.GetType().Name ?? "?"} 占着，{obj.GetType().Name} 改分到 {got}（游戏按原号发给它的请求会落到占着的那个对象上）");
+                return got;
             }
 
             return DomainObjects.Add(obj);

@@ -32,7 +32,7 @@ struct CoverFlowView: View, Equatable {
     @State private var userScrolling = false
     /// The card nearest the middle when the current touch began, also mid-snap, for one card per gesture.
     @State private var gestureStart = 0
-    /// False while the carousel scrolls, decelerates or snaps: a tap on the centre card then does nothing.
+    /// False while the player's scroll is in flight (touch, deceleration, its snap): a tap on the centre card then does nothing.
     @State private var settled = true
     /// The card in the middle when the current touch began. A tap is judged against this snapshot, not against
     /// whatever is selected by the time the finger lifts.
@@ -241,7 +241,7 @@ struct CoverFlowView: View, Equatable {
             // settled does the card in the middle become the selection, read from the final offset itself, so a stale
             // value can never send the carousel back. A scroll this view animates starts from idle and never sets the
             // flag, so it never selects.
-            settled = phase == .idle
+            settled = Self.phaseSettled(phase, userScrolling: userScrolling)
             if phase == .interacting && old != .interacting {
                 let offset = context.geometry.contentOffset.x + context.geometry.contentInsets.leading
                 gestureStart = min(games.count - 1, max(0, Int((offset / stride).rounded())))
@@ -488,10 +488,24 @@ struct CoverFlowView: View, Equatable {
         finishDeckScroll(epoch: deckEpoch)
     }
 
-    /// Whether a tap on the centred card may act now. On the carousel the scroll phases say so; on the shelf
-    /// there are no phases, so the switch animation gets the same 0.32s grace as the deck.
+    /// Whether a tap on the centred card may act now: 0.32s after the selection last changed (the switch animation's
+    /// grace), and on the carousel also not while the player's own scroll is in flight (`settled`).
     private var deckSettled: Bool {
-        games.count <= 3 ? Date().timeIntervalSince(lastSwitchAt) >= 0.32 : settled
+        let graced = Date().timeIntervalSince(lastSwitchAt) >= 0.32
+        return games.count <= 3 ? graced : settled && graced
+    }
+
+    /// Whether the carousel's scroll phase leaves the centre card free to act. Not while the player's own scroll is in
+    /// flight: the touch, the deceleration and the snap that follows them (`userScrolling` stays set until idle). A
+    /// scroll this view animates itself (centring the selection at launch, after a tap or the D-pad) does not count:
+    /// it can stay `.animating` and never report `.idle`, which left a cold start in landscape with a centre card that
+    /// never started its game (#502); the switch animation is covered by the time rule in `deckSettled` instead.
+    static func phaseSettled(_ phase: ScrollPhase, userScrolling: Bool) -> Bool {
+        switch phase {
+        case .idle: true
+        case .animating: !userScrolling
+        default: false
+        }
     }
 
     private func coverButton(_ detail: GameDetail, cover: CGFloat, onTapOverride: (() -> Void)? = nil) -> some View {
