@@ -131,6 +131,11 @@ namespace Ryujinx.Audio.Renderer.Server
         internal bool IsActiveSnapshot;        // 锁1 快照的 _isActive(效果 StoreStatus 读)
         internal readonly bool[] EffectIsNew;   // 效果段 IsNew(解析段独立扫输入;落账对 live 重放 InitializeResultState)
 
+        // NodeStates.Initialize 经 SpanMemoryManager<int>.Cast 把工作缓冲的地址存成裸指针（上游只给它不会搬的工作缓冲），
+        //   所以这块必须固定：普通 new byte[] 会被 GC 压缩搬走，之后每次排序都写回旧地址——旧地址已解除提交时当场 SIGBUS，
+        //   已被别的对象占用时悄悄写坏托管堆，等后台 GC 标记时才崩。分配在固定对象堆（POH），永不搬动
+        internal static byte[] S2ANodeStatesWorkBuffer(int mixCount) => GC.AllocateArray<byte>(NodeStates.GetWorkBufferSize(mixCount), pinned: true);
+
         internal S2AUpdateShadow(
             uint processHandle,
             Memory<MemoryPoolInfo> livePools,
@@ -230,7 +235,7 @@ namespace Ryujinx.Audio.Renderer.Server
             MixContext.Initialize(
                 new int[mixCount],
                 new MixInfo[mixCount],
-                new byte[NodeStates.GetWorkBufferSize(mixCount)],
+                S2ANodeStatesWorkBuffer(mixCount),
                 new byte[EdgeMatrix.GetWorkBufferSize(mixCount)]);
 
             // ---- 声音段记录 ----
@@ -337,47 +342,8 @@ namespace Ryujinx.Audio.Renderer.Server
                 shadow.S2AShadowCopyGameFieldsFrom(live);
             }
 
-            // 分频:结构体整拷 + 指针重绑(拷来的链头/_next 指 live,影子段 ClearLinks/Link 顺着写会指进 live——
-            //   渲染拍正在读链,锁外写 live 是撕裂)+ 目的地基底拷贝(落账增量判据)
-            SplitterDestinationVersion1* liveBaseV1 = _liveSplitterContext.S2ADestinationBaseV1;
-            SplitterDestinationVersion2* liveBaseV2 = _liveSplitterContext.S2ADestinationBaseV2;
-            SplitterDestinationVersion1* shadowBaseV1 = null;
-            SplitterDestinationVersion2* shadowBaseV2 = null;
-
-            if (!_shadowDestinationsV2.IsEmpty)
-            {
-                fixed (SplitterDestinationVersion2* p = _shadowDestinationsV2.Span)
-                {
-                    shadowBaseV2 = p;
-                }
-            }
-            else
-            {
-                fixed (SplitterDestinationVersion1* p = _shadowDestinationsV1.Span)
-                {
-                    shadowBaseV1 = p;
-                }
-            }
-
-            for (int i = 0; i < _splitterCount; i++)
-            {
-                SplitterContext.S2AGetState(i) = _liveSplitterContext.S2AGetState(i);
-                SplitterContext.S2AGetState(i).S2ARebindSnapshotPointers(liveBaseV1, liveBaseV2, shadowBaseV1, shadowBaseV2);
-            }
-
-            for (int i = 0; i < _destinationCount; i++)
-            {
-                if (!_shadowDestinationsV2.IsEmpty)
-                {
-                    _shadowDestinationsV2.Span[i] = _liveSplitterContext.S2AGetDestinationV2(i);
-                    _destinationBaseV2.Span[i] = _liveSplitterContext.S2AGetDestinationV2(i);
-                }
-                else
-                {
-                    _shadowDestinationsV1.Span[i] = _liveSplitterContext.S2AGetDestinationV1(i);
-                    _destinationBaseV1.Span[i] = _liveSplitterContext.S2AGetDestinationV1(i);
-                }
-            }
+            // 分频:结构体整拷 + 指针重绑(链头与每个目的地的 _next 都平移到影子数组)+ 目的地基底拷贝,见 SplitterContext.S2ASnapshotFrom
+            SplitterContext.S2ASnapshotFrom(_liveSplitterContext);
 
             _liveMixContext.S2ASnapshotTo(MixContext);
         }

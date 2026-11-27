@@ -1,0 +1,7 @@
+# 逐款缺省单测夹具（runtime/tests/t_game_defaults.c 与 tests/game_defaults_test.py 共用，期望各自手写）
+0100000000ABC000	*	*	docked	docked	# 夹具：主机 p99 18 ms vs 掌机 17 ms；测过 1111111111111111
+0100000000ABC000	2222222222222222	*	docked	handheld	# 夹具：这一版主机掉帧 p99 30 ms vs 掌机 17 ms；测过 2222222222222222
+0100000000ABC000	*	ios	quality	MetalFX	# 夹具：锐度 vs 标准；测过 1111111111111111
+0100000000ABC000	*	mac	quality	Nearest	# 夹具：2D 清晰 vs 标准；测过 1111111111111111
+0100000000ABC000	*	*	fpsPick	60	# 夹具：60 档 p99 16 ms vs 自动；测过 1111111111111111
+0100000000ABC000	*	*	drawBarriers	game	# 夹具：GPU 18 ms vs full 25 ms；测过 1111111111111111

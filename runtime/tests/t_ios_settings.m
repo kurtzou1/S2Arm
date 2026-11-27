@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
         }
         for (size_t i = 0; i < 4; i++) {
             NSDictionary *spec = specs[keys[i]];
-            check([spec[@"DefaultValue"] isEqual:@(getenv(variables[i]))], [keys[i] stringByAppendingString:@" 的首次启动值与菜单默认值一致"]);
+            check(!getenv(variables[i]), [keys[i] stringByAppendingString:@" 首次启动没选过：不写进环境（宿主未设时的缺省 = 菜单默认值，11-27 逐款缺省）"]);
             check([spec[@"Values"] count] == [spec[@"Titles"] count], [keys[i] stringByAppendingString:@" 的显示项与保存值数量一致"]);
             check([spec[@"Values"] containsObject:spec[@"DefaultValue"]], [keys[i] stringByAppendingString:@" 的默认值是有效选项"]);
             for (NSString *value in spec[@"Values"]) {
@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
         check([a boolForKey:@"S2ANS2ProAdapterEnabled"], @"读取画面设置保留现有手柄偏好");
         clear_environment();
         s2a_ios_apply_graphics_settings(b);
-        check(!strcmp(getenv(variables[0]), "1") && !strcmp(getenv(variables[1]), "None") && !strcmp(getenv(variables[2]), "Bilinear") && !strcmp(getenv(variables[3]), "0"), @"另一 App 的偏好仍是默认值");
+        check(!getenv(variables[0]) && !getenv(variables[1]) && !getenv(variables[2]) && !getenv(variables[3]), @"另一 App 没选过：四项都不写进环境（按缺省）");
 
         clear_environment();
         setenv(variables[0], "0.75", 1);
@@ -276,13 +276,13 @@ int main(int argc, char **argv) {
                 clear_environment();
                 [a setObject:invalid forKey:keys[i]];
                 s2a_ios_apply_graphics_settings(a);
-                check([specs[keys[i]][@"DefaultValue"] isEqual:@(getenv(variables[i]))], [NSString stringWithFormat:@"%@ 的非法保存值 %@ 使用默认值", keys[i], invalid]);
+                check(!getenv(variables[i]), [NSString stringWithFormat:@"%@ 的非法保存值 %@ 按没选过：不写进环境", keys[i], invalid]);
                 check([a objectForKey:keys[i]] == nil, [keys[i] stringByAppendingString:@" 的非法保存值已清除"]);
                 check([a synchronize], @"清除后的偏好写入成功");
                 clear_environment();
                 NSUserDefaults *reopened = [[NSUserDefaults alloc] initWithSuiteName:suiteA];
                 s2a_ios_apply_graphics_settings(reopened);
-                check([specs[keys[i]][@"DefaultValue"] isEqual:@(getenv(variables[i]))] && [reopened objectForKey:keys[i]] == nil, [keys[i] stringByAppendingString:@" 再次启动仍使用默认值且无失效保存值"]);
+                check(!getenv(variables[i]) && [reopened objectForKey:keys[i]] == nil, [keys[i] stringByAppendingString:@" 再次启动仍按没选过且无失效保存值"]);
             }
         }
 
@@ -297,18 +297,18 @@ int main(int argc, char **argv) {
             check([s2a_ios_graphics_snapshot(a)[key] isEqual:@NO], @"应用内首次读取为掌机档");
             clear_environment();
             s2a_ios_apply_graphics_settings(a);
-            check(getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "0"), @"首次启动导出掌机档 S2A_DOCKED=0");
+            check(!getenv("S2A_DOCKED"), @"首次启动没选过档位：不写 S2A_DOCKED（交宿主按逐款缺省 / 缺省掌机，11-27）");
             [a setBool:YES forKey:key];
             check([a synchronize], @"主机模式偏好写入成功");
             check([s2a_ios_graphics_snapshot(a)[key] isEqual:@YES], @"应用内读取已保存的主机档");
-            check(getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "0"), @"修改偏好不改变当前进程的档位");
+            check(!getenv("S2A_DOCKED"), @"修改偏好不改变当前进程的档位");
             clear_environment();
             NSUserDefaults *reopened = [[NSUserDefaults alloc] initWithSuiteName:suiteA];
             s2a_ios_apply_graphics_settings(reopened);
             check(getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "1"), @"重开后导出已保存的主机档 S2A_DOCKED=1");
             clear_environment();
             s2a_ios_apply_graphics_settings(b);
-            check(getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "0") && [s2a_ios_graphics_snapshot(b)[key] isEqual:@NO], @"另一 App 保持掌机默认值");
+            check(!getenv("S2A_DOCKED") && [s2a_ios_graphics_snapshot(b)[key] isEqual:@NO], @"另一 App 没选过：不写 S2A_DOCKED、界面仍显示掌机");
             setenv("S2A_DOCKED", "0", 1);
             s2a_ios_apply_graphics_settings(a);
             check(!strcmp(getenv("S2A_DOCKED"), "0") && [a boolForKey:key], @"显式掌机环境优先且保留主机偏好");
@@ -322,6 +322,25 @@ int main(int argc, char **argv) {
             s2a_ios_apply_graphics_settings(reopened);
             check(getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "0") && [s2a_ios_graphics_snapshot(reopened)[key] isEqual:@NO], @"关掉主机模式后重开导出掌机档");
             [a removeObjectForKey:key];
+        }
+        {   // 11-27 逐款缺省的根：玩家一项都没选过时，画面五项（渲染倍率 / 抗锯齿 / 画质提升 / 帧率上限 / 档位）与帧率档一个都不写进环境，
+            //   交宿主按「逐款缺省 → 定义表缺省」定（runtime/src/gdefaults.c s2a_game_defaults_apply 未设才写）；选过的（含选回全局缺省值）照写。
+            //   期望手写；用改前的 settings.m 跑，前一项不通过（原先没选过也写 1 / None / Bilinear / 0 / 0）
+            NSString *suite = [@"local.s2arm.settings-unchosen." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *u = [[NSUserDefaults alloc] initWithSuiteName:suite];
+            clear_environment(); unsetenv("S2A_FPS_PICK");
+            s2a_ios_apply_graphics_settings(u);
+            const char *names[] = {"S2A_RES_SCALE", "S2A_ANTI_ALIASING", "S2A_SCALING_FILTER", "S2A_FPS", "S2A_DOCKED", "S2A_FPS_PICK"};
+            int none = 1; for (size_t i = 0; i < 6; i++) if (getenv(names[i])) { none = 0; fprintf(stderr, "  没选过却写了 %s=%s\n", names[i], getenv(names[i])); }
+            check(none, @"没选过：画面五项与帧率档一个都不写进环境");
+            [u setObject:@"1" forKey:@"S2AResolutionScale"]; [u setObject:@"Bilinear" forKey:@"S2AScalingFilter"]; [u setBool:NO forKey:@"S2ADockedMode"]; [u setInteger:0 forKey:@"S2AFpsPick"];
+            clear_environment(); unsetenv("S2A_FPS_PICK");
+            s2a_ios_apply_graphics_settings(u);
+            check(getenv("S2A_RES_SCALE") && !strcmp(getenv("S2A_RES_SCALE"), "1") && getenv("S2A_SCALING_FILTER") && !strcmp(getenv("S2A_SCALING_FILTER"), "Bilinear")
+                  && getenv("S2A_DOCKED") && !strcmp(getenv("S2A_DOCKED"), "0") && getenv("S2A_FPS_PICK") && !strcmp(getenv("S2A_FPS_PICK"), "0") && !getenv("S2A_FPS"),
+                  @"选回全局缺省值也照写（1× / 标准 / 掌机 / 自动），没选的帧率上限仍不写");
+            clear_environment(); unsetenv("S2A_FPS_PICK");
+            [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:suite];
         }
 
         // 开发浮层开关：缺省关 = 不设 S2A_HUD；打开 = S2A_HUD=1；启动环境显式给的优先

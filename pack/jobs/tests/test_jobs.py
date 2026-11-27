@@ -1739,14 +1739,14 @@ class JobsTests(unittest.TestCase):
 
     def test_runtime_environment_follows_system_language_and_docks_by_default(self):
         # 请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；玩家在启动设置选的游戏语言走 community launch_env（11-14 维护者确认可选）；
-        # 不带 docked 是主机模式，只有明说 false 才掌机
+        # 不带 docked 不写 S2A_DOCKED（宿主定）；明说 true / false 照给
         os.environ["S2A_SYSTEM_LANGUAGE"] = "Japanese"
         try:
             env = build.runtime_env(self.c, self.game(), self.root / "runtime")
         finally:
             os.environ.pop("S2A_SYSTEM_LANGUAGE")
         self.assertNotIn("S2A_SYSTEM_LANGUAGE", env)
-        self.assertEqual(env["S2A_DOCKED"], "0")   # 没选过：缺省掌机
+        self.assertNotIn("S2A_DOCKED", env)   # 没选过不写（11-27）：交宿主按逐款缺省 / 缺省掌机，写成显式 0 逐款缺省就盖不过
         self.c.r["docked"] = False
         self.assertEqual(build.runtime_env(self.c, self.game(), self.root / "runtime")["S2A_DOCKED"], "0")
         self.c.r["docked"] = True   # 请求明给主机照给的

@@ -9492,6 +9492,10 @@
   "en": "Unpack {0}"
  },
  {
+  "source": "解包 {0}（按这块盘 {1} KB 的分配单元逐文件算）",
+  "en": "Unpack {0} (counted file by file at this drive's {1} KB allocation unit)"
+ },
+ {
   "source": "已在盘上",
   "en": "already on disk"
  },
@@ -10582,6 +10586,10 @@
  {
   "source": "在「{0}」上腾出至少 {3} GB 后重试；游戏原件、存档和上次成功的运行版本别删。",
   "en": "Free up at least {3} GB on “{0}”, then try again. Don't delete the game files, saves, or the last version that ran successfully."
+ },
+ {
+  "source": "「{0}」空间不够：这一步还要约 {1} GB，盘上只剩 {2} GB。出包前估这块盘要 {3} GB、判的是够用：这次是 S2Arm 预估偏低，不是这块盘本来就不够。",
+  "en": "Not enough space on “{0}”: this step needs about {1} GB, but only {2} GB is free. Before building, S2Arm estimated this drive needed {3} GB and judged it enough: this time S2Arm's estimate was too low — your drive wasn't too small to begin with."
  },
  {
   "source": "已送到手机，但手机上的 S2Arm 还没有签名证书，这款还开不了：在手机上打开 S2Arm → 齿轮 →「签名证书」，SideStore 装的点「从 SideStore 获取」；AltStore 装的先在 AltStore 设置里导出签名证书，再点「导入 .p12…」。",

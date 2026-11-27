@@ -147,15 +147,21 @@ depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就
   local f c=() h=() st day key cd b k bo=; [ "${GATE_BUILD_ONLY:-}" = 1 ] && bo=1
   # 11-26 不再按目录分（原先只认 runtime/ graphics/ 下的 C 源：android/native 下的 C 源改了，只改它时清单空 → 全编；
   #   同 runtime 源一起改时它被忽略 → 编到它的组可能被跳，假绿）。C 系源文件不论在哪都和每组 make -n 的源文件比；
-  #   头文件不论在哪：只编按 include 闭包换成源文件，完整门禁全跑；其余一切（Makefile / *.mk / 链接脚本 / 编译参数文件 / 生成器脚本 / 数据）
+  #   头文件不论在哪：按 include 闭包换成源文件（11-27 起完整门禁同只编；完整门禁下没有源 include 它 → 全跑：可能是脚本 / 数据在读）；其余一切（Makefile / *.mk / 链接脚本 / 编译参数文件 / 生成器脚本 / 数据）
   #   都可能改编译结果、又不在源文件清单里，一改就全跑。GATE_CHANGED 是列车 / 守望给的「改动 ∩ 本钩子输入」，不是全部改动
   for f in $GATE_CHANGED; do case $f in
     *.c|*.m|*.mm|*.cpp|*.cc|*.S|*.s) c+=("$f");;
-    # 只编（11-24 收窄）：头文件也收窄——按 #include / #import 静态闭包（tools/include_closure.py）求出受影响的源文件，并进 c；跑的组只看编不编得过
-    *.h|*.inc|*.hpp|*.hh|*.def) [ -n "$bo" ] && h+=("$f") || return 0;;
+    # 头文件也收窄（只编 11-24、完整门禁 11-27）：按 #include / #import 静态闭包（tools/include_closure.py）求出受影响的源文件，并进 c，
+    #   组按「源文件清单里有没有这些源」判跑不跑——改 .inc / .h 不再整钩子 478 组全跑（11-27 diag/tess-stage-dropped 只改 dsh_miss.inc 跑满 908 秒）
+    *.h|*.inc|*.hpp|*.hh|*.def) h+=("$f");;
     *) return 0;;
   esac; done
-  if [ ${#h[@]} -gt 0 ]; then local x; while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done < <(python3 -B tools/include_closure.py "${h[@]}" 2> /dev/null) || return 0; fi
+  # 闭包算不出（脚本出错）→ 全跑：先收进变量再判退出码（原写法 `done < <(…) || return 0` 只看 while 的退出码，脚本失败时头文件被静默丢掉、同批的源照常收窄 = 假绿）
+  #   完整门禁逐个头文件算：哪一个没有源 include 它（可能是脚本 / 数据在读、或用宏拼的 include）→ 全跑；只编一起算（没有源用到 = 不影响编译）
+  if [ ${#h[@]} -gt 0 ]; then local x hs y
+    if [ -n "$bo" ]; then hs=$(python3 -B tools/include_closure.py "${h[@]}" 2> /dev/null) || return 0
+    else hs=; for y in "${h[@]}"; do x=$(python3 -B tools/include_closure.py "$y" 2> /dev/null) && [ -n "$x" ] || return 0; hs="$hs"$'\n'"$x"; done; fi
+    while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done <<< "$hs"; fi
   [ ${#c[@]} -gt 0 ] || { [ -n "$bo" ] && [ ${#h[@]} -gt 0 ] && echo "$*"; return 0; }   # 只编：改的头文件没有源用到 → 一组都不用编
   st=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_depskip; day=$(date +%Y%m%d); mkdir -p "$st" 2> /dev/null || return 0
   [ -n "$bo" ] || [ -f "$st/full.$day" ] || { : > "$st/full.$day"; return 0; }   # 每天这台机器第一次：全跑（只编不做这一步：编译结果不随天变）
@@ -189,8 +195,8 @@ SK=" ${GATE_SKIP:-} "; TG=" $(grep -oE '^native-test-[a-z_0-9]+' <<< "$MP" | sed
 case $TG in (*[![:space:]]*) ;; (*) echo "原生层单测目标列表为空 → 红"; exit 1;; esac
 n=0
 RUN=(); for k in $TG; do case $SK in *" $k "*) continue;; esac; RUN+=("$k"); n=$((n + 1)); done
-# 按源文件跳组（11-14 门禁提速）：只在本批改动「只有 C 系源文件（只编另含头文件）」时，跳过源文件清单里一个改动都没有的组（11-26 起不分目录）。
-#   改动里有头文件（完整门禁）/ 数据 / 脚本 / mk / Makefile / 链接脚本等任何非源文件、没给 GATE_CHANGED、今天这台机器还没全跑过 → 全跑。
+# 按源文件跳组（11-14 门禁提速）：只在本批改动「只有 C 系源文件 / 头文件」时，跳过源文件清单里一个改动都没有的组（11-26 起不分目录；头文件按 include 闭包换成源）。
+#   改动里有数据 / 脚本 / mk / Makefile / 链接脚本等任何非源文件、没给 GATE_CHANGED、今天这台机器还没全跑过 → 全跑。
 #   每组源文件清单 = make -n -B native-test-<键> 里出现的 .c / .m / .mm / .cpp / .cc / .S / .s（不受增量构建影响），按 Makefile + */build.mk +
 #   runtime/tests/mk/*.mk 的内容哈希缓存（变了重算）；清单算不出 / 为空的组照跑。11-14 模拟：今天 64 次触发本钩子的合并里 17 次只需跑 0–5 组
 NDS=$(depskip "${RUN[@]}") || NDS=

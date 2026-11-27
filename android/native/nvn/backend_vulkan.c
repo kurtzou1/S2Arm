@@ -61,7 +61,7 @@
 #include "spirv_compliance.h"   // #1865 统一装载闸：能力 / 扩展 / 存储类字节声明扫描
 #include "../capprobe/capprobe.h"
 #include "direct/sha256.h"
-_Static_assert(NVN_GPU_CONTRACT_VERSION == 25, "核对 Vulkan 后端与新版 NVN GPU 契约");
+_Static_assert(NVN_GPU_CONTRACT_VERSION == 26, "核对 Vulkan 后端与新版 NVN GPU 契约");
 #include "nvn_vk_dq.inc"   // 两级回放：从这里往下 vkCmd* 等名字走它的包装（调试开关 nvk_dq，缺省开）
 // 宿主后端夹具可能不链回放布局；缺来源时能力关闭并明确报原因。
 // 弱链接[androiddraw]：nvn_deswizzle_geom
@@ -81,6 +81,9 @@ static uint64_t g_deswizzle_count, g_deswizzle_bytes, g_deswizzle_fallbacks;
 static uint64_t g_deswizzle_reasons[5];
 static int deswizzle_open(void);
 static void deswizzle_close(void);
+static struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline pipe; } g_d24_readback;
+static int d24_readback_open(void);
+static void d24_readback_close(void);
 static struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline pipe; } g_bc1_astc;
 static void bc1_astc_close(void);
 static int bc1_astc_storage(uint32_t nvn_format, const nvn_gpu_tex_desc *d, VkImageType type,
@@ -2556,6 +2559,8 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
     if (pthread_create(&g.worker, NULL, worker_main, &g) != 0)
         return fail(err, NVN_GPU_E_DEVICE, "worker 线程创建失败");
     g.worker_started = 1;
+    if (nvn_vk_format_depth_subst() && !d24_readback_open())
+        nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", "D24 替换存储的回读转换管线创建失败");
     pthread_mutex_lock(&g_seg_mu); g_seg_closed = 0;
     g_seg_stg_std = nvn_plat_flag("nvk_stg_std", 1) != 0; g_seg_stg_hit = g_seg_stg_miss = g_seg_stg_kept = g_seg_stg_rej = g_seg_stg_full = 0;
     for (int i = 0; i < 6; i++) __atomic_store_n(&g_stg_wr[i], 0, __ATOMIC_RELAXED);
@@ -2577,18 +2582,19 @@ void nvn_gpu_caps_get(nvn_gpu_caps *out) {
 }
 
 // 贴图 → 缓冲回读的格式判断（nvn_gpu_copy_tex_buf 与 nvn_gpu_format_caps 的 NVN_GPU_FMT_READBACK 共用，两边不会不一致）：
-//   readback_refusal：copy_tex_buf 拒收的原因（展开格式 / 替换存储），NULL = 能拷。拒收是粘滞错误，整段提交失败、时间线进失败终态，
+//   readback_refusal：copy_tex_buf 拒收的原因，NULL = 能拷。拒收是粘滞错误，整段提交失败、时间线进失败终态，
 //     所以 ReadTexels 这类旁路读回必须先查 READBACK 位、在开段前挡住。
-//   readback_exact：拷出来就是 NVN 的字节——不拒收，且不是深度模板合一（缓冲 ↔ 贴图一个区域只拷一个面，取深度面）、不是 D24（深度面高 8 位未定义）。
+//   readback_exact：替换的 D24/D24S8 单独打包。原生深度模板仍只拷深度面，原生 D24 深度面的高 8 位未定义。
 static const char *readback_refusal(uint32_t nvn_format) {
     nvn_fmt_info fi;
     if (nvn_fmt_info_of(nvn_format, &fi) && fi.expand) return "展开格式回读未实现";
-    if (nvn_vk_format_substituted(nvn_format)) return "替换存储格式（D24 换 D32）按字节回读未实现";
+    if (nvn_vk_format_substituted(nvn_format) && !g_d24_readback.pipe) return "D24 替换存储的回读转换不可用";
     return NULL;
 }
 static int readback_exact(uint32_t nvn_format) {
     nvn_fmt_info fi;
     if (readback_refusal(nvn_format) || !nvn_fmt_info_of(nvn_format, &fi)) return 0;
+    if (nvn_vk_format_substituted(nvn_format)) return 1;
     if (fi.depth && fi.stencil) return 0;
     if (nvn_format == NVN_FORMAT_DEPTH24) return 0;
     return 1;
@@ -2787,6 +2793,7 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     seg_drain();
     if (g.bc) nvn_vk_bcdec_destroy(g.dev, g.bc);
     deswizzle_close();
+    d24_readback_close();
     bc1_astc_close();
     free(g.submitted);
     g.submitted = NULL;
@@ -7529,7 +7536,19 @@ static int nvn_fmt_alpha_reads_one(uint32_t f) {
     }
 }
 
-nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *out, nvn_gpu_err *err) {
+static int exact_color_view(const struct nvn_gpu_tex_s *t, uint32_t nvn_format, VkFormat fmt) {
+    nvn_fmt_info base, view;
+    uint8_t map[4];
+    // Vulkan 非压缩颜色视图按纹素位数分兼容类；NVN 映射表没有独立类的纯 alpha 或多平面格式。
+    return t->samples == 1 && (t->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+        nvn_fmt_info_of(t->nvn_format, &base) && nvn_fmt_info_of(nvn_format, &view) &&
+        !base.depth && !base.stencil && !view.depth && !view.stencil && !base.expand && !view.expand &&
+        base.bw == 1 && base.bh == 1 && view.bw == 1 && view.bh == 1 && base.bytes == view.bytes &&
+        !nvn_vk_format_chanmap(t->nvn_format, map) && !nvn_vk_format_chanmap(nvn_format, map) &&
+        (nvn_gpu_format_caps(nvn_format) & NVN_GPU_FMT_RENDER) && tex_fmt_allowed(t, fmt);
+}
+
+static nvn_gpu_rc view_create(nvn_gpu_tex th, const view_t *v, int color_attachment, nvn_gpu_view *out, nvn_gpu_err *err) {
     if (!session_accepting()) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭 / 未打开");
     if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
     *out = NULL;
@@ -7566,6 +7585,15 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
     if (!plan.ok) return fail(err, NVN_GPU_E_ARG, "%s", plan.why);
     base_level = plan.base_level; levels = plan.nlevels;
     base_layer = plan.base_layer; layers = plan.nlayers; type = plan.type;
+    if (color_attachment) {
+        const uint32_t want = v && v->set_format ? (uint32_t)v->format : t->nvn_format;
+        if (type != VK_IMAGE_VIEW_TYPE_2D || levels != 1 || layers != 1 || !exact_color_view(t, want, fmt))
+            return fail(err, NVN_GPU_E_UNSUPPORTED, "颜色附件需要兼容且可直接使用的单级单层格式 0x%x → 0x%x", t->nvn_format, want);
+        if (t->target == NVN_TEXTURE_TARGET_3D) {
+            uint32_t depth = base_level < 32 ? t->depth >> base_level : 0;
+            if (base_layer >= (depth ? depth : 1)) return fail(err, NVN_GPU_E_ARG, "颜色附件切片 %u 超出 mip %u 深度", base_layer, base_level);
+        }
+    }
     int fmt_fell_back = 0, rb_swap = 0;
     if (!tex_fmt_allowed(t, fmt)) {
         VkFormat sub = rb_swap_stand_in(t, fmt);
@@ -7604,7 +7632,7 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
     // 通道映射：视图自己设了就用视图的，否则用存储自带的（与 nvn_mtl.m:6546 同序，是取代不是叠加）。
     // NVN 的取值 0 零 / 1 一 / 2 R / 3 G / 4 B / 5 A，其它值按该通道恒等。
     // #975：16 位打包格式走退回格式时，NVN 的分量 c 在 Vulkan 格式里是第 fmap[c] 个分量，再叠在上面这一层之下。
-    {
+    if (!color_attachment) {
         uint8_t fmap[4];
         o->p16_remap = nvn_vk_format_chanmap(o->nvn_format, fmap);
         if (rb_swap) { uint8_t r = fmap[0]; fmap[0] = fmap[2]; fmap[2] = r; }   // RGBA ↔ BGRA 替代视图（rb_swap_stand_in）：NVN 的 R 取存储的 B
@@ -7622,7 +7650,12 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
         }
         if (!o->swizzled) memset(&ci.components, 0, sizeof ci.components);   // 恒等：留 IDENTITY，附件可用
     }
-    VkImageViewUsageCreateInfo vu; ci.pNext = view_usage_next(t, ci.format, &vu);
+    VkImageViewUsageCreateInfo vu;
+    if (color_attachment) {
+        vu = (VkImageViewUsageCreateInfo){.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                                        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+        ci.pNext = &vu;  // 重解释只用于附件，不能继承视图格式可能不支持的存储等用途。
+    } else ci.pNext = view_usage_next(t, ci.format, &vu);
     OC(OC_VIEW);
     if (vkCreateImageView(g.d, &ci, NULL, &o->view) != VK_SUCCESS) {
         free(o);
@@ -7640,6 +7673,14 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
     pthread_mutex_unlock(&g_mu);
     *out = o;
     return rc(NVN_GPU_OK);
+}
+
+nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *out, nvn_gpu_err *err) {
+    return view_create(th, v, 0, out, err);
+}
+
+nvn_gpu_rc nvn_gpu_view_create_color_attachment(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *out, nvn_gpu_err *err) {
+    return view_create(th, v, 1, out, err);
 }
 
 nvn_gpu_rc nvn_gpu_view_create_buf(nvn_gpu_buf b, uint64_t off, uint64_t bytes, uint32_t fmt, nvn_gpu_view *out, nvn_gpu_err *err) {
@@ -8022,6 +8063,8 @@ void nvn_gpu_copy_buf_tex(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint64_t
     copy_buf_tex_impl(ch, bh, off, row_bytes, image_bytes, th, level, layer, r, COPY_FACE_DEFAULT, 0);
 }
 
+#include "backend_vulkan_d24_readback.inc"
+
 void nvn_gpu_copy_tex_buf(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32_t layer, const NVNcopyRegion *r,
                           nvn_gpu_buf bh, uint64_t off, uint64_t row_bytes, uint64_t image_bytes) {
     { struct nvn_gpu_cmd_s *cc = ch; if (cc && cc->in_pass && rc_is(cc->sticky, NVN_GPU_OK)) { set_sticky(cc, NVN_GPU_E_ORDER, "传输操作在通道内"); return; } }
@@ -8032,6 +8075,10 @@ void nvn_gpu_copy_tex_buf(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32
     if (t && t->bc_decoded) { bc_readback(c, t, level, layer, r, b, off, row_bytes, image_bytes); return; }   // 按上传时留下的压缩原字节回读
     { const char *no = t ? readback_refusal(t->nvn_format) : NULL;   // 与 NVN_GPU_FMT_READBACK 同一个判断
       if (no) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "%s（0x%x）", no, t->nvn_format); return; } }
+    if (t && nvn_vk_format_substituted(t->nvn_format)) {
+        d24_readback_copy(c, t, level, layer, r, b, off, row_bytes, image_bytes);
+        return;
+    }
     uint32_t bpp = t ? fmt_bpp(t->format) : 0;
     // 块信息（同 copy_buf_tex_impl）：压缩格式一行是一排块（blk_w x blk_h 纹素、blk 字节），区域按纹素给、偏移要落在块边上；
     // 没列进 fmt_bpp 的非压缩格式按 NVN 格式表的每纹素字节数。原先这里对压缩格式一律拒绝（核心把块压缩贴图逐字节拷进影子要用它）。

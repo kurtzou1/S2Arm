@@ -25,6 +25,7 @@ int s2a_android_vk_session_prepare(const struct s2a_wsi_api *api, const char *ga
 int s2a_android_vk_skip_module(const char *name) { assert(name); return 0; }
 void s2a_nro_table_load(const char *dir) { assert(dir); }
 void s2a_caps_apply(const char *dir) { (void)dir; }
+void s2a_game_defaults_apply(const char *dir, const char *caps) { (void)dir; (void)caps; }
 void s2a_fps_start(const char *dir) { assert(dir); }
 
 static const char *mode;

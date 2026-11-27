@@ -381,6 +381,8 @@ static int host_run(int argc, char **argv) {
     // 包内能力清单（产物根 s2a_caps.tsv，改写阶段出，iOS 同一份）：Mac 局按发布口径跑（10-29 维护者：普查原先没读清单，宽屏退回已验证名单门、整局 16:9）。
     //   只在环境变量未设时写：调度器 A/B 的 S2A_WIDEN_CAPS / S2A_FPS60 照旧优先。要在装载前读——宽屏点按屏幕宽在装载时填值（widen.c widen_gate）
     { void s2a_caps_apply(const char *); s2a_caps_apply(dir); }
+    // 逐款测过的缺省（11-27，runtime/src/caps.c）：清单之后（按清单判这款有没有那个杠杆），未设才写——启动环境 / 玩家选过的（launch_env）优先
+    { void s2a_game_defaults_apply(const char *, const char *); s2a_game_defaults_apply(dir, dir); }
     // 图形模式在构造函数里（地址窗口取程序号）就判定了，那时模块目录还空，程序号读成 0：目录已知后重读（DM_GAME_ID、wire/<程序号> 都靠它）
     { void s2a_module_dir_set(const char *), s2a_npdm_program_id_reload(void); s2a_module_dir_set(dir); s2a_npdm_program_id_reload(); }
 #endif

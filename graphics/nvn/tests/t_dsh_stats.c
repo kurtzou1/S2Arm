@@ -416,6 +416,21 @@ int main(void) {
         printf("%s 现编汇总场景 %d\n", ok ? "✓" : "✗", n);
         if (!ok) { bad++; puts(buf); }
     }
+    {   // 曲面外壳 / 域（Switch 1 SPH 类型 2 / 3）：设备首遇现编不支持，原先在「不能现编」那一行里只报一次、悄悄丢（#2264 排查，11-27）；现在每支计数（g_dsh_tess）、
+        //   收局汇总多一行红。期望手写：喂一支类型 2（外壳）→ 计 1；再喂一支类型 5（像素，能现编的阶段）→ 不计，仍是 1
+        pid_t p = fork();
+        if (!p) {
+            memset(code, 0, sizeof code); memcpy(code, "\x78\x56\x34\x12", 4);
+            uint32_t w = 2u << 10 | 1; memcpy(code + 0x30, &w, 4); uint8_t k1[8] = {0x77}; dm_shader_miss(k1, (uint64_t)(uintptr_t)code, ctl);
+            uint64_t a = atomic_load(&g_dsh_tess);
+            w = 5u << 10 | 1; memcpy(code + 0x30, &w, 4); uint8_t k2[8] = {0x78}; dm_shader_miss(k2, (uint64_t)(uintptr_t)code, ctl);
+            uint64_t b = atomic_load(&g_dsh_tess);
+            printf("曲面外壳计数 %llu、再喂像素后 %llu\n", (unsigned long long)a, (unsigned long long)b);
+            _exit(a == 1 && b == 1 ? 0 : 1);
+        }
+        int st; waitpid(p, &st, 0); int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        printf("%s 曲面外壳 / 域：映射表外的一支计数 1、像素不计（期望 1 / 1）\n", ok ? "✓" : "✗"); if (!ok) bad++;
+    }
     {   // 着色器覆盖计数文件（sfb_write）：期望手算——新建计 2、再加 1 得 3、"app" 照给的写；兜底目录不是 …/wire/<程序号>/shaders 形状 → -1、不写文件
         char t[] = "/tmp/t_dsh_sfb.XXXXXX"; if (!mkdtemp(t)) { puts("✗ 建临时目录失败"); return 1; }
         char fb[512], js[600], b[256]; snprintf(fb, sizeof fb, "%s/0400486024DEC000/wire/0400486024DEC000/shaders", t); snprintf(js, sizeof js, "%s/0400486024DEC000/shader_fallback.json", t);

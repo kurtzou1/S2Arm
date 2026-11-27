@@ -629,6 +629,8 @@ static int fl_engaged(void) { for (int i = 0; i < g_nfu; i++) if (g_fu[i].fl && 
 // 玩家设的帧率上限（App 设置 S2A_FPS，档位 30 / 60 / 120 / 不限）≤ 30 且 60 帧开：这局按 30 帧档跑（11-25 #502）——
 //   FPSLocker 配置开着、按 30 写、交帧间隔封 2（补丁自带按目标帧率 / 真实帧间隔算步长，速度对）；其余帧率补丁不开（原版 30）。
 //   原先补丁按 60 档开着、直连层再把出图压到 30：按帧推进的款每帧步长按 60 算、只出 30 帧，半速慢动作
+// 起局给了具体档（S2A_FPS_PICK > 0）：「0」= 自动（玩家明确选回自动、或逐款缺省给的自动，11-27 起会写出来），仍按屏幕挑、换屏重挑
+static int fps_pick_given(void) { const char *e = getenv("S2A_FPS_PICK"); return e && atoi(e) > 0; }
 static int cap30(void) { const char *e = getenv("S2A_FPS"); int v = e && *e ? atoi(e) : 0; return v > 0 && v <= 30; }
 // 帧率被补丁抬高了没有（直连层 nvn_fps.c 据此决定玩家上限管不管用：没抬高时不压游戏自己请求的出图率，压下去按帧推进的款就慢）：有帧率补丁的位真开着
 int s2a_cpatch_fps_engaged(void) { for (int i = 0; i < g_nfu; i++) if (g_fu[i].slot && (atomic_load(g_fu[i].slot) & g_fu[i].bits) == g_fu[i].bits) return 1; return 0; }
@@ -683,7 +685,7 @@ void s2a_cpatch_fps_follow(int on) {
         if (!said++) LOG("社区补丁：60 帧开关开着，但包里没有可用的帧率补丁——%s", fi && !strcmp(fi, "1") ? "改用补帧（画面插帧到 60，游戏逻辑仍按原帧率）" : "按游戏原帧率跑"); }
     if (g_nfu && on && !pick) { int lv[8], n = s2a_cpatch_fps_levels(lv, 8, NULL); LOG("社区补丁：帧率补丁只有高于 60 帧的档（最低 %d 帧），自动档不开（120 档要玩家自己选）——%s",
         n > 0 ? lv[0] : 0, getenv("DM_PRESENT_FI") && !strcmp(getenv("DM_PRESENT_FI"), "1") ? "改用补帧（画面插帧到 60，游戏逻辑仍按原帧率）" : "按游戏原帧率跑"); }
-    if (g_nfu && on && pick) LOG("社区补丁：帧率档 %d 帧（%s；屏幕最高 %d Hz）", pick, g_fps_want || getenv("S2A_FPS_PICK") ? "玩家选的" : "自动：不超过 60 帧的最高一档（120 档要玩家自己选）", screen_max_hz());
+    if (g_nfu && on && pick) LOG("社区补丁：帧率档 %d 帧（%s；屏幕最高 %d Hz）", pick, g_fps_want || fps_pick_given() ? "玩家选的" : "自动：不超过 60 帧的最高一档（120 档要玩家自己选）", screen_max_hz());
     if (g_nfu && on && pick && grp) LOG("社区补丁：这一档只开一组（组 %s，同档别的上游补丁不叠开）", grp);
     pthread_mutex_lock(&g_st_lock); int any = 0;
     for (int j = 0; j < g_nst; j++) if (!strncmp(g_st[j].id, "fps:", 4) && strcmp(g_st[j].st, "不配套") && strcmp(g_st[j].st, "表不认")) {
@@ -753,7 +755,7 @@ void s2a_cpatch_fps_pick(int target) {
 //   起局选档早于建窗，那时屏幕刷新率还不知道按 60 算，120 Hz 的 Mac 自动档永远落在 60（11-15 v0.4.0 自测：「帧率档 60 帧（默认…屏幕最高 60 Hz）」之后才「窗口所在屏最高刷新 120 Hz」）
 void s2a_cpatch_screen_changed(void) {
     tier_note();
-    if (g_fps_on <= 0 || g_fps_want || getenv("S2A_FPS_PICK")) return;
+    if (g_fps_on <= 0 || g_fps_want || fps_pick_given()) return;
     if (fps_pick() != g_fps_target) s2a_cpatch_fps_follow(1);
 }
 // 金手指逐条开关（Cheats.cs 每次重载开关表时对每条调；主代码 = 同文件任一条开着）：

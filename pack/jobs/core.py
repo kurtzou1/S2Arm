@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from progress_activity import BatchActivity
-from errors import Failure, device_of, explain, failure_summary, last_output_lines, recovery, library_lock_failure
+from errors import Failure, device_of, estimate_low, explain, failure_summary, last_output_lines, recovery, library_lock_failure
 
 
 def default_developer_dir():
@@ -991,7 +991,8 @@ class Context:
     def describe_failure(self, error, severity="error", exit_code=None):
         failure = explain(error, **self.failure_roots())
         code = failure.code
-        result = dict(code=code, severity=severity, summary=self.redact(failure),
+        said = estimate_low(str(failure), getattr(self, "space_budget", None)) if code == "disk_full" else str(failure)   # 预检说够却写满：说清是预估偏低（#444）
+        result = dict(code=code, severity=severity, summary=self.redact(said),
                       suggestion=getattr(failure, "advice", None) or recovery(code, packaged=bool(self.r.get("engineBundle")), tv=str(getattr(self, "operation", "")).startswith("tv"), device=device_of(self)), detail="", stage=self.stage,
                       component="S2Arm", logPath=str(self.last_log) if self.last_log else None)
         if exit_code is not None:
@@ -1041,8 +1042,9 @@ class Context:
             self.last_log.write_text(self.redact(failure) + "\n" + (self.redact(failure.internal) + "\n" if getattr(failure, "internal", "") else ""))
         records = self.job["diagnostics"]
         previous = records[-1] if records else None
+        said = estimate_low(str(failure), getattr(self, "space_budget", None)) if failure.code == "disk_full" else str(failure)   # 同 describe_failure
         if (previous and previous["severity"] == "error" and previous["code"] == failure.code
-                and previous["summary"] == self.redact(failure)):
+                and previous["summary"] == self.redact(said)):
             if previous["logPath"] == (str(self.last_log) if self.last_log else None):
                 return previous
             records.pop()
@@ -1261,7 +1263,8 @@ class Context:
             self._batch_activity.clear()
         with self.last_log.open("a", encoding="utf-8") as out:
             if run_env.get("S2A_DEVELOPER_DIR"):
-                out.write("S2Arm frontend toolchain: DEVELOPER_DIR=" + run_env["DEVELOPER_DIR"] + "\n")
+                # [s2a] 开头：作业层自己记的，不是工具输出——工具一行没打就退（被信号结束）时，tool_reason 原先把这行当失败原因（#2295）
+                out.write("[s2a] S2Arm frontend toolchain: DEVELOPER_DIR=" + run_env["DEVELOPER_DIR"] + "\n")
                 out.flush()
             # 进度文件的起读位置在起子进程之前量：起了再量，机器忙时子进程可能已经写完退出，起读位置落在它写的行之后，
             #   这一步的进度一行都发不出（11-15 满载跑作业层全量：失败工具的最后进度读成 None）

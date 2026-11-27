@@ -5,7 +5,7 @@ NATIVE_TEST_OWN += keyboard_store
 .PHONY: native-test-keyboard_store
 native-test-keyboard_store:
 	@mkdir -p $(BUILD)/tests/keyboard_store
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Iios -fobjc-arc -framework Foundation -o $(BUILD)/tests/keyboard_store/t_keyboard_store runtime/tests/t_keyboard_store.m ios/keyboard_store.m ios/settings.m ios/cpatch_model.m runtime/src/input_config.c runtime/src/caps.c runtime/src/patch.c runtime/src/launchctx.c
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iios -fobjc-arc -framework Foundation -o $(BUILD)/tests/keyboard_store/t_keyboard_store runtime/tests/t_keyboard_store.m ios/keyboard_store.m ios/settings.m ios/cpatch_model.m runtime/src/input_config.c runtime/src/caps.c runtime/src/gdefaults.c runtime/src/patch.c runtime/src/launchctx.c
 	@rm -rf $(BUILD)/tests/keyboard_store/zh-Hans.lproj && cp -R ios/l10n/zh-Hans.lproj $(BUILD)/tests/keyboard_store/
 	$(BUILD)/tests/keyboard_store/t_keyboard_store
 TEST_TARGETS += native-test-keyboard_store

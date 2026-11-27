@@ -83,8 +83,8 @@ cat > "$T/c/tests/zz_hostsrcs_test.sh" << 'PROBE'
 printf '%s\n' 'x:;@echo $(HOST_SRCS)' | make -s -f Makefile -f - x
 PROBE
 (cd "$T/c" && git add tests/zz_hostsrcs_test.sh && git -c user.email=t@t -c user.name=t commit -qm probe) > /dev/null 2>&1
-m0=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.host_cfg"); (cd "$T/c" && S2A_CS=1 python3 tools/gate_route.py tests macos/front_mac.m > "$T/o" 2> /dev/null)
-m1=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.host_cfg")
+m0=$(stat -c %Y "$T/c/build/.host_cfg" 2> /dev/null || stat -f %m "$T/c/build/.host_cfg"); (cd "$T/c" && S2A_CS=1 python3 tools/gate_route.py tests macos/front_mac.m > "$T/o" 2> /dev/null)
+m1=$(stat -c %Y "$T/c/build/.host_cfg" 2> /dev/null || stat -f %m "$T/c/build/.host_cfg")
 ck "算构建清单不碰本树 build/：配置戳内容 / 修改时间不变、不起 C# 构建，路由照常（含展开构建清单的探针单测）" '[ "$(cat "$T/c/build/.host_cfg")" = "S2A_CS= sentinel" ] && [ "$m0" = "$m1" ] && [ ! -e "$T/c/build/cs" ] && grep -q zz_hostsrcs_test "$T/o"'
 rm -rf "$T"
 # 覆盖面缓存（11-14：同内容只算一次，存 git 公共目录 s2a-gate-route/）：同树二次调用与关缓存结果逐字相同、且快；

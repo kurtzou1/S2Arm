@@ -25,6 +25,7 @@ int s2a_gfx_mode(void) { return g_vk_direct_nvn ? 1 : 0; }
 int s2a_android_vk_nvn_guest(void) { return g_vk_direct_nvn ? 1 : 0; }
 void s2a_nro_table_load(const char *dir) { assert(dir); }
 void s2a_caps_apply(const char *dir) { (void)dir; }
+void s2a_game_defaults_apply(const char *dir, const char *caps) { (void)dir; (void)caps; }
 void s2a_fps_start(const char *dir) { assert(dir); }
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;

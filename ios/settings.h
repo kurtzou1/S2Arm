@@ -69,6 +69,10 @@ NSString *s2a_ios_game_language_note_with(NSUserDefaults *defaults, NSArray<NSSt
 // Discrete values compatible with Settings.bundle and normalized in-app values.
 NSArray<NSDictionary *> *s2a_ios_graphics_options(void);
 NSDictionary *s2a_ios_graphics_snapshot(NSUserDefaults *defaults);
+// 逐款测过的缺省（11-27，launchers/shared/game_defaults.v1.tsv）：本款这一项（定义表 id）的逐款值，没有 → nil；gid 空 = 正在跑 / 当前这款
+NSString *s2a_ios_game_default(NSString *gid, NSString *item);
+// 这一项（iOS 存的键）玩家没选过、显示的是本款逐款缺省：设置页在说明前标「本款推荐」
+BOOL s2a_ios_game_default_shown(NSUserDefaults *defaults, NSString *key);
 // 设置页「完成」时比进页快照与当前快照（缺口扫描族 2）：掌机 / 主机运行中直接切、不算重启项。
 //   返回 -1 = 底座没变，0 / 1 = 要切成掌机 / 主机；*restart = 除底座外还有要重启才生效的画面设置变了
 NSInteger s2a_ios_settings_docked_change(NSDictionary *entry, NSDictionary *now, BOOL *restart);

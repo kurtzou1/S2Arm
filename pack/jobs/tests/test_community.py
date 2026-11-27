@@ -254,7 +254,8 @@ class CommunityTests(unittest.TestCase):
         csharp = (REPO / "compat/tree/src/Ryujinx.Audio.Backends.Apple/AppleAudioDeviceType.cs").read_text(encoding="utf-8")
         self.assertEqual([v for v in values if f'"{v}"' not in csharp], [])   # C# 选择器认得表里每个值
     def test_resolution_scale_and_fps_limit(self):
-        # 渲染分辨率 / 帧率上限（11-17，Mac 补上 iPhone 已有的两项）：缺省 1× / 不限不设变量；0.5× → S2A_RES_SCALE=0.5，30 帧 → S2A_FPS=30；表外取值拒收
+        # 渲染分辨率 / 帧率上限（11-17，Mac 补上 iPhone 已有的两项）：没选过不设变量；0.5× → S2A_RES_SCALE=0.5，30 帧 → S2A_FPS=30；
+        #   明确选回 1× / 不限也照写（11-27 逐款缺省：不写会被这款的逐款缺省盖掉）；表外取值拒收
         env = community.launch_env(self.c, GID)
         self.assertNotIn("S2A_RES_SCALE", env); self.assertNotIn("S2A_FPS", env)
         self.c.r = {"gameId": GID, "settings": {"resolutionScale": "0.5", "fpsLimit": "30"}}; community.save(self.c)
@@ -262,7 +263,7 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual((env["S2A_RES_SCALE"], env["S2A_FPS"]), ("0.5", "30"))
         self.c.r = {"gameId": GID, "settings": {"resolutionScale": "1", "fpsLimit": "0"}}; community.save(self.c)
         env = community.launch_env(self.c, GID)
-        self.assertNotIn("S2A_RES_SCALE", env); self.assertNotIn("S2A_FPS", env)
+        self.assertEqual((env["S2A_RES_SCALE"], env["S2A_FPS"]), ("1", "0"))
         self.c.r = {"gameId": GID, "settings": {"resolutionScale": "3"}}
         with self.assertRaises(Failure): community.save(self.c)
     def test_game_language_only_supported(self):
@@ -478,7 +479,7 @@ class MacDisplayTests(unittest.TestCase):
         self.assertEqual(sorted(self.mac()), sorted(["quality", "fps60", "fpsPick", "resolutionScale", "fpsLimit", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "motionInvertY", "motionInvertX", "ldnMode", "ldnHost", "ldnAddress", "padFace", "hud", "snapshot", "pauseUnfocused", "audioLatency", "audioDevice", "vsSpeakers", "vsHeadphones", "diagRun"]))
 
     def test_fps_pick_level(self):
-        # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；选具体档 → S2A_FPS_PICK=档，选自动（"0"）不写；表外取值拒收
+        # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；没选过不写；选具体档 → S2A_FPS_PICK=档，明确选自动（"0"）写 0；表外取值拒收
         self.caps("fps60\t1\t# 默认开：来源 社区帧率补丁\nwiden\t0\ndirect\t1\n")
         tsv = layout.image_mac(self.c, GID) / "cpatch.tsv"
         write(tsv, "编号\t缺省开\t目标帧率\nfps:a\t1\t60\nfps:b\t1\t\nwidescreen:x\t1\t\n")   # 60 与没写（当 60）= 一档
@@ -489,7 +490,7 @@ class MacDisplayTests(unittest.TestCase):
         self.c.r.update(settings={"fpsPick": "60"}); community.save(self.c)
         self.assertEqual(community.launch_env(self.c, GID)["S2A_FPS_PICK"], "60")
         self.c.r = {"gameId": GID, "settings": {"fpsPick": "0"}}; community.save(self.c)
-        self.assertNotIn("S2A_FPS_PICK", community.launch_env(self.c, GID))
+        self.assertEqual(community.launch_env(self.c, GID)["S2A_FPS_PICK"], "0")   # 明确选自动也写（宿主 0 = 按屏幕挑），逐款缺省盖不过
         self.c.r = {"gameId": GID, "settings": {"fpsPick": "90"}}
         with self.assertRaises(Failure): community.save(self.c)
 
@@ -518,7 +519,7 @@ class MacDisplayTests(unittest.TestCase):
         self.save(quality="Nearest")
         self.assertEqual(community.launch_env(self.c, GID), {"S2A_SCALING_FILTER": "Nearest"})
         self.save(quality="Bilinear")
-        self.assertEqual(community.launch_env(self.c, GID), {})
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_SCALING_FILTER": "Bilinear"})   # 明确选标准也写（11-27 逐款缺省）
         self.save(quality=None)   # 回缺省：文件里不留这一项
         self.assertEqual((community.launch_env(self.c, GID), self.launch_file()["settings"]), ({}, {}))
         self.save(quality="MetalFX")

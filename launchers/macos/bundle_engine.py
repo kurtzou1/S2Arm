@@ -32,6 +32,8 @@ INPUTS = ["runtime", "ios", "graphics", "translator", "services", "compat", "pac
           "launchers/macos/requirements-runtime.txt",
           # 游戏设置定义表（pack/jobs/community.py 按它读写 launch.json、转宿主开关；11-09 启动设置）
           "launchers/shared/game_settings.v1.json",
+          # 逐款测过的缺省（11-27，tools/game_defaults.py；启动设置页显示「本款推荐」读它，宿主编进去的是生成头 runtime/include/s2a_game_defaults.h）
+          "launchers/shared/game_defaults.v1.tsv",
           # iPhone 宿主包的图标（pack/ipa_tail.py、pack/jobs/ipa.py）：引擎快照里没有它，容器就退回用游戏图标（11-08 维护者）
           "launchers/macos/Branding/AppIcon-iOS.png",
           # Mac 宿主包的默认图标（pack/jobs/build.py compile_host，#994 无封面时的回退）：快照里没有它，编出的宿主包就没有图标

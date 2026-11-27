@@ -179,13 +179,12 @@ def missing_after_crash(c, runtime, manifest):
     return None
 
 
-def docked_default(c):
-    """没选过档位时的运行模式：只认共用设置定义表 game_settings.v1.json 的 docked 缺省（iPhone / Mac 同一处来源，11-17 起两端都是掌机）。
-    请求明给布尔（作业测试 / 内部调用）照给的；玩家按款选过的不在这里，launch() 用 community.launch_env 覆盖"""
+def requested_docked(c):
+    """请求明给布尔（作业测试 / 内部调用）的档位 → "1" / "0"；没给 → None。
+    没给不写 S2A_DOCKED：玩家没选过的档位交宿主按「逐款缺省 → 定义表缺省」定（runtime/src/gdefaults.c s2a_game_defaults_apply），
+    原先这里按定义表缺省写成显式 "0"，宿主分不清是玩家选的掌机还是缺省，逐款缺省盖不过它（11-27）。玩家按款选过的由 launch() 里 community.launch_env 覆盖"""
     v = c.r.get("docked")
-    if isinstance(v, bool):
-        return "1" if v else "0"
-    return "1" if community._default(community.settings_table(c)["docked"], {}, "mac") == "docked" else "0"
+    return ("1" if v else "0") if isinstance(v, bool) else None
 
 
 def runtime_env(c, game, runtime, input_ok=True):
@@ -220,13 +219,14 @@ def runtime_env(c, game, runtime, input_ok=True):
                S2A_SNAPSHOT_DIR=str(layout.path(c, game["id"], "snapshot")),
                NXGAL_SHADER_CACHE_DIR=str(cache / "shaders"), NXGAL_PSO_DEV_DIR=str(cache / "pso"),
                S2A_MACRO_DUMP=str(cache / "macros"),
-               S2A_DOCKED=docked_default(c),   # 缺省掌机（11-17 维护者定，同 iPhone）；玩家在这款设置里选过的由 launch() 里 community.launch_env 盖上
                S2A_AUTOPLAY="0", S2A_GAME_NAME=game["name"], S2A_GAME_ID=game["id"],
                S2A_INPUT_GUIDE_PREFS=str(c.private / "input-guides" / (game["id"] + ".json")),
                # 金手指（11-12）：这款游戏文件夹的 cheats/（玩家导入 + 启动器从公开库取的 txt、开关 enabled.txt），Mac 宿主 Cheats.cs 读它
                S2A_CHEATS_DIR=str(contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "cheats"))),
                # 资源替换类 mod（11-15）：这款游戏文件夹的 mods/（启动器「游戏设置 → Mod」导入），服务层 RomFsMods.cs 起局叠到 RomFS 上
                S2A_MODS_DIR=str(contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "mods"))))
+    if requested_docked(c) is not None:
+        env["S2A_DOCKED"] = requested_docked(c)   # 请求明给的档位照给；没给不写（见 requested_docked）
     # Dock / Cmd+Tab 图标（#994）：把游戏库列表同一张封面交给宿主（封面三级取法在 library.catalog：玩家换的 → 游戏自带 → 商店横图），
     #   宿主起 App 后把图标换成它（macos/front_mac.m）。没有封面 / 文件不在了就不带，宿主用包里的默认图标（write_host_icon 编进 Resources）
     from library import game_cover

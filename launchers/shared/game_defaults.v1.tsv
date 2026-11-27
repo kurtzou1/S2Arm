@@ -1,0 +1,4 @@
+# 逐款测过的缺省（11-27）：按程序号 + 构建号给设置项一个「本款缺省」，盖过 game_settings.v1.json 的 default；玩家选过的、启动环境给的仍优先。
+# 格式与规则见 tools/game_defaults.py：<程序号>\t<构建号前 16 位 | *>\t<平台 ios|mac|android|*>\t<设置 id>\t<值>\t# <依据>
+#   依据必须有对照读数（逐款值 vs 全局缺省）和「测过 <构建号>…」；只有实测比全局缺省好的才写。只写程序号，不写游戏名。
+#   改完跑 python3 tools/game_defaults.py emit runtime/include/s2a_game_defaults.h（宿主编进去的那份；单测核一致）。

@@ -2,6 +2,7 @@
 #include <stdatomic.h>
 #include "../gfx/nvn/dmsh_chain.h"
 static _Atomic uint64_t g_dsh_ok, g_dsh_failed, g_dsh_skipped, g_dsh_reused, g_dsh_typed;
+static _Atomic uint64_t g_dsh_tess;   // 映射表外、设备不能现编的曲面外壳 / 域着色器支数（dm_shader_miss；11-27 起进汇总，原先悄悄丢）
 static _Atomic uint64_t g_dsh_eager_n, g_dsh_eager_ok, g_dsh_eager_hit, g_dsh_eager_waited, g_dsh_eager_cancel;   // 后台预编（dsh_eager_start）：交后台 / 编好 / 首遇复用 / 首遇时还在编等了 / 首遇时没开始改同步
 // 开发浮层「首遇现建」读（runtime/src/hud.c 经 dlsym）：成功 / 失败 / 跳过 / 复用上局 / 输出类型变体
 void s2a_dsh_stats(uint64_t out[5]) { out[0] = atomic_load(&g_dsh_ok); out[1] = atomic_load(&g_dsh_failed); out[2] = atomic_load(&g_dsh_skipped); out[3] = atomic_load(&g_dsh_reused); out[4] = atomic_load(&g_dsh_typed); }
@@ -45,6 +46,7 @@ static void dsh_summary(int normal) {
         (unsigned long long)atomic_load_explicit(&g_dsh_reused, memory_order_relaxed),
         (unsigned long long)atomic_load_explicit(&g_dsh_typed, memory_order_relaxed),
         normal ? "正常收局" : "超时收局");
+    if (atomic_load(&g_dsh_tess)) LOG("【红】直连曲面阶段：映射表外、设备不能现编的曲面外壳 / 域着色器 %llu 支（用到它们的绘制缺这一阶段）", (unsigned long long)atomic_load(&g_dsh_tess));
     if (atomic_load(&g_dsh_eager_n)) LOG("直连着色器后台预编：交后台 %llu 支、编好 %llu 支；首遇时已编好 %llu 支（其中提交线程等它编完 %llu 支）、还没开始改同步 %llu 支",
         (unsigned long long)atomic_load(&g_dsh_eager_n), (unsigned long long)atomic_load(&g_dsh_eager_ok), (unsigned long long)atomic_load(&g_dsh_eager_hit), (unsigned long long)atomic_load(&g_dsh_eager_waited), (unsigned long long)atomic_load(&g_dsh_eager_cancel));
     // #800 采样器归约变体（nvn_mtl.m se_done）：库里不带，绘制真绑了 min / max 采样器、本机不原生归约时在设备上编（本局现出或载上局现出的）
@@ -277,6 +279,12 @@ void dm_shader_miss(const uint8_t key[8], uint64_t code, const void *control) {
     const uint8_t *ctl = control, *cd = (const uint8_t *)(uintptr_t)code; uint32_t ncode, nctl;
     int st = dsh_stage(cd, ctl, &ncode, &nctl);
     if (st >= 0) dsh_dump(k, ctl, nctl, code, ncode);
+    // 曲面外壳 / 域（Switch 1 SPH 类型 2 / 3）：设备首遇现编不支持（S2A.Dsh 只在出包里翻，Dsh.cs），dsh_stage_raw 认作 -1；原先只并进下面「不能现编」那一行
+    //   （整局只打一次），映射表外的曲面着色器就这样悄悄没了。每支打一行（至多 16 行），带键与阶段，影响面数得出来（11-27）
+    if (st < 0 && !nvn2_on() && dsh_bytes_ok(cd, 0x34) && !memcmp(cd, "\x78\x56\x34\x12", 4)) {
+        uint32_t w; memcpy(&w, cd + 0x30, 4); int t = (w >> 10) & 0xf;
+        if (t == 2 || t == 3) { static _Atomic unsigned n; atomic_fetch_add_explicit(&g_dsh_tess, 1, memory_order_relaxed);
+            if (atomic_fetch_add(&n, 1) < 16) LOG("【红】直连：着色器 %s 是曲面%s阶段、不在映射表，设备首遇现编不支持这一阶段：用到它的绘制没有这一阶段", k, t == 2 ? "外壳（控制）" : "域（求值）"); } }
     if (st < 0 || !comp) { if (!atomic_fetch_add(&g_dsh_bad, 1)) LOG("【红】直连：着色器 %s 不在映射表，不能现编（阶段 %d、代码 %u 字节、控制段 %u 字节）", k, st, ncode, nctl); atomic_fetch_add_explicit(&g_dsh_skipped, 1, memory_order_relaxed); return; }
     const char *out = getenv("DM_MSL_FALLBACK"); if (!out || !*out) { atomic_fetch_add_explicit(&g_dsh_skipped, 1, memory_order_relaxed); return; }
     mkdir(out, 0755);

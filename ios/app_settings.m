@@ -373,11 +373,17 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor], [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor], [stack.topAnchor constraintEqualToAnchor:m.topAnchor], [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor]]];
     return cell;
 }
+// 这一项玩家没选过、显示的是本款逐款缺省（11-27，launchers/shared/game_defaults.v1.tsv）：说明前标「本款推荐」，同 Mac 启动设置页
+static NSString *recommended_note(NSString *key, NSString *note) {
+    if (!s2a_ios_game_default_shown(s2a_ios_settings_defaults(), key)) return note;
+    return note.length ? [NSString stringWithFormat:@"%@ · %@", S2AL(@"settings.recommended"), note] : S2AL(@"settings.recommended");
+}
 - (UITableViewCell *)toggleCell:(NSInteger)index {
     NSString *key = toggleKeys()[index]; UITableViewCell *cell = [self baseCell:toggleTitles()[index]];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     UISwitch *control = [UISwitch new]; id saved = [s2a_ios_settings_defaults() objectForKey:key];
-    control.on = [key isEqualToString:@"S2AFps60"] ? s2a_ios_fps60_on() : saved ? [saved boolValue] : (index == 1 || index == 2 || index == 6 || [key isEqualToString:@"S2ASnapshot"]);   // 即时快照缺省开（宿主苹果端缺省开，runtime/src/snapsw.c）   // 60 帧显示实际生效的（没选过的缺省按清单，不一律显示开）
+    control.on = [key isEqualToString:@"S2AFps60"] ? s2a_ios_fps60_on() : saved ? [saved boolValue] : [key isEqualToString:@"S2ADockedMode"] ? [s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[key] boolValue]   // 档位没选过：本款逐款缺省（11-27）
+               : (index == 1 || index == 2 || index == 6 || [key isEqualToString:@"S2ASnapshot"]);   // 即时快照缺省开（宿主苹果端缺省开，runtime/src/snapsw.c）   // 60 帧显示实际生效的（没选过的缺省按清单，不一律显示开）
     control.accessibilityLabel = toggleTitles()[index]; control.accessibilityIdentifier = [@"settings." stringByAppendingString:key];
     // 主机模式（#352，维护者 11-09：手机缺省掌机，玩家可自己开）：标题下一行写明代价——更耗电换画质，手机上不建议开
     // 诊断局（#438）同样在标题下写一行：怎么用、只管下一局、会变慢
@@ -386,6 +392,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         sub.textLabel.text = cell.textLabel.text; sub.textLabel.font = cell.textLabel.font; sub.textLabel.adjustsFontForContentSizeCategory = YES; sub.textLabel.numberOfLines = 0;
         sub.detailTextLabel.text = [key isEqualToString:@"S2ADiagRunNext"] ? S2AL(@"settings.diagRun.note") : [key isEqualToString:@"S2ASnapshot"] ? S2AL(@"settings.snapshot.note") : S2AL(@"settings.docked.note"); sub.detailTextLabel.numberOfLines = 0; sub.detailTextLabel.textColor = UIColor.secondaryLabelColor;
         sub.detailTextLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]; sub.detailTextLabel.adjustsFontForContentSizeCategory = YES;
+        if ([key isEqualToString:@"S2ADockedMode"]) sub.detailTextLabel.text = recommended_note(key, sub.detailTextLabel.text);   // 逐款缺省（11-27）
         sub.selectionStyle = UITableViewCellSelectionStyleNone; cell = sub;
     }
     // 补丁优先（11-13 维护者：有 120 帧补丁就盖过我们的 60 帧、有 60 帧补丁就盖过我们自己的 60 帧，满屏同理）：这款带了帧率 / 满屏补丁，
@@ -585,8 +592,8 @@ static UILabel *textLabel(UIFontTextStyle style) {
         // 帧率上限（row 3，11-25 #502）：显示 = 生效。局内选了 30、而这局帧率没被补丁抬高（没开 60 帧补丁）→ 直连层不压游戏原生出图率
         //   （graphics/nvn/gfx/nvn/nvn_fps.c，压下去按帧推进的款就慢），行下写明这一局上限 30 不生效；不在局内（s2a_fps_raised 拿不到局况）不写
         if (row == 3) { NSString *cap = s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]];
-            return [self sliderCell:option note:[cap isEqual:@"30"] && s2a_host_session_state && s2a_fps_raised && s2a_host_session_state() == S2A_SESSION_RUNNING && !s2a_fps_raised() ? S2AL(@"gfx.fpsLimit.native.note") : nil]; }
-        if (row != 2) return [self sliderCell:option note:row == 1 && s2a_ios_hdr_upscale_bypassed() ? S2AL(@"gfx.hdrUpscaleBypass.note") : nil];
+            return [self sliderCell:option note:recommended_note(option[@"key"], [cap isEqual:@"30"] && s2a_host_session_state && s2a_fps_raised && s2a_host_session_state() == S2A_SESSION_RUNNING && !s2a_fps_raised() ? S2AL(@"gfx.fpsLimit.native.note") : nil)]; }
+        if (row != 2) return [self sliderCell:option note:recommended_note(option[@"key"], row == 1 && s2a_ios_hdr_upscale_bypassed() ? S2AL(@"gfx.hdrUpscaleBypass.note") : nil)];
         NSArray *values = option[@"values"];
         NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]]];
         // 画质提升（11-15 维护者：标准 / 2D 游戏专用 / 锐利放大）：选了锐利放大（MetalFX）才在标题下写一行代价，另两档不写；
@@ -596,6 +603,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         // PR3d：HDR 开时这行下的提示先说产品限制（不置灰，见上——SDR 窗口照常）；没开 HDR 照旧按直连 / MetalFX 代价提示
         NSString *note = s2a_ios_hdr_upscale_bypassed() ? S2AL(@"gfx.hdrUpscaleBypass.note") : nil;
         if (!note) note = blocked ? [NSString stringWithFormat:@"%@ %@", S2AL(@"gfx.filter.metalfx.noDirect"), S2AL(@"gfx.filter.fsr.noDirect")] : [values[MAX(selected, 0)] isEqual:@"MetalFX"] ? S2AL(@"gfx.filter.metalfx.note") : nil;
+        note = recommended_note(option[@"key"], note);
         return [self dropdown:option[@"title"] note:note labels:option[@"labels"] selected:selected enabled:^BOOL(NSInteger index) { return !(blocked && ([values[index] isEqual:@"MetalFX"] || [values[index] isEqual:@"Fsr"])); } choose:^(NSInteger index) {
             [s2a_ios_settings_defaults() setObject:values[index] forKey:option[@"key"]]; [weakSelf refresh];
         } identifier:@"settings.filter"];

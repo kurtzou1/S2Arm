@@ -37,6 +37,7 @@ void s2a_det_init(void);
 void load_modules(const char *, const char **, int);
 void load_modules_from_source(const struct s2a_loader_source *, const char **, int);
 void s2a_caps_apply(const char *);   // runtime/src/caps.c
+void s2a_game_defaults_apply(const char *, const char *);   // runtime/src/gdefaults.c：逐款测过的缺省（11-27）
 const char *s2a_module_dir(void);   // runtime/src/loader.c
 void s2a_fps_start(const char *);    // runtime/src/fps.c
 unsigned s2a_unresolved_count(void);
@@ -252,6 +253,7 @@ static int run_common(const struct s2a_android_runtime_request *r,
         else if (stall < 0) fprintf(stderr, "[s2a] 【红】停帧救场标记在，写 S2A_FPS60=0 失败（errno=%d），本局帧率补丁照清单\n", -stall);
     }
     s2a_caps_apply(r->services.game_data_dir);
+    s2a_game_defaults_apply(r->module_dir, r->services.game_data_dir);   // 逐款缺省：清单之后、未设才写（模块目录 = main.npdm / 随行表所在；清单目录判杠杆）
     char npdm[1100];
     int n = r->npdm_path ? snprintf(npdm, sizeof npdm, "%s", r->npdm_path) :
         snprintf(npdm, sizeof npdm, "%s/main.npdm", r->module_dir);

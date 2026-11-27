@@ -2263,6 +2263,7 @@
       {"id": "display.mods.remove", "zh-Hans": "删除", "en": "Remove"},
       {"id": "display.mods.files", "zh-Hans": "{0} 个文件 · {1}", "en": "{0} files · {1}"},
       {"id": "display.mods.imported", "zh-Hans": "已导入：{0}", "en": "Imported: {0}"},
+      {"id": "display.recommended", "zh-Hans": "本款推荐（实测过）", "en": "Recommended for this game (tested)"},
       {"id": "display.cheats.player", "zh-Hans": "你导入的", "en": "Imported by you"},
       {"id": "display.cheats.library", "zh-Hans": "来自 {0}", "en": "From {0}"},
       {"id": "display.cheats.author", "zh-Hans": "作者 {0}", "en": "By {0}"},

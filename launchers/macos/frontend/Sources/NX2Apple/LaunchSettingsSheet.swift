@@ -23,6 +23,8 @@ struct LaunchOption {
     let note: [String: String]
     /// 列着但这款用不了的选项值（画质提升：没走直连时的锐利放大）：置灰，原因在 reason
     let blocked: [String]
+    /// 值来自逐款测过的缺省（launchers/shared/game_defaults.v1.tsv，11-27）：玩家没选过，这款按实测推荐值跑，说明行前标「本款推荐」
+    let recommended: Bool
 
     init(_ raw: Any?) {
         let row = raw as? [String: Any] ?? [:]
@@ -33,6 +35,7 @@ struct LaunchOption {
         choices = row["choices"] as? [String]
         note = row["note"] as? [String: String] ?? [:]
         blocked = row["blocked"] as? [String] ?? []
+        recommended = row["recommended"] as? Bool ?? false
     }
 }
 
@@ -356,7 +359,8 @@ struct LaunchSettingsSheet: View {
         case "choice":
             let option = options[item.id]
             let current = value(item.id) as? String, picked = item.options.first { $0.value == current }
-            CardRow(title, detail: !(option?.reason ?? "").isEmpty ? loc.backend(option?.reason ?? "") : option?.note[lang] ?? picked?.detail(lang) ?? item.detail(lang)) {
+            let said = !(option?.reason ?? "").isEmpty ? loc.backend(option?.reason ?? "") : option?.note[lang] ?? picked?.detail(lang) ?? item.detail(lang)
+            CardRow(title, detail: option?.recommended == true ? t("display.recommended") + (said.isEmpty ? "" : " · " + said) : said) {
                 LauncherDropdown(options: item.options.filter { o in
                     option?.choices.map { $0.contains(o.value) || o.value == current } ?? true
                 }.map { ($0.value, $0.label[lang] ?? $0.value) },

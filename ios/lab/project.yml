@@ -41,6 +41,7 @@ targets:
       - ios/diagcollect.m
       - runtime/src/pad.c
       - runtime/src/caps.c
+      - runtime/src/gdefaults.c
       - runtime/src/motion_pick.c
       - runtime/src/sesdiag.c
       - runtime/src/patch.c
