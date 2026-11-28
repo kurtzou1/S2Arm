@@ -654,6 +654,32 @@ int dm_shader_retrans(const uint8_t key[8], uint64_t code, const void *control) 
     if (dsh_comp_src_locked(comp, k, st, (const void *)(uintptr_t)code, ncode, control, nctl, out)) { atomic_fetch_add_explicit(&g_dsh_failed, 1, memory_order_relaxed); LOG("【红】直连：%s 重译失败", k); return 1; }
     return 0;
 }
+// Retranslate a packaged shader from LP_K_GUEST using the current host translator when its packaged reflection failed.
+int dm_shader_pkg_retrans(const char *k16, int nvn_stage) {
+    static const int nvn_to_dsh[6] = {0, 1, 3, 4, 5, 2};
+    const char *out = getenv("DM_MSL_FALLBACK");
+    if (!out || !*out || !k16 || strlen(k16) < 16 || nvn_stage < 0 || nvn_stage >= 6 || !dsh_xfp()) return 0;
+    char k[17]; snprintf(k, sizeof k, "%.16s", k16);
+    if (dsh_have(out, k)) return 1;
+    uint8_t key[8]; for (int i = 0; i < 8; i++) { unsigned v; if (sscanf(k + 2 * i, "%2x", &v) != 1) return 0; key[i] = (uint8_t)v; }
+    int st = nvn_to_dsh[nvn_stage];
+    dsh_comp_fn comp = dsh_comp();
+    if (!comp) return 0;
+    mkdir(out, 0755);
+    pthread_mutex_lock(&g_dsh_rf_mu);
+    int ok = dsh_have(out, k);
+    if (!ok) {
+        uint8_t *buf = NULL; uint32_t nctl = 0, ncode = 0, c2 = 0, n2 = 0;
+        if (!mtl_guest_input(key, st, &buf, &nctl, &ncode)) {
+            if ((size_t)nctl + ncode >= 0x708 && dsh_stage_raw(buf + nctl, buf, &n2, &c2) == st && c2 <= nctl && n2 <= ncode)
+                dsh_comp_src_locked(comp, k, st, buf + nctl, ncode, buf, nctl, out);
+            free(buf);
+        }
+        ok = dsh_have(out, k);
+    }
+    pthread_mutex_unlock(&g_dsh_rf_mu);
+    return ok;
+}
 void *dm_shader_snap(uint64_t code, const void *control, uint64_t *code_out, const void **control_out) {
     uint32_t ncode = 0, nctl = 0;
     if (!code || !control || dsh_stage((const uint8_t *)(uintptr_t)code, control, &ncode, &nctl) < 0) return NULL;

@@ -785,3 +785,8 @@
 "d2r.character" = "请选择角色本人的文件夹，里面应有同名的 .d2s 存档。";
 "d2r.duplicate" = "已有同名角色，原存档保持原样。";
 "d2r.docs" = "无法读取 S2Arm 的存档目录。";
+"settings.sound.silent" = "静音模式下也播放声音";
+"settings.sound.silent.note" = "开启后，设备处于静音模式时游戏照样出声；关闭时和其他游戏一样跟随静音模式。";
+"settings.sound.mix" = "与其他 App 混音";
+"settings.sound.mix.note" = "打开后，别的 App 的音乐、播客和游戏一起放，静音键只静音游戏。";
+"settings.docked.wsForced" = "社区满屏补丁开着：这局按主机模式跑（补丁只改主机模式的画面），更耗电。要按掌机跑，先关掉「满屏」再重进游戏。";

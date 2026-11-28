@@ -202,6 +202,57 @@ static void t_res_tex_epoch_unrelated(void) {
     CHECK(onx.fallback == SC_N && onx.since == SC_N && onx.pages == SC_N * PP && onx.log_n == ND - SC_N);
     CHECK(off.unarmed == 0 && on.unarmed == 0 && onw.unarmed == 0);   // 负对照：加保护都落地时一次都不计、不多传
 }
+// 线性 2D：解保护先记了页代号，写指令却在首次上传之后才完成。
+// 下次保护落地时位图可以为空，上传端仍必须收到新字节。
+static void t_linear_unarmed_retry(void) {
+    res_fresh();
+    nvn_be_sub_begin();
+    g_block_mem = g_block_arena;   // 起点已按宿主页对齐
+    g_tp.mem = g_block_mem;
+    g_tp.size = PG;
+    g_log_fake_on = 1;
+    g_log_fake_bad = 0;
+    g_log_head = 0;
+    g_log_ident++;
+    g_wp_on = 1;
+    g_wp_dirty[0] = 0;
+    g_log_unarmed[0] = 1;
+    const uint64_t saved_gen = g_block_gen[0];
+    g_block_gen[0] = ++g_dirty_now;
+    fake_log_event(0, 0);   // 上传开始时，这条事件已发布
+
+    tex_t t = mk_tex(9801, 0, NVN_FORMAT_R8, 8, 2, 1, NVN_TEXTURE_FLAGS_LINEAR);
+    t.mem = g_tp.mem;
+    uint8_t expected[16];
+    memset(expected, 0x31, sizeof expected);
+    memset(t.mem, 0x31, t.L.size);
+    uint64_t perf[RP_PERF_N];
+    rp_perf_take(perf);
+    nvn_gpu_tex image = rp_tex_resolve(&t, &g_fake_cmd);
+    CHECK(image != NULL && g_nup == 1 && g_up[0].img == sizeof expected &&
+          !memcmp(g_up[0].first, expected, sizeof expected));
+    rp_perf_take(perf);
+    CHECK(perf[RP_PERF_TEX_UNARMED] == 1);
+
+    // 只改第二行。页仍可写，没有新缺页、代号或日志事件。
+    memset(t.mem + t.L.size / 2, 0xa7, 8);
+    memset(expected + 8, 0xa7, 8);
+    g_log_unarmed[0] = 0;   // 下一次加保护可成功
+    CHECK(rp_tex_resolve(&t, &g_fake_cmd) == image);
+    CHECK(g_nup > 0 && !memcmp(g_up[g_nup - 1].first, expected, sizeof expected));
+    int recovered = g_nup;
+    CHECK(rp_tex_resolve(&t, &g_fake_cmd) == image && g_nup == recovered);
+
+    nvn_be_tex_release(&t);
+    nvn_be_sub_commit();
+    fake_complete(NVN_GPU_DONE_OK);
+    g_log_fake_on = 0;
+    g_wp_on = 0;
+    g_block_gen[0] = saved_gen;
+    g_block_mem = NULL;
+    res_fresh();
+}
+
 // 加保护没落地：两种代号先后 × 日志开关，贴图 4 都必须重传恰好一次（重传时页已重新只读，之后回到日志路 / 纪元，不再多传）；别的贴图不受影响。
 static void t_res_tex_unarmed(void) {
     for (int v = 1; v <= 2; v++) for (int lg = 0; lg <= 1; lg++) {
@@ -854,6 +905,7 @@ int main(int argc, char **argv) {
     t_res_bc_byte_equal(1);
     t_res_tex_epoch_unrelated();
     t_res_tex_unarmed();
+    t_linear_unarmed_retry();
     t_res_bind_fast();
     t_res_pipe_layout();
     t_res_tex_before_pool();

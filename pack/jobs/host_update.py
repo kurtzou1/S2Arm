@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 import layout
+import xlate_affected   # 翻译器修复的受影响键清单（原因 xlateFix）
 from core import Failure, contained, digest, read
 
 def _host_abi():
@@ -215,6 +216,9 @@ def ios_lib_reasons(c, gid, ios=None, want=None):
         why.append("shaderMiss")
     if ios_runtime_only(c, gid) and built_older(c, ios.get("builtBy")):
         why.append("shaderGap")
+    # 翻译器修复（链号不变、已出的包不会因链号被提示）：维护者清单 translator/xlate_affected.tsv 里这款包之后的修复步有它的键（xlate_affected.affected）
+    if xlate_affected.affected(getattr(c, "engine", None), ios, Path(layout.ios_pack(c, gid)) / "shaders/direct") > 0:
+        why.append("xlateFix")
     return why
 
 

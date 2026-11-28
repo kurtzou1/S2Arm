@@ -4,6 +4,7 @@ using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.StructuredIr;
 using Ryujinx.Graphics.Shader.Translation;
+using Ryujinx.Graphics.Shader.Translation.Optimizations;
 
 // These fixtures use real AST nodes, use/def bookkeeping and AstOptimizer.Optimize.
 // Expectations are policy A, not a second implementation of memory-flow analysis.
@@ -406,6 +407,40 @@ static class Program
             f.Optimize();
             f.Retained(assignment, f.Main, source);
             Check(ReferenceEquals(use.GetSource(0), assignment.Destination), "continue backedge write crossed");
+        });
+        static (BasicBlock A, BasicBlock B, BasicBlock L, bool Removed) RunBranchElim(Operand aSrc, Operand bSrc)
+        {
+            BasicBlock a = new(0), b = new(1), l = new(2);
+            Operand lbl = new(OperandType.Label, 2), cond = new(OperandType.LocalVariable, 1);
+            a.Operations.AddLast(new Operation(Instruction.BranchIfTrue, lbl, cond));
+            a.Next = b;
+            a.Branch = l;
+            b.Operations.AddLast(new Operation(Instruction.Branch, lbl));
+            b.Next = l;
+            if (aSrc != null && bSrc != null)
+            {
+                PhiNode phi = new(new Operand(OperandType.LocalVariable, 2));
+                phi.AddSource(a, aSrc);
+                phi.AddSource(b, bSrc);
+                l.Operations.AddFirst(phi);
+            }
+            bool removed = BranchElimination.RunPass(a);
+            return (a, b, l, removed);
+        }
+        Run("branch-elim/phi-conflict-kept", () =>
+        {
+            var (a, _, l, removed) = RunBranchElim(new Operand(OperandType.Constant, 0), new Operand(OperandType.Constant, 1));
+            Check(!removed && ReferenceEquals(a.Branch, l), "branch eliminated despite conflicting PhiNode sources");
+        });
+        Run("branch-elim/phi-agreeing-removed", () =>
+        {
+            var (a, _, _, removed) = RunBranchElim(new Operand(OperandType.Constant, 1), new Operand(OperandType.Constant, 1));
+            Check(removed && a.Branch == null, "redundant branch not eliminated when PhiNode sources agree");
+        });
+        Run("branch-elim/no-phi-removed", () =>
+        {
+            var (a, _, _, removed) = RunBranchElim(null, null);
+            Check(removed && a.Branch == null, "redundant branch without PhiNode not eliminated");
         });
         Console.WriteLine($"AST memory propagation: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;

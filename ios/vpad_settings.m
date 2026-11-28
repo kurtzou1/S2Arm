@@ -251,6 +251,7 @@
     NSError *error;
     if (![NSFileManager.defaultManager createDirectoryAtURL:_exportDirectory withIntermediateDirectories:NO attributes:nil error:&error]) { [self showError:error]; return; }
     NSMutableDictionary *document = [_current.document mutableCopy];
+    document[@"keyStyles"] = [_store keyStyleSnapshot];   // #2303：带上按键大小 / 透明度 / 配色，导入时照着恢复（原先只有位置）
     // A built-in export becomes an importable user layout, without claiming the reserved default id.
     if ([S2AVPadLayout isBuiltinIdentifier:_current.identifier]) document[@"id"] = [@"layout-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString];
     NSURL *url = [_exportDirectory URLByAppendingPathComponent:[document[@"id"] stringByAppendingString:@".json"]];
@@ -271,6 +272,7 @@
     if (scoped) [url stopAccessingSecurityScopedResource];
     S2AVPadLayout *layout = data ? [S2AVPadLayout readData:data error:&error] : nil;
     if (!layout || ![_store saveLayout:layout error:&error]) { [self showError:error]; return; }
+    if (layout.keyStyles && ![_store applyKeyStyles:layout.keyStyles error:&error]) { [self showError:error]; return; }   // #2303：文件带了按键大小就一起用上
     if ([self chooseLayout:layout.identifier]) _current = layout;
 }
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller { [self cleanExport]; }

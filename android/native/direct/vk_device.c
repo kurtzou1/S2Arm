@@ -439,6 +439,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     descriptor_enabled.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
     VkPhysicalDeviceCustomBorderColorFeaturesEXT border = {0};
     border.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT;
+    const int has_cache_ctl = has_device_extension(out->physical, VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
+    VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cache_ctl_supported = {0};
+    cache_ctl_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT;
+    VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT cache_ctl_enabled = {0};
+    cache_ctl_enabled.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT;
     {
         VkPhysicalDeviceFeatures2 query = {0};
         query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -451,6 +456,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         if (has_4444) { *tail = &f4444; tail = &f4444.pNext; *tail = NULL; }
         if (has_dcc) { *tail = &dcc; tail = &dcc.pNext; *tail = NULL; }
         if (has_hqr) { *tail = &hqr; tail = &hqr.pNext; *tail = NULL; }
+        if (has_cache_ctl) { *tail = &cache_ctl_supported; tail = &cache_ctl_supported.pNext; *tail = NULL; }
         query.pNext = &draw_parameters;
         if (out->has_swapchain_maintenance1) {
             maintenance.pNext = &draw_parameters;
@@ -496,7 +502,10 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
                                   out->descriptor_indexing_storage_nonuniform;
     const int want_hqr = prop_int("debug.s2a.nvk_host_query_reset", 1) != 0;
     const int hqr_enable = has_hqr && hqr.hostQueryReset == VK_TRUE && want_hqr;
-    const char *device_ext[25];
+    const int want_cache_ctl = prop_int("debug.s2a.nvk_pipe_cache_ctl", 1) != 0;
+    const int cache_ctl_enable = want_cache_ctl && has_cache_ctl &&
+                                 cache_ctl_supported.pipelineCreationCacheControl == VK_TRUE;
+    const char *device_ext[26];
     uint32_t device_ext_count = 0;
     if (hqr_enable) device_ext[device_ext_count++] = VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME;
     // 反馈没有独立的 feature 位。实例仍申请 1.1，物理设备报 1.3 也须实际启用 EXT。
@@ -504,6 +513,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     const int pipe_feedback_ext = !pipe_feedback_core &&
         has_device_extension(out->physical, VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
     if (pipe_feedback_ext) device_ext[device_ext_count++] = VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME;
+    if (cache_ctl_enable) device_ext[device_ext_count++] = VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME;
     // apiVersion=1.1，不能拿物理设备支持 1.3 当作应用已启用核心 NONE。
     // 此扩展没有额外 feature 位；缺失时仍走独立快照，不能用 DONT_CARE 假代 NONE。
     out->load_store_op_none_enabled = has_device_extension(out->physical, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);
@@ -737,6 +747,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         hqr_enabled.pNext = (void *)device_info.pNext;
         device_info.pNext = &hqr_enabled;
     }
+    if (cache_ctl_enable) {
+        cache_ctl_enabled.pipelineCreationCacheControl = VK_TRUE;
+        cache_ctl_enabled.pNext = (void *)device_info.pNext;
+        device_info.pNext = &cache_ctl_enabled;
+    }
     if (vkCreateDevice(out->physical, &device_info, NULL, &out->device) != VK_SUCCESS)
         return fail(why, why_size, "vkCreateDevice failed");
     if (hqr_enable) {
@@ -746,6 +761,10 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     S2A_DLOG("[s2a] vk host query reset: ext=%d feature=%d want=%d entry=%d enabled=%d\n",
              has_hqr, hqr.hostQueryReset == VK_TRUE, want_hqr, out->reset_query_pool != NULL, out->host_query_reset_enabled);
     out->pipeline_creation_feedback_enabled = pipe_feedback_core || pipe_feedback_ext;
+    out->pipeline_creation_cache_control_enabled = cache_ctl_enable;
+    S2A_DLOG("[s2a] vk pipeline cache control: ext=%d feature=%d want=%d enabled=%d\n",
+             has_cache_ctl, cache_ctl_supported.pipelineCreationCacheControl == VK_TRUE,
+             want_cache_ctl, out->pipeline_creation_cache_control_enabled);
     out->descriptor_indexing_enabled = descriptor_enable;
     S2A_DLOG("[s2a] vk descriptor indexing: ext_state=%d queried=%d runtime=%d partial=%d sampled_nonuniform=%d "
              "storage_nonuniform=%d variable_count=%d sampled_update_after_bind=%d enabled=%d "

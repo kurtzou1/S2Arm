@@ -38,6 +38,22 @@ int main(void) { @autoreleasepool {
     CK([[l buttonAt:in2 safeRect:safe slop:0 scales:nil] isEqualToString:bid] && ![[l buttonAt:in2 safeRect:safe slop:0 scales:@{bid: @0.6}] isEqualToString:bid], "⑨ 缩小 0.6 倍：原框边缘点不到了");
     NSURL *bad2 = [d URLByAppendingPathComponent:@".key_style.json"]; [@"{坏" writeToURL:bad2 atomically:YES encoding:NSUTF8StringEncoding error:nil]; r = [[S2AVPadLayoutStore alloc] initWithDirectory:d];
     CK([r keyStyle:@"A"].scale == 1 && r.keyTheme == 0, "⑩ 文件损坏回默认，不崩");
-    if (bad) printf("t_vpad_key_style：%d 项不过\n", bad); else printf("✓ t_vpad_key_style：15 项\n");
+    // #2303：导出的布局文件带 keyStyles（按键大小 / 透明度 / 配色），导入照着恢复；没有它的旧文件照收
+    {
+        NSMutableDictionary *doc = [[S2AVPadLayout defaultForSafeRect:safe].document mutableCopy]; doc[@"id"] = @"mine-2303"; doc[@"name"] = @"x";
+        NSDictionary *ks = @{@"theme": @3, @"globalScale": @2.5, @"globalOpacity": @0.6, @"keys": @{@"A": @{@"scale": @1.5, @"opacity": @0.5, @"hidden": @NO}, @"LS": @{@"scale": @0.6, @"opacity": @1, @"hidden": @YES}}};
+        NSData *plain = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
+        doc[@"keyStyles"] = ks; NSData *styled = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
+        NSMutableDictionary *badks = [ks mutableCopy]; badks[@"globalScale"] = @4.5; doc[@"keyStyles"] = badks;
+        NSData *over = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
+        S2AVPadLayout *lp = [S2AVPadLayout readData:plain error:&e], *ls = [S2AVPadLayout readData:styled error:&e], *lo = [S2AVPadLayout readData:over error:&e];
+        CK(lp && !lp.keyStyles && ls && [ls.keyStyles isEqualToDictionary:ks] && !lo, "⑯ 不带外观的旧文件照收（外观为空）；带合法外观的收下并原样带出；整体大小 4.5（上限 4）整份拒收");
+        S2AVPadLayoutStore *t = [[S2AVPadLayoutStore alloc] initWithDirectory:[d URLByAppendingPathComponent:@"imp"]];
+        BOOL ok = [t applyKeyStyles:ls.keyStyles error:&e]; S2AVPadLayoutStore *t2 = [[S2AVPadLayoutStore alloc] initWithDirectory:[d URLByAppendingPathComponent:@"imp"]];
+        CK(ok && t2.keyTheme == 3 && t2.globalScale == 2.5 && t2.globalOpacity == 0.6 && [t2 keyStyle:@"A"].scale == 1.5 && [t2 keyStyle:@"A"].opacity == 0.5 && [t2 keyStyle:@"LS"].hidden,
+           "⑰ 导入外观后重开同一目录：配色 3、整体 2.5 / 0.6、A 键 1.5 / 0.5、LS 隐藏");
+        CK(![t applyKeyStyles:badks error:&e] && [[[S2AVPadLayoutStore alloc] initWithDirectory:[d URLByAppendingPathComponent:@"imp"]] globalScale] == 2.5, "⑱ 超范围外观直接调用也拒收，盘上不变");
+    }
+    if (bad) printf("t_vpad_key_style：%d 项不过\n", bad); else printf("✓ t_vpad_key_style：18 项\n");
     return bad != 0;
 } }

@@ -42,6 +42,7 @@ EXT_FEATURES = (('shaderDrawParameters', 'shaderDrawParameters'), ('timelineSema
                 ('formatA4B4G4R4', 'formatA4B4G4R4'), ('formatA4R4G4B4', 'formatA4R4G4B4'),
                 ('depthClipControl', 'depthClipControl'), ('swapchainMaintenance1', 'swapchainMaintenance1'),
                 ('hostQueryReset', 'hostQueryReset'),
+                ('pipelineCreationCacheControl', 'pipelineCreationCacheControl'),
                 ('runtimeDescriptorArray', 'diRuntimeArray'), ('descriptorBindingPartiallyBound', 'diPartiallyBound'),
                 ('shaderSampledImageArrayNonUniformIndexing', 'diSampledNonUniform'),
                 ('shaderStorageImageArrayNonUniformIndexing', 'diStorageNonUniform'),
@@ -212,7 +213,8 @@ def compare(name, got_path):
         if k not in g: bad.append('%s：档案 %r / 生成的没有这项' % (k, v)); continue   # null 也算：值不知道，但这项该现查到
         if v is None: skipped += 1; continue
         if g[k] != v: bad.append('%s：档案 %r / 生成 %r' % (k, v, g[k]))
-    extra = sorted(k for k in g if k not in w and k != '.vulkan.features.hostQueryReset')
+    EXTRA_FEATURES = {'.vulkan.features.hostQueryReset', '.vulkan.features.pipelineCreationCacheControl'}
+    extra = sorted(k for k in g if k not in w and k not in EXTRA_FEATURES)
     bad += ['%s：生成的多出这项（%r），档案里没有' % (k, g[k]) for k in extra]
     if bad:
         print('FAIL: [%s] 生成的设备档案和 devprofiles/%s.json 不一致（%d 处）：\n  %s' % (name, name, len(bad), '\n  '.join(bad[:40])))
@@ -225,7 +227,7 @@ def compare(name, got_path):
 # 版本门槛变体（dev_facts.c：timeline / 描述符索引「列了扩展或 ≥ 1.2」、有效版本 = min(应用申请的 1.1, 设备)：不列扩展时 1.2 / 1.3 转正的都不用、4444 特性位只在列了扩展时记、低于 1.1 整条扩展查询链不挂）：
 #   由 adreno 档派生，去掉这三个已转正扩展再改设备版本；期望只由变体自己的版本号决定
 PROMOTED = ('VK_KHR_timeline_semaphore', 'VK_EXT_descriptor_indexing', 'VK_EXT_4444_formats')
-VARIANTS = {'v-api10': '1.0.0', 'v-api11-noext': '1.1.0', 'v-api12-noext': '1.2.0', 'v-api13-noext': '1.3.0', 'v-khr-alias': '1.3.0', 'v-hqr': '1.3.0'}
+VARIANTS = {'v-api10': '1.0.0', 'v-api11-noext': '1.1.0', 'v-api12-noext': '1.2.0', 'v-api13-noext': '1.3.0', 'v-khr-alias': '1.3.0', 'v-hqr': '1.3.0', 'v-cache-ctl': '1.3.0', 'v-hqr-cache-ctl': '1.3.0'}
 # KHR 别名正控：只列 KHR 版的 index_type_uint8 / swapchain_maintenance1（同一个特性结构），照样挂、照样记，假驱动不判红
 KHR_ALIAS = {'VK_EXT_index_type_uint8': 'VK_KHR_index_type_uint8', 'VK_EXT_swapchain_maintenance1': 'VK_KHR_swapchain_maintenance1'}
 
@@ -247,6 +249,18 @@ def variants(out):
             p['vulkan']['extensions'] = dict(sorted(p['vulkan']['extensions'].items()))
             p['vulkan']['features']['hostQueryReset'] = 1
             p['vulkan']['features'] = dict(sorted(p['vulkan']['features'].items()))
+        elif name == 'v-cache-ctl':
+            p['vulkan']['extensions']['VK_EXT_pipeline_creation_cache_control'] = 1
+            p['vulkan']['extensions'] = dict(sorted(p['vulkan']['extensions'].items()))
+            p['vulkan']['features']['pipelineCreationCacheControl'] = 1
+            p['vulkan']['features'] = dict(sorted(p['vulkan']['features'].items()))
+        elif name == 'v-hqr-cache-ctl':
+            p['vulkan']['extensions']['VK_EXT_host_query_reset'] = 1
+            p['vulkan']['extensions']['VK_EXT_pipeline_creation_cache_control'] = 1
+            p['vulkan']['extensions'] = dict(sorted(p['vulkan']['extensions'].items()))
+            p['vulkan']['features']['hostQueryReset'] = 1
+            p['vulkan']['features']['pipelineCreationCacheControl'] = 1
+            p['vulkan']['features'] = dict(sorted(p['vulkan']['features'].items()))
         else:
             for e in PROMOTED: p['vulkan']['extensions'].pop(e, None)
         p['factsDigest'] = lint.digest(p)
@@ -257,6 +271,24 @@ def check_variant(name, got_path):
     got = json.load(open(got_path, encoding='utf-8'))
     minor = int(VARIANTS[name].split('.')[1])
     f, fm, pr = got['vulkan']['features'], got['vulkan']['formats'], got['vulkan']['properties']
+    if name == 'v-hqr-cache-ctl':
+        bad = []
+        if f.get('hostQueryReset') != 1:
+            bad.append('hostQueryReset 期望 1，实为 %r' % (f.get('hostQueryReset'),))
+        if f.get('pipelineCreationCacheControl') != 1:
+            bad.append('pipelineCreationCacheControl 期望 1，实为 %r' % (f.get('pipelineCreationCacheControl'),))
+        bad += ['生成的档案不合格：' + b for b in lint.check(got)]
+        if bad:
+            print('FAIL: [%s] host_query_reset + pipeline_creation_cache_control 共存：\n  %s' % (name, '\n  '.join(bad))); return 1
+        print('PASS: [%s] VK_EXT_host_query_reset + VK_EXT_pipeline_creation_cache_control 共存：双扩展特性位与建设备启用一致' % name); return 0
+    if name == 'v-cache-ctl':
+        bad = []
+        if f.get('pipelineCreationCacheControl') != 1:
+            bad.append('pipelineCreationCacheControl 期望 1，实为 %r' % (f.get('pipelineCreationCacheControl'),))
+        bad += ['生成的档案不合格：' + b for b in lint.check(got)]
+        if bad:
+            print('FAIL: [%s] pipeline_creation_cache_control 正控：\n  %s' % (name, '\n  '.join(bad))); return 1
+        print('PASS: [%s] VK_EXT_pipeline_creation_cache_control：特性位查询与建设备启用一致' % name); return 0
     if name == 'v-khr-alias':
         # 逐值对照：生成档里这两项必须等于基准档（adreno）的输入值；只查键在不在的话，回填成 0 也会过（#1879 复审）
         base = load('adreno-8xx-qcom')['vulkan']['features']

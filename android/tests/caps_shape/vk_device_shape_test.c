@@ -86,6 +86,9 @@ int main(int argc, char **argv) {
     // 自定义边框色（C3）：扩展 + customBorderColors 特性都有才开；没开时后端就近取内置档
     const int border = cs_has_ext(s, "VK_EXT_custom_border_color") && s->customBorderColors;
     EXPECT(d.custom_border_enabled == border, "custom_border_enabled=%d，期望 %d", d.custom_border_enabled, border);
+    const int cache_ctl = cs_has_ext(s, VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME) && s->pipelineCreationCacheControl;
+    EXPECT(d.pipeline_creation_cache_control_enabled == cache_ctl, "pipeline_creation_cache_control_enabled=%d，期望 %d",
+           d.pipeline_creation_cache_control_enabled, cache_ctl);
     // 描述符索引：扩展列出、1.1 设备、四位支持位齐全才整组启用
     const int di = cs_has_ext(s, "VK_EXT_descriptor_indexing") && s->props.apiVersion >= VK_API_VERSION_1_1 &&
                    s->diRuntimeArray && s->diPartiallyBound && s->diSampledNonUniform && s->diStorageNonUniform;

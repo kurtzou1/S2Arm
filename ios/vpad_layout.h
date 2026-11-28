@@ -21,6 +21,8 @@ CGFloat S2AVPadKeyOpacity(CGFloat idle, BOOL active);
 @property(nonatomic, readonly, copy) NSString *displayName;
 @property(nonatomic, readonly, copy) NSArray<NSDictionary *> *buttons;
 @property(nonatomic, readonly, copy) NSArray<NSDictionary *> *sticks;
+// 布局文件里可选的按键外观（keyStyles：theme / globalScale / globalOpacity / keys，#2303）；没有为 nil
+@property(nonatomic, readonly, copy, nullable) NSDictionary *keyStyles;
 + (nullable instancetype)readData:(NSData *)data error:(NSError **)error;
 // The built-in layout keeps the historical point geometry at each viewport size.
 + (instancetype)defaultForSafeRect:(CGRect)rect;
@@ -80,7 +82,7 @@ CGPoint S2AVPadStickSensitivity(CGPoint input, CGFloat sensitivity);
 // 大小倍率范围（每键与整体同一范围）：上限原 1.6，#372 连打类游戏要更大的键，放到 4（文件格式不变，旧存档照读）
 #define S2A_VPAD_SCALE_MIN 0.6
 #define S2A_VPAD_SCALE_MAX 4.0
-// 每键外观：大小倍率 S2A_VPAD_SCALE_MIN–MAX、不透明度 0.2–1、是否隐藏；与布局几何分开存，布局文件格式不变
+// 每键外观：大小倍率 S2A_VPAD_SCALE_MIN–MAX、不透明度 0.2–1、是否隐藏；与布局几何分开存（.key_style.json）；导出的布局文件另带一份可选 keyStyles，导入时照着恢复（#2303）
 typedef struct { CGFloat scale, opacity; BOOL hidden; } S2AVPadKeyStyle;
 static const NSInteger kS2AVPadKeyThemeCount = 5;   // 0 = 默认描线，1–4 = 配色
 
@@ -124,6 +126,7 @@ static const NSInteger kS2AVPadKeyThemeCount = 5;   // 0 = 默认描线，1–4 
 // 编辑取消时整体还原
 - (NSDictionary *)keyStyleSnapshot;
 - (BOOL)restoreKeyStyleSnapshot:(NSDictionary *)snapshot error:(NSError **)error;
+- (BOOL)applyKeyStyles:(NSDictionary *)styles error:(NSError **)error;   // 导入布局带的外观：校验后换掉现有外观并存盘
 - (instancetype)initWithDirectory:(NSURL *)directory;
 // 布局与选择记录存 directory（多款容器壳 = 该游戏自己的目录），闲置透明度 / 触感 / 摇杆手感存 settingsDirectory（App 级，全部游戏共用）
 - (instancetype)initWithDirectory:(NSURL *)directory settingsDirectory:(NSURL *)settingsDirectory;

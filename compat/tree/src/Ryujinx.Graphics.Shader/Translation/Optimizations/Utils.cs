@@ -34,7 +34,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return elemIndexSrc.Type == OperandType.Constant && elemIndexSrc.Value == elemIndex;
         }
 
-        private static bool IsSameOperand(Operand x, Operand y)
+        public static bool IsSameOperand(Operand x, Operand y)
         {
             if (x.Type != y.Type || x.Value != y.Value)
             {

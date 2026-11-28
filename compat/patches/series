@@ -709,3 +709,4 @@
 20261127-0530-snap-domain-id-taken-log.patch
 20261127-2342-audio-depth-drain.patch
 20261127-1257-libpack-ssbo-window-mask.patch
+20261127-0829-shader-branch-elim-phi-conflict.patch

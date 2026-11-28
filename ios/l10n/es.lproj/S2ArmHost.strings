@@ -779,3 +779,8 @@
 "d2r.character" = "Selecciona la carpeta del personaje que contenga un archivo .d2s con el mismo nombre.";
 "d2r.duplicate" = "Ya existe un personaje con ese nombre. Se ha conservado la partida actual.";
 "d2r.docs" = "No se puede leer el directorio de partidas de S2Arm.";
+"settings.sound.silent" = "Reproducir sonido en modo Silencio";
+"settings.sound.silent.note" = "Cuando está activado, el sonido del juego sigue reproduciéndose aunque el dispositivo esté en modo Silencio. Cuando está desactivado, S2Arm respeta el modo Silencio como otros juegos.";
+"settings.sound.mix" = "Mezclar con otras apps";
+"settings.sound.mix.note" = "Cuando está activado, la música o los podcasts de otras apps siguen reproduciéndose con el juego, y el interruptor de Silencio solo silencia el juego.";
+"settings.docked.wsForced" = "Hay un parche de pantalla completa de la comunidad activado, así que esta sesión se ejecuta en Modo con base (el parche solo cambia la imagen de ese modo) y consume más batería. Para jugar en modo portátil, desactiva «Pantalla completa» y vuelve a abrir el juego.";

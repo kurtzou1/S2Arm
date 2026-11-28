@@ -785,3 +785,8 @@
 "d2r.character" = "Select the character’s folder containing a .d2s save with the same name.";
 "d2r.duplicate" = "A character with that name already exists. Your current save was kept.";
 "d2r.docs" = "S2Arm’s save directory could not be read.";
+"settings.sound.silent" = "Play Sound in Silent Mode";
+"settings.sound.silent.note" = "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games.";
+"settings.sound.mix" = "Mix with Other Apps";
+"settings.sound.mix.note" = "When on, music or podcasts from other apps keep playing with the game, and the Silent switch only mutes the game.";
+"settings.docked.wsForced" = "A community full-screen patch is on, so this session runs in Docked mode (the patch only changes Docked-mode rendering), which uses more power. To run handheld, turn off “Full screen” and reopen the game.";

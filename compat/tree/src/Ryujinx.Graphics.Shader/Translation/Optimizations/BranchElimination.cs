@@ -7,7 +7,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
     {
         public static bool RunPass(BasicBlock block)
         {
-            if (block.HasBranch && IsRedundantBranch((Operation)block.GetLastOp(), Next(block)))
+            BasicBlock nextBlock = Next(block);
+
+            if (block.HasBranch && IsRedundantBranch(block, (Operation)block.GetLastOp(), nextBlock))
             {
                 block.Branch = null;
 
@@ -17,13 +19,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return false;
         }
 
-        private static bool IsRedundantBranch(Operation current, BasicBlock nextBlock)
+        private static bool IsRedundantBranch(BasicBlock block, Operation current, BasicBlock nextBlock)
         {
             // Here we check that:
             // - The current block ends with a branch.
             // - The next block only contains a branch.
             // - The branch on the next block is unconditional.
             // - Both branches are jumping to the same location.
+            // - Target block has no PhiNode distinguishing direct jump from block vs fallthrough via nextBlock.
             // In this case, the branch on the current block can be removed,
             // as the next block is going to jump to the same place anyway.
 
@@ -37,7 +40,53 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return false;
             }
 
-            return current.Dest == next.Dest;
+            return current.Dest == next.Dest && !HasPhiConflict(block, nextBlock, block.Branch);
+        }
+
+        private static bool HasPhiConflict(BasicBlock block, BasicBlock nextBlock, BasicBlock target)
+        {
+            if (target == null)
+            {
+                return false;
+            }
+
+            foreach (INode node in target.Operations)
+            {
+                if (node is not PhiNode phi)
+                {
+                    if (node is CommentNode)
+                    {
+                        continue;
+                    }
+
+                    break;
+                }
+
+                Operand blockSrc = null;
+                Operand nextSrc = null;
+
+                for (int i = 0; i < phi.SourcesCount; i++)
+                {
+                    BasicBlock pred = phi.GetBlock(i);
+
+                    if (pred == block)
+                    {
+                        blockSrc = phi.GetSource(i);
+                    }
+                    else if (pred == nextBlock)
+                    {
+                        nextSrc = phi.GetSource(i);
+                    }
+                }
+
+                if ((blockSrc != null || nextSrc != null) &&
+                    (blockSrc == null || nextSrc == null || !Utils.IsSameOperand(blockSrc, nextSrc)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static BasicBlock Next(BasicBlock block)

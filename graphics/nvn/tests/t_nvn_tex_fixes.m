@@ -326,6 +326,134 @@ static void test_draw_img_prescan_int_as_float(void) {
     API(nvnTextureFinalize)(&t);
 }
 
+static void test_x32_stencil_swizzle_and_override(void) {
+    size_t off = 10 << 20;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+    API(nvnTextureBuilderSetSize2D)(&b, 4, 4);
+    API(nvnTextureBuilderSetLevels)(&b, 1);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_DEPTH32F_STENCIL8);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off);
+    NVNtexture dtex = {0}; REQUIRE(API(nvnTextureInitialize)(&dtex, &b));
+
+    API(nvnTextureBuilderSetDepthStencilMode)(&b, NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    NVNtexture stex = {0}; REQUIRE(API(nvnTextureInitialize)(&stex, &b));   // UE4 CustomStencil 模式：同存储、不设 Swizzle
+
+    NVNtextureView sview; API(nvnTextureViewSetDefaults)(&sview);
+    API(nvnTextureViewSetDepthStencilMode)(&sview, NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    API(nvnTextureViewSetSwizzle)(&sview, NVN_TEXTURE_SWIZZLE_ZERO, NVN_TEXTURE_SWIZZLE_R, NVN_TEXTURE_SWIZZLE_ZERO, NVN_TEXTURE_SWIZZLE_ONE);
+
+    nvn_be_reg_tex(32, (const tex_t *)&stex, NULL);
+    nvn_be_reg_tex(33, (const tex_t *)&dtex, (const view_t *)&sview);
+
+    begin_cmd();
+    API(nvnCommandBufferSetRenderTargets)(&commands, 0, NULL, NULL, &dtex, NULL);
+    API(nvnCommandBufferSetScissor)(&commands, 0, 0, 4, 4);
+    API(nvnCommandBufferClearDepthStencil)(&commands, 0.5f, 1, 0x37, 0xff);
+    submit_cmd();
+
+    nvn_be_sub_begin();
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> mv_default = (__bridge id<MTLTexture>)tex_by_id_ptr(32);
+    id<MTLTexture> mv_explicit = (__bridge id<MTLTexture>)tex_by_id_ptr(33);
+    os_unfair_lock_unlock(&g_rmu);
+    REQUIRE(mv_default && mv_explicit);
+
+    // 真 Metal 计算核经 texture2d<float>.read() + as_type<uint4> 读四通道，验证 .r/.g/.b/.a
+    NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void rd(texture2d<float> t [[texture(0)]], device uint4 *out [[buffer(0)]]) { out[0] = as_type<uint4>(t.read(uint2(0, 0))); }\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&err]; REQUIRE(lib);
+    id<MTLComputePipelineState> cps = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"rd"] error:&err]; REQUIRE(cps);
+    id<MTLBuffer> ob = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+    memset(ob.contents, 0xff, 32);
+    // 直接通过 Metal3 / Metal4 独立队列跑一次读回确认真实像素值
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+
+    id<MTLCommandQueue> q = [g_dev newCommandQueue];
+    id<MTLCommandBuffer> cb = [q commandBuffer];
+    id<MTLComputeCommandEncoder> c1 = [cb computeCommandEncoder];
+    [c1 setComputePipelineState:cps];
+    [c1 setTexture:mv_default atIndex:0]; [c1 setBuffer:ob offset:0 atIndex:0];
+    [c1 dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [c1 setTexture:mv_explicit atIndex:0]; [c1 setBuffer:ob offset:16 atIndex:0];
+    [c1 dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [c1 endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    REQUIRE(cb.status == MTLCommandBufferStatusCompleted);
+    const uint32_t *res = (const uint32_t *)ob.contents;
+    CHECK(mv_default.pixelFormat == MTLPixelFormatX32_Stencil8 &&
+          mv_default.swizzle.red == MTLTextureSwizzleRed && mv_default.swizzle.green == MTLTextureSwizzleRed &&
+          mv_default.swizzle.blue == MTLTextureSwizzleRed && mv_default.swizzle.alpha == MTLTextureSwizzleRed &&
+          res[0] == 0x37u && res[1] == 0x37u && res[2] == 0x37u && res[3] == 0x37u,
+          "⑧a X32_Stencil8 默认复制四通道 (R,R,R,R)：GPU 读出 (%#x,%#x,%#x,%#x)", res[0], res[1], res[2], res[3]);
+    CHECK(mv_explicit.pixelFormat == MTLPixelFormatX32_Stencil8 &&
+          res[4] == 0u && res[5] == 0x37u && res[6] == 0u && res[7] == 1u,
+          "⑧b 显式 SetSwizzle(0,R,0,1) 不被覆盖：GPU 读出 (%#x,%#x,%#x,%#x)", res[4], res[5], res[6], res[7]);
+    API(nvnTextureFinalize)(&stex);
+    API(nvnTextureFinalize)(&dtex);
+}
+
+static void test_tbuf_atomic_and_ghost_view_reuse(void) {
+    size_t off = 11 << 20;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_BUFFER);
+    API(nvnTextureBuilderSetSize1D)(&b, 64);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_R32UI);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off);
+    NVNtexture t = {0}; REQUIRE(API(nvnTextureInitialize)(&t, &b));
+    nvn_be_reg_tex(34, (const tex_t *)&t, NULL);
+    API(nvnTextureFinalize)(&t);
+
+    nvn_be_sub_begin();
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> m1 = (__bridge id<MTLTexture>)tex_by_id_ptr(34);
+    os_unfair_lock_unlock(&g_rmu);
+    REQUIRE(m1 != nil);
+    uint64_t up0 = g_pfv_upgrades;
+    S.img[5][0] = 34;
+    NvShader *cs = [NvShader new]; cs->stage = 5; cs->rf.has_atomic_image = 1; cs->rf.nb = 1;
+    cs->rf.b = calloc(1, sizeof *cs->rf.b);
+    cs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .reg = 0, .dtt = (uint8_t)MTLTextureTypeTextureBuffer, .dpf = NVN_DPF_UINT, .rw = 1, .atomic_image = 1};
+    int atomic_ok = img_atomic_prepare(cs, 5);
+    uint64_t up1 = g_pfv_upgrades;
+    int atomic_ok2 = img_atomic_prepare(cs, 5);
+    uint64_t up2 = g_pfv_upgrades;
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> m_atomic = (__bridge id<MTLTexture>)tex_by_id_ptr(34);
+    os_unfair_lock_unlock(&g_rmu);
+    S.img[5][0] = 0;
+    free(cs->rf.b); cs->rf.b = NULL;
+    REQUIRE(nvn_be_wait(nvn_be_sub_commit(), 10000000000ull));
+
+    // 挤掉幽灵环：在独立提交里解析 NGHOST + 32 个其它已销毁缓冲纹理，使 34 号的 serial 出环
+    nvn_be_sub_begin();
+    for (int i = 0; i < NGHOST + 32; i++) {
+        API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)(off + 4096 + (size_t)i * 256));
+        NVNtexture x = {0}; REQUIRE(API(nvnTextureInitialize)(&x, &b));
+        tex_t sx = *(const tex_t *)&x;
+        API(nvnTextureFinalize)(&x);
+        REQUIRE(tex_mtl(&sx) != nil);
+    }
+    REQUIRE(nvn_be_wait(nvn_be_sub_commit(), 10000000000ull));
+
+    nvn_be_sub_begin();
+    uint64_t gen_before = g_ser_gen;
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> m2 = (__bridge id<MTLTexture>)tex_by_id_ptr(34);
+    os_unfair_lock_unlock(&g_rmu);
+    uint64_t gen_after_lookup = g_ser_gen;
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+
+    // main 70dd12655：R32 整数可写缓冲贴图建时就带原子与格式视图用途，首次原子也不用升级（0 次，不是 1 次）
+    CHECK(atomic_ok && atomic_ok2 && tex_atomic_usage(m_atomic) && up1 == up0 && up2 == up1,
+          "⑨a TARGET_BUFFER R32UI 建时就带原子用途、全程零升级（upgrades %llu→%llu→%llu）",
+          (unsigned long long)up0, (unsigned long long)up1, (unsigned long long)up2);
+    CHECK(m2 == m_atomic && tex_atomic_usage(m2) && gen_after_lookup == gen_before && g_ser_gen == gen_before,
+          "⑨b 幽灵环挤出后仍复用已登记 TARGET_BUFFER 视图（m1=%p m2=%p ser_gen %llu→%llu→%llu）",
+          (__bridge void *)m_atomic, (__bridge void *)m2, (unsigned long long)gen_before,
+          (unsigned long long)gen_after_lookup, (unsigned long long)g_ser_gen);
+}
+
 int main(void) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
@@ -349,6 +477,8 @@ int main(void) { @autoreleasepool {
     test_dual_nvpkg_ft_flush();
     test_storage_upload_gpw_and_nvpkg_ph();
     test_draw_img_prescan_int_as_float();
+    test_x32_stencil_swizzle_and_override();
+    test_tbuf_atomic_and_ghost_view_reuse();
 
     API(nvnCommandBufferFinalize)(&commands); API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool); API(nvnDeviceFinalize)(&device); free(memory);

@@ -208,6 +208,29 @@ int main(void) {
             CHECK(ro == 0 && g_store_n == 1 && !strcmp(team, "ABCDE12345"), "%s 密码对：返回 %d（期望 0）、存钥匙串 %d 次、团队号 %s（%s）", kinds[i][0], ro, g_store_n, team, why);
             free(eb);
         }
+        // ⑦ D-CW7T：系统回 -26275 的两种文件（期望按规则手写）。
+        //   base64 文本的加密 p12：空密码 → 1（问密码），密码对 → 导入、团队号 = 证书 OU；
+        //   结构上是 p12（PFX 头 30 82 .. .. 02 01 03 不动）、第 15 字节（内容类型 OID 内）改一位 → 系统解不开：空密码 → 1，输了密码 → -1 且不存（不循环问）；
+        //   根本不是 p12 的文本（日志）：-1、不弹密码（D-BJK9 选错文件那次）。反证：去掉 pfx_shaped 分支则第二组空密码回 -1；去掉 base64 解码则第一组回 -1
+        printf("⑦ -26275：base64 文本 / 结构是 p12 但系统解不开 / 不是 p12\n");
+        {
+            char c7[1200], f7[600], h7[600]; snprintf(f7, sizeof f7, "%s/legacy_t.p12", dir); snprintf(h7, sizeof h7, "%s/home_2303", dir);
+            snprintf(c7, sizeof c7, "cd %s && openssl pkcs12 -export -legacy -inkey k.pem -in c.pem -out %s -passout pass:t 2>/dev/null && base64 -i %s -o %s.b64", dir, f7, f7, f7);
+            size_t ln = 0, bn = 0; char fb[700]; snprintf(fb, sizeof fb, "%s.b64", f7);
+            uint8_t *lb = system(c7) == 0 ? slurp(f7, &ln) : NULL, *bb = lb ? slurp(fb, &bn) : NULL;
+            g_store_n = 0; int a1 = bb ? s2a_identity_import_p12(h7, bb, bn, "", NULL, team, sizeof team, why, sizeof why) : -9;
+            int a1s = g_store_n; g_store_n = 0; int a2 = bb ? s2a_identity_import_p12(h7, bb, bn, "t", NULL, team, sizeof team, why, sizeof why) : -9;
+            CHECK(a1 == 1 && a1s == 0 && a2 == 0 && g_store_n == 1 && !strcmp(team, "ABCDE12345"),
+                  "base64 文本（%zu 字节，原 p12 %zu 字节）：空密码 %d（期望 1）、密码对 %d（期望 0）、存 %d 次、团队号 %s", bn, ln, a1, a2, g_store_n, team);
+            uint8_t *mb = lb && ln > 16 ? malloc(ln) : NULL; if (mb) { memcpy(mb, lb, ln); mb[15] ^= 0x01; }
+            g_store_n = 0; int m1 = mb ? s2a_identity_import_p12(h7, mb, ln, "", NULL, team, sizeof team, why, sizeof why) : -9;
+            int m2 = mb ? s2a_identity_import_p12(h7, mb, ln, "t", NULL, team, sizeof team, why, sizeof why) : -9;
+            CHECK(m1 == 1 && m2 == -1 && g_store_n == 0, "结构是 p12、系统解不开：空密码 %d（期望 1 = 问密码）、输了密码 %d（期望 -1，不再问）、存 %d 次（%s）", m1, m2, g_store_n, why);
+            const char *logtxt = "2026-10-23 15:07:35 console log line, not a certificate at all\n2026-10-23 15:07:36 another line of the same log file here\n";
+            g_store_n = 0; int t1 = s2a_identity_import_p12(h7, logtxt, strlen(logtxt), "", NULL, team, sizeof team, why, sizeof why);
+            CHECK(t1 == -1 && g_store_n == 0, "不是 p12 的文本：返回 %d（期望 -1，不问密码）", t1);
+            free(lb); free(bb); free(mb);
+        }
         free(k1); free(cd); free(ss.p); free(nm);
         s2a_identity_test_store(NULL);
     }

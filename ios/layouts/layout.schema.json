@@ -148,6 +148,61 @@
           }
         }
       }
+    },
+    "keyStyles": {
+      "description": "Optional key appearance exported with the layout (theme, overall size and opacity, per-key size / opacity / hidden); applied on import",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "theme",
+        "keys",
+        "globalScale",
+        "globalOpacity"
+      ],
+      "properties": {
+        "theme": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "globalScale": {
+          "type": "number",
+          "minimum": 0.6,
+          "maximum": 4
+        },
+        "globalOpacity": {
+          "type": "number",
+          "minimum": 0.2,
+          "maximum": 1
+        },
+        "keys": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scale",
+              "opacity",
+              "hidden"
+            ],
+            "properties": {
+              "scale": {
+                "type": "number",
+                "minimum": 0.6,
+                "maximum": 4
+              },
+              "opacity": {
+                "type": "number",
+                "minimum": 0.2,
+                "maximum": 1
+              },
+              "hidden": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -785,3 +785,8 @@
 "d2r.character" = "請選擇角色本人的資料夾，其中應有同名的 .d2s 存檔。";
 "d2r.duplicate" = "已有同名角色，原存檔已保留。";
 "d2r.docs" = "無法讀取 S2Arm 的存檔目錄。";
+"settings.sound.silent" = "靜音模式下也播放聲音";
+"settings.sound.silent.note" = "開啟後，裝置處於靜音模式時遊戲照樣出聲；關閉時和其他遊戲一樣跟隨靜音模式。";
+"settings.sound.mix" = "與其他 App 混音";
+"settings.sound.mix.note" = "開啟後，別的 App 的音樂、播客和遊戲一起放，靜音鍵只靜音遊戲。";
+"settings.docked.wsForced" = "社群滿屏補丁開著：這局按 TV 模式跑（補丁只改 TV 模式的畫面），更耗電。要按掌機跑，先關掉「滿屏」再重進遊戲。";

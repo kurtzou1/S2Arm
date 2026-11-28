@@ -264,6 +264,18 @@ static void scenario(int n) {
         int got = dm_shader_miss_late("0000000000000000", (uint64_t)(uintptr_t)code, c2);
         check(got == 1 && compiled_stage == (n == 54 ? 2 : 1) && !strcmp(rt_stage, n == 54 ? "compute" : "pixel"));
     }
+    if (n == 56 || n == 57) {   // 包内计算着色器反射失效时用客体输入重译（dm_shader_pkg_retrans，119 支 cp_ib_cb0_40000000_）：
+        //   56 有种类 56（计算阶段 2）→ 映射 NVN 阶段 5 → 2、调编译器 1 次、写出当前 xfp 的 json / metal，返回 1；57 反证：没有种类 56 → 返回 0、编译器 0 次
+        char d[] = "/tmp/t_dsh_pkgret.XXXXXX", p[256]; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
+        write_out = 1; inlib = 1; known = 1;
+        for (int i = 0; i < (int)sizeof code; i++) code[i] = (uint8_t)(i + 1);   // 无 NVN 图形头 → dsh_stage_raw 判为计算 (2)
+        if (n == 56) pkg_put(key, 2, ctl, sizeof ctl, code, sizeof code);
+        int ok = dm_shader_pkg_retrans("0000000000000000", 5);
+        if (n == 56) check(ok == 1 && atomic_load(&compiler_calls) == 1 && compiled_stage == 2);
+        else check(ok == 0 && atomic_load(&pkg_asks) == 1 && atomic_load(&compiler_calls) == 0);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
+    }
     if (n == 38) {   // 没登记过的键：兜底目录里上局现编的网格（json stage "ms"）按 mesh 加映射、不调编译器
         char d[] = "/tmp/t_dsh_reuseXXXXXX", p[256]; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
         snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); FILE *f = fopen(p, "w"); check(f != NULL); fclose(f);
@@ -402,10 +414,12 @@ int main(void) {
         "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 52 包内片元：包里的客体输入 → 控制段过期后照样出采样器模拟变体
         "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 53 反证：没有容器 → 做不了、报红
         "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 54 NVN2 阶段字节 1、代码没有 SPH（计算着色器）：按计算现编
-        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 55 负对照：阶段字节 1、代码带像素 SPH：仍按像素
+        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 55 负对照：阶段字节 1、代码带像素 SPH：仍按像素
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 56 包内计算着色器反射失效按种类 56 重译
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 57 反证：无种类 56 时返回 0
     };
     int bad = 0;
-    for (int n = 0; n < 56; n++) {
+    for (int n = 0; n < 58; n++) {
         int fd[2]; pipe(fd); pid_t p = fork();
         if (!p) { close(fd[0]); dup2(fd[1], 1); close(fd[1]); scenario(n); }
         close(fd[1]); char buf[1024]; size_t at = 0; ssize_t got;
@@ -445,5 +459,5 @@ int main(void) {
         printf("%s 着色器覆盖计数文件：新建 %llu（期望 2）、app %s（期望 0.6.0）、再加 1 → %llu（期望 3）、别的形状返回 %d（期望 -1）且不写文件 %d（期望 1）\n", ok ? "✓" : "✗", c1, app1, c2, r3, none);
         bad += !ok; snprintf(mk, sizeof mk, "rm -rf '%s'", t); system(mk);
     }
-    printf("%s t_dsh_stats：56 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
+    printf("%s t_dsh_stats：58 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

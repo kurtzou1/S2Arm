@@ -12,7 +12,9 @@
 #include "rp_shader.h"    // rp_shader_prog_borrow/return / struct rp_prog
 #include "nvn_plat.h"     // 已有；nvn_plat_log / nvn_plat_flag
 // 弱链接[pipedemand]：s2a_fu_rt_reset（nvn_first_use.c 提供；android/tools/nvn_vk_pipe_demand_test.sh 不链它）
+// 弱链接[pipedemand,replay]：nvn_vk_pipe_try_cached（backend_vulkan.c 提供；android/tools/nvn_vk_pipe_demand_test.sh 与 nvk_pipe_async_draw_test.sh 可不链后端）
 void s2a_fu_rt_reset(void) __attribute__((weak));   // 首用 fresh/seen 历史清表（nvn_first_use.c；弱引用，宿主缺实现就跳过）
+int nvn_vk_pipe_try_cached(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) __attribute__((weak));
 
 #define DEM_MAX NVK_PP_MAX
 #define DEM_STAGES 5
@@ -300,7 +302,7 @@ static int dem_kick(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32],
     if (r == NVK_PP_ENTER_FOLLOW) {
         void *obj = NULL; int code = 0; char why[NVK_PP_WHY];
         int st = nvk_pp_state(&g_pp, &key, dem_eq, &obj, &code, why, sizeof why);
-        if (st == NVK_PP_READY) { *cached = (nvn_gpu_pipe)obj; pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_READY; }
+        if (st == NVK_PP_READY) { if (cached) *cached = (nvn_gpu_pipe)obj; pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_READY; }
         if (st == NVK_PP_FAILED) { pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_FAILED; }
         if (st == NVK_PP_COMPILING) { __atomic_fetch_add(&g_st.dedup, 1, __ATOMIC_RELAXED); pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_PENDING; }
         pthread_mutex_unlock(&g_life_mu);
@@ -310,6 +312,38 @@ static int dem_kick(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32],
 
     struct dem_job *j = &g_jobs[h];
     if (j->used) { nvk_pp_abandon(&g_pp, h); pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_NONE; }
+    const uint64_t gen = atomic_load_explicit(&g_gen, memory_order_acquire);
+
+    // 仅本配方首次成为 BUILDER 时在 g_life_mu 锁外探测驱动 VkPipelineCache；
+    // 已在途的后续重复 kick 在上面 FOLLOW 分支直接计 dedup 返回 PENDING，绝不重复探测。
+    if (!variant_sha && nvn_vk_pipe_try_cached) {
+        pthread_mutex_unlock(&g_life_mu);
+        nvn_gpu_pipe hit = NULL;
+        int cached_ok = nvn_vk_pipe_try_cached(d, &hit);
+        pthread_mutex_lock(&g_life_mu);
+        const int live = atomic_load_explicit(&g_accepting, memory_order_acquire) &&
+                         atomic_load_explicit(&g_running, memory_order_acquire) &&
+                         dem_gen_live(gen);
+        if (cached_ok && hit) {
+            if (live) {
+                nvk_pp_publish(&g_pp, h, hit, 0, NULL);
+                __atomic_fetch_add(&g_st.published, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&g_st.cache_hits, 1, __ATOMIC_RELAXED);
+                if (cached) *cached = hit;
+                pthread_mutex_unlock(&g_life_mu);
+                return NVK_DEMAND_READY;
+            }
+            pthread_mutex_unlock(&g_life_mu);
+            return NVK_DEMAND_NONE;
+        }
+        if (!live) {
+            pthread_mutex_unlock(&g_life_mu);
+            return NVK_DEMAND_NONE;
+        }
+        j = &g_jobs[h];
+        if (j->used) { nvk_pp_abandon(&g_pp, h); pthread_mutex_unlock(&g_life_mu); return NVK_DEMAND_NONE; }
+    }
+
     j->used = 1;
     j->desc = *d;
     for (int st = 0; st < DEM_STAGES; st++) j->desc.st[st].sh = NULL;
@@ -317,7 +351,7 @@ static int dem_kick(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32],
     j->stagemask = (uint8_t)(mask & 0x7u);
     j->cold = variant_sha != NULL;
     memcpy(j->variant_sha, key.variant_sha, sizeof j->variant_sha);
-    j->gen = atomic_load_explicit(&g_gen, memory_order_acquire);
+    j->gen = gen;
 
     pthread_mutex_lock(&g_q_mu);
     if (qn == DEM_MAX || (variant_sha && qn >= 8)) {
@@ -398,4 +432,5 @@ void nvn_vk_pipe_demand_stats(struct nvn_pipe_demand_stats *out) {
     out->failed = __atomic_load_n(&g_st.failed, __ATOMIC_RELAXED);
     out->timeouts = __atomic_load_n(&g_st.timeouts, __ATOMIC_RELAXED);
     out->full = __atomic_load_n(&g_st.full, __ATOMIC_RELAXED);
+    out->cache_hits = __atomic_load_n(&g_st.cache_hits, __ATOMIC_RELAXED);
 }

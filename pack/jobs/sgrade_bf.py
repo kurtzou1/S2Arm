@@ -458,7 +458,12 @@ def rechain_ios(c, gid):
         shutil.rmtree(old, ignore_errors=True)
         rels = [p.relative_to(pack).as_posix() for p in sorted(direct.rglob("*")) if p.is_file()]
         pid = add_to_pack(pack, "shaders/direct/", rels)
-    layout.update_info(c, gid, ios={**side, "dmshChain": want["dmshChain"], "bfGen": BF_GEN, "libGen": host_update.LIB_GEN, "pack": pid, "builtBy": host_update.built_by(c)})
+    rec = {**side, "dmshChain": want["dmshChain"], "bfGen": BF_GEN, "libGen": host_update.LIB_GEN, "pack": pid, "builtBy": host_update.built_by(c)}
+    rec.pop("xlateFp", None)   # 出这份新库的翻译器指纹（翻译器修复清单按它定位置）：读得到才记，旧值不留
+    fp = __import__("xlate_affected").lib_xfp(direct)
+    if fp:
+        rec["xlateFp"] = fp
+    layout.update_info(c, gid, ios=rec)
     return "updated"
 
 

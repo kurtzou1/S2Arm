@@ -717,6 +717,8 @@ done:
 //   返回 0 = 已按行传完；-1 = 不适用（没传过 / 不是线性单级二维 / 不被跟踪 / 脏行过半），调用方整张传；1 = 失败。
 static int upload_linear_dirty(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c) {
     const char *why = NULL;
+    // 上次取源时仍有可写页，稍后的写可能没推进页代号。整张重传后才能再用脏行位图。
+    if (x->unarmed) return -1;
     if (!x->uploaded || !x->span || t->d.levels > 1 || t->L.layers > 1 || t->d.target != NVN_TEXTURE_TARGET_2D || linear_class(t, &why, 0) <= 0) return -1;
     int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (bpb <= 0 || bw != 1 || bh != 1) return -1;

@@ -1,7 +1,7 @@
 // 触屏虚拟手柄（基础版，设计稿参考分支 touch/design 的 docs/原生触摸方案设计.md §6.1）：完整 Switch 按键 + 左右摇杆，掌机模式下经 InputPump.InputHook 喂给 Ryujinx HID。
 //   左半屏空白处按下 = 浮动左摇杆（按下点为中心，拖 60 pt 推满，松手消失）；右半屏空白处按下 = 浮动右摇杆（同上，转镜头）；
 //   摇杆按下 LS / RS 三种按法：看得见的 LS / RS 键（默认布局：LS 在十字键上方、RS 在 ABXY 左下，照 Switch 手柄原位）；
-//   浮动摇杆点一下不拖（≤0.25 秒、≤10 点）= 按一下；双击左 / 右半屏（第二下按住）= 按住。ABXY 右下按 Switch 原位（A 右、B 下、X 上、Y 左）；十字键左上；ZL L / R ZR 上缘两侧；－ ＋ 顶部中间。
+//   浮动摇杆点一下不拖（≤0.25 秒、≤10 点）= 按一下；双击左 / 右半屏（第二下按住）= 按住——这两种手势只在这一侧没有看得见的 LS / RS 键时生效（#2303）。ABXY 右下按 Switch 原位（A 右、B 下、X 上、Y 左）；十字键左上；ZL L / R ZR 上缘两侧；－ ＋ 顶部中间。
 //   ZL / ZR 按住 2 秒锁定（松手后游戏仍收到按下，键上小锁变闭锁 + 轻震），再点一下抬手解锁；功能开着时小锁常驻，按游戏在设置里可关。
 //   碰屏恢复按键高亮，3 秒无触摸降到设定的最低透明度（缺省 25%，可调 0–100%）；热区不变。
 // 线程：UIKit 主线程写，InputPump 的 HID 线程约 60 Hz 读 s2a_vpad_read（固定快照，不访问设备）。
@@ -1630,7 +1630,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
         else side = CGRectContainsPoint(_activation[0], p) ? 0 : CGRectContainsPoint(_activation[1], p) ? 1 : -1;
         if (side < 0 || _stick[side]) continue;
         _stick[side] = t; _c[side] = _layoutStore.stickFixed ? [self fixedCenter:side] : p; _downAt[side] = t.timestamp; _maxMove[side] = 0; [_held setObject:@(-1 - side) forKey:t];
-        if (t.timestamp - _lastUp[side] < 0.3 && hypot(p.x - _lastUpAt[side].x, p.y - _lastUpAt[side].y) < 40) _stickPress |= 1u << (side ? B_RS : B_LS);   // 双击：第二下按住 = 摇杆按下
+        if ([self stickGesture:side] && t.timestamp - _lastUp[side] < 0.3 && hypot(p.x - _lastUpAt[side].x, p.y - _lastUpAt[side].y) < 40) _stickPress |= 1u << (side ? B_RS : B_LS);   // 双击：第二下按住 = 摇杆按下
         _ring[side].center = _c[side]; _knob[side].center = _c[side]; _ring[side].hidden = _knob[side].hidden = NO;
         [self moveStick:side to:p];
     }
@@ -1657,6 +1657,13 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     }
     [self publish];
 }
+// 浮动摇杆的点按 / 双击当 LS / RS：只在这一侧没有看得见的 LS / RS 键时兜底（#2303：有键时，连按十字键偏出命中框一点就落到浮动摇杆上，
+//   点一下变成按 LS、快速两下变成按住 LS）。键在布局里且没隐藏 → 只认那个键；没有这个键或隐藏了 → 照旧用手势
+- (BOOL)stickGesture:(int)side {
+    NSString *key = side ? @"RS" : @"LS";
+    for (NSDictionary *b in _layout.buttons) if ([b[@"id"] isEqualToString:key]) return [_layoutStore keyStyle:key].hidden;
+    return YES;
+}
 - (void)end:(NSSet<UITouch *> *)ts {
     uint32_t tap = 0;
     for (UITouch *t in ts) {
@@ -1664,7 +1671,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
         NSNumber *n = [_held objectForKey:t]; if (!n) continue; [_held removeObjectForKey:t];
         if (n.intValue < 0) { int side = -1 - n.intValue; uint32_t bit = 1u << (side ? B_RS : B_LS);
             // 点按不拖 = 按一下摇杆（双击第二下按住时已经按着，不再补一下）
-            if (!(_stickPress & bit) && S2AVPadStickTapIsPress(t.timestamp - _downAt[side], _maxMove[side])) tap |= bit;
+            if (!(_stickPress & bit) && [self stickGesture:side] && S2AVPadStickTapIsPress(t.timestamp - _downAt[side], _maxMove[side])) tap |= bit;
             _stick[side] = nil; _ax[2 * side] = _ax[2 * side + 1] = 0; _stickPress &= ~bit;
             [self restStick:side]; _lastUp[side] = t.timestamp; _lastUpAt[side] = [t locationInView:self]; }
     }

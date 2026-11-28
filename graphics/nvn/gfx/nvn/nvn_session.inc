@@ -133,6 +133,13 @@ static int nvn_be_shutdown_session_body(void) {
     pthread_mutex_lock(&g_pool_gpuw_mu); nvn_hm_clear(&g_pool_gpuw, NULL); atomic_fetch_add(&g_pool_gpuw_gen, 1); atomic_store(&g_pool_gpuw_new, 0); pthread_mutex_unlock(&g_pool_gpuw_mu);
     free(g_gone); g_gone = NULL; g_gone_n = g_gone_cap = 0;
     if (g_alias_set) CFSetRemoveAllValues(g_alias_set);
+    for (uint32_t i = 0; i < g_tbuf_views.cap; i++) {
+        tbuf_view_free_entry(g_tbuf_views.vals[i], 0);
+    }
+    nvn_hm_clear(&g_tbuf_views, NULL);
+    nvn_hm_clear(&g_tbuf_view_by_ptr, NULL);
+    if (g_tbuf_view_set) CFSetRemoveAllValues(g_tbuf_view_set);
+    ptba_session_reset();
     nvn_hm_clear(&g_cpu_tex, NULL);
     // Atomic texture upgrades use the same serial/alias owners above. Their
     // weak usage registry and queued descriptor ids belong to this session.

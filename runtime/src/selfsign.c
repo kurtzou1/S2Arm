@@ -527,10 +527,41 @@ static int p12_plain(const uint8_t *p, size_t n, const uint8_t **key, size_t *ke
 // 玩家在手机上直接导入 .p12（0.6.0：买了开发者证书的玩家不经电脑）：解 p12 → 存钥匙串（按证书各存一份，不顶掉别的证书）→ 写 current.json（source p12）、登记 certs.tsv。
 //   source 写进 current.json（p12 = 玩家选的 .p12 文件，sidestore = SideStore「导出证书」回调；NULL 按 p12）。团队号取叶证书的 OU（苹果开发证书的 OU 就是团队号）。返回 0 = 导入了（team 带回团队号）；1 = 密码不对（调用方再问一次）；-1 = 失败（why 写原因）。
 //   p12 文件本身由调用方在成功后删（它在「放这里导入」里）
+// PFX 外层（PKCS#12：SEQUENCE { INTEGER 3, … }）：结构上是 p12。用来区分「是 p12、系统解不开」（给一次输密码的机会）和「根本不是 p12」（日志、文本，直接说不是证书）
+static int pfx_shaped(const uint8_t *p, size_t n) {
+    if (n < 8 || p[0] != 0x30) return 0;
+    size_t i = 2;
+    if (p[1] & 0x80) { size_t k = p[1] & 0x7f; if (k < 1 || k > 3) return 0; i = 2 + k; }
+    return i + 3 <= n && p[i] == 0x02 && p[i + 1] == 0x01 && p[i + 2] == 0x03;
+}
+// 整份是 base64 文本（只有 base64 字符与空白，解出来是 PFX）：解成二进制。有的工具把证书存成 base64（D-CW7T：3237 字节 ≈ 2427 字节 p12 的 base64 长度，系统回 -26275）
+static int p12_unbase64(const uint8_t *p, size_t n, buf *out) {
+    if (n < 64 || pfx_shaped(p, n)) return -1;
+    uint8_t *o = malloc(n); size_t m = 0; uint32_t acc = 0; int bits = 0, pad = 0;
+    if (!o) return -1;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = p[i]; int v;
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+        if (c == '=') { pad++; continue; }
+        if (pad) { free(o); return -1; }   // = 之后还有字符：不是 base64
+        if (c >= 'A' && c <= 'Z') v = c - 'A'; else if (c >= 'a' && c <= 'z') v = c - 'a' + 26; else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+' || c == '-') v = 62; else if (c == '/' || c == '_') v = 63; else { free(o); return -1; }
+        acc = acc << 6 | (uint32_t)v; bits += 6;
+        if (bits >= 8) { bits -= 8; o[m++] = (uint8_t)(acc >> bits); }
+    }
+    if (!pfx_shaped(o, m)) { free(o); return -1; }
+    out->p = o; out->n = m; return 0;
+}
 int s2a_identity_import_p12(const char *home, const void *p12, size_t n, const char *password, const char *source, char *team, size_t team_n, char *why, size_t why_n) {
     if (team && team_n) team[0] = 0;
     if (why && why_n) why[0] = 0;
     if (!home || !p12 || !n) { snprintf(why, why_n, "没有文件内容"); return -1; }
+    buf b64 = {0};
+    if (!p12_unbase64(p12, n, &b64)) {   // base64 文本：解成二进制再导（解出来的字节交给下面同一条路，原数据不改）
+        LOG(".p12 导入：文件是 base64 文本（%zu 字节），解成 %zu 字节的 PKCS#12 再导", n, b64.n);
+        int r = s2a_identity_import_p12(home, b64.p, b64.n, password, source, team, team_n, why, why_n);
+        free(b64.p); return r;
+    }
     SecKeyRef key = NULL; CFArrayRef chain = NULL;
     int rc = s2a_selfsign_identity(p12, n, password, &key, &chain);
     if (rc || !key || !chain || CFArrayGetCount(chain) < 1) {   // 系统导不进：试不带 MAC、不加密的那种（SideStore 导出），按结构直接取
@@ -547,6 +578,12 @@ int s2a_identity_import_p12(const char *home, const void *p12, size_t n, const c
             if (rc) { if (key) CFRelease(key); key = NULL; }
         }
         if (rc == errSecAuthFailed) return 1;   // -25293：密码不对（明文格式也取不到时才算）
+        // -26275：结构上是 p12、系统解不开（D-CW7T）。没输过密码 → 给一次输密码的机会；输过还不行 → 明说读不了，不再循环问
+        if (rc == errSecDecode && pfx_shaped(p12, n) && (!key || !chain)) {
+            if (key) CFRelease(key); if (chain) CFRelease(chain);
+            if (!password || !*password) return 1;
+            snprintf(why, why_n, "这份 .p12 S2Arm 读不了（系统解不开：%d，输了密码也一样）", rc); return -1;
+        }
         if (rc || !key || !chain) { if (key) CFRelease(key); if (chain) CFRelease(chain); snprintf(why, why_n, "不是能用的证书文件（.p12 读不了：%d）", rc); return -1; }
     }
     SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);

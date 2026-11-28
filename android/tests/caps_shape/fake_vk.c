@@ -121,6 +121,9 @@ static const char *feature_struct_bad(int st, const struct cs_shape *s) {
         return cs_has_ext(s, "VK_EXT_descriptor_indexing") || eff >= VK_API_VERSION_1_2 ? NULL : "descriptor_indexing 特性结构（1.2 核心 / VK_EXT_descriptor_indexing）";
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT:
         return cs_has_ext(s, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME) || eff >= VK_API_VERSION_1_2 ? NULL : "host_query_reset 特性结构（1.2 核心 / VK_EXT_host_query_reset）";
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT:
+        return cs_has_ext(s, VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME) || eff >= VK_API_VERSION_1_3
+            ? NULL : "pipeline_creation_cache_control 特性结构（1.3 核心 / VK_EXT_pipeline_creation_cache_control）";
     default: return NULL;
     }
 }
@@ -165,6 +168,10 @@ static void features_chain(void *next, int for_create, const struct cs_shape *s)
             BIT(((VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT *)b)->swapchainMaintenance1, s->swapchainMaintenance1 && cs_any_ext(s, "VK_EXT_swapchain_maintenance1", "VK_KHR_swapchain_maintenance1"), "swapchainMaintenance1"); break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT:
             BIT(((VkPhysicalDeviceHostQueryResetFeaturesEXT *)b)->hostQueryReset, s->hostQueryReset && cs_has_ext(s, VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME), "hostQueryReset"); break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES_EXT:
+            BIT(((VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT *)b)->pipelineCreationCacheControl,
+                s->pipelineCreationCacheControl && cs_has_ext(s, VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME),
+                "pipelineCreationCacheControl"); break;
         default: break;   // 别的结构（placed 映射等）：没有读数，保持调用方清零的 0（= 无）
         }
 #undef BIT

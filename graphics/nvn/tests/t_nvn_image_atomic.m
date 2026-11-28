@@ -155,7 +155,9 @@ static void run_case(int buffer,int sign,int native_buffer,int variant) {
     if(buffer) {
         // 缓冲贴图被重建（序号淘汰 / 对象收尾后按描述再解析）：11-26 Mac 霍格沃茨之遗 ser 5947（R32Uint 245760 元素，原生 texture_buffer 原子）每次重建都
         //   「升级成可写 + 原子」一次、300 秒 61 次（D-67FG / D-XJNP 一局 3–5 万次）。期望（不跑被测实现）：重建的贴图建时就带够用途，派发不再升级
-        serial_del(input.serial); mtl_vc_drop(input.serial); uint64_t u0=g_pfv_upgrades;
+        // #2293: buffer-texture views are shared by (pool, memory, descriptor) (g_tbuf_views), so dropping the serial alone hands the same view back; drop the shared view too,
+        //   so the texture really is made again and its creation usages are what is checked
+        serial_del(input.serial); mtl_vc_drop(input.serial); tbuf_drop_range((uintptr_t)input.mem, (uintptr_t)input.mem + 1); uint64_t u0=g_pfv_upgrades;
         id<MTLTexture> rebuilt=tex_mtl(&input); REQUIRE(rebuilt);
         nvn_be_sub_begin(); S.cprog=&p; args_dirty_all(); dispatch(&dp); S.cprog=&q; args_dirty_all(); dispatch(&dp);
         fence=nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fence,10000000000ull)); REQUIRE(!mtl_last_commit_error());

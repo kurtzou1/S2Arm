@@ -246,6 +246,49 @@ static void depth_case(NvProg *reader, prog_t *reader_p, tex_t *depth, tex_t *b,
     g_dsnap.valid = 1;
     dsnap_stale_addr(0xC000000000ull + 0x3000000000ull, 64);
     CHECK(g_dsnap.valid == 0, "unmapped GPU address write stales depth snapshot (overlap cannot be judged)");
+
+    // UE4 CustomDepth / CustomStencil 同存储别名：模板模式贴图（stencil=1，serial != depth->serial）在同遍被片元采样，
+    // 必须识别为同遍深度/模板反馈并建快照；且前笔写入模板后，后笔必须重新快照而不是复用写前旧模板。
+    tex_t st_alias = *depth; st_alias.serial = nvn_new_serial(); st_alias.stencil = 1; nvn_be_tex_init(&st_alias);
+    nvn_be_reg_tex(8, &st_alias, NULL);
+    NSString *stSrc = @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct StIn { texture2d<float, access::read> st [[id(0)]]; };\n"
+        "vertex float4 st_vs(uint i [[vertex_id]]) { const float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
+        "struct StOut { float4 c [[color(2)]]; };\n"
+        "fragment StOut st_fs(constant StIn &t [[buffer(0)]]) { uint4 v = as_type<uint4>(t.st.read(uint2(0))); StOut o; o.c = float4(v.y / 255.0f, 0, 0, 1); return o; }\n";
+    NSError *stErr = nil; id<MTLLibrary> stLib = [g_dev newLibraryWithSource:stSrc options:nil error:&stErr]; REQUIRE(stLib);
+    NvProg *stPr = [NvProg new];
+    stPr->sh[0] = shader(stLib, @"st_vs", 0);
+    stPr->sh[1] = [NvShader new]; stPr->sh[1]->stage = 1; stPr->sh[1]->fn = [stLib newFunctionWithName:@"st_fs"]; REQUIRE(stPr->sh[1]->fn);
+    strlcpy(stPr->sh[1]->key, "dddddddddddddddd_b", sizeof stPr->sh[1]->key);
+    stPr->sh[1]->rf.pos_attr = -1; stPr->sh[1]->rf.has_user = 2; stPr->sh[1]->rf.nb = 1; stPr->sh[1]->rf.abi = 0;
+    stPr->sh[1]->rf.b = calloc(1, sizeof *stPr->sh[1]->rf.b);
+    stPr->sh[1]->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEX, .reg = 0, .aid = 0, .dtt = MTLTextureType2D};
+    stPr->sh[1]->ae = [stPr->sh[1]->fn newArgumentEncoderWithBufferIndex:0]; REQUIRE(stPr->sh[1]->ae);
+    stPr->sh[1]->arg_len = stPr->sh[1]->ae.encodedLength;
+    stPr->sh[1]->rf.color_known = 1; stPr->sh[1]->rf.color_mask = 1 << 2;
+    prog_t st_p = {.magic = MAGIC('P','R','O','G'), .serial = nvn_new_serial()}; serial_put(st_p.serial, stPr);
+
+    nvn_be_sub_begin(); state_reset(); S.prog = &st_p; S.tex[1][0] = 8;
+    clear(out, 0, 0, 0);
+    rp_flush(); memset(&R.rt, 0, sizeof R.rt); R.rt.n = 3; R.rt.color[2] = out; R.rt.depth = depth; R.has_rt = 1;
+    R.clear_d = 1; R.cd = 0.5; R.clear_s = 1; R.cs = 0x55; rp_flush();
+    dsnap_stale(); g_pso_dirty = 1; args_dirty_all();
+    // 笔 1：首次采样同存储 stencil_alias（写 stencil=0xAA），必须识别并创建 stencil 快照，读取写前值 0x55
+    S.ds.st = 1; S.st_wmask[0] = S.st_wmask[1] = 0xff; S.st_ref[0] = S.st_ref[1] = 0xAA;
+    S.ds.sf_f = S.ds.sf_b = NVN_STENCIL_FUNC_ALWAYS; S.ds.zpass_f = S.ds.zpass_b = NVN_STENCIL_OP_REPLACE;
+    uint64_t fd0 = g_fb_depth, fh0 = g_fb_hits;
+    draw(triangle, NULL);
+    CHECK(g_fb_depth - fd0 == 1 && g_fb_hits - fh0 == 1 && g_dsnap.valid && g_dsnap.stencil && g_dsnap.dser == depth->serial,
+          "同遍深度别名 CustomStencil 采样：命中检测并创建模板快照 (hits +%llu depth +%llu stencil=%d dser=%llu)",
+          (unsigned long long)(g_fb_hits - fh0), (unsigned long long)(g_fb_depth - fd0), g_dsnap.stencil, (unsigned long long)g_dsnap.dser);
+    // 笔 2：写模板关闭后同遍再次采样 stencil_alias，必须因为笔 1 写了模板而作废重拍、读到新模板 0xAA（~170）
+    S.ds.st = 0; S.ds.zpass_f = S.ds.zpass_b = NVN_STENCIL_OP_KEEP; g_pso_dirty = 1;
+    uint64_t fd1 = g_fb_depth;
+    draw(triangle, NULL);
+    CHECK(g_fb_depth - fd1 == 1, "前笔写模板后再次采样模板别名：快照已作废并重拍 (depth +%llu)", (unsigned long long)(g_fb_depth - fd1));
+    finish();
+    pixels("同遍采样模板别名读到前笔写入后的 0xAA (.g)", out, 0xAA, 0, 0);
 }
 
 int main(int argc, char **argv) {

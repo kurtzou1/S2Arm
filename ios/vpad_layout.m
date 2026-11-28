@@ -33,6 +33,17 @@ static BOOL number(id value, double low, double high) {
     return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID() &&
         isfinite([value doubleValue]) && [value doubleValue] >= low && [value doubleValue] <= high;
 }
+// 按键外观（.key_style.json 与布局文件里可选的 keyStyles，#2303）：配色 / 整体大小 / 整体透明度 / 每键 {scale, opacity, hidden}，范围同存储
+static BOOL key_style_doc_ok(id doc, NSArray *top) {
+    if (!fields(doc, top) || !number(doc[@"theme"], 0, kS2AVPadKeyThemeCount - 1) || !number(doc[@"globalScale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) ||
+        !number(doc[@"globalOpacity"], 0.2, 1) || ![doc[@"keys"] isKindOfClass:NSDictionary.class]) return NO;
+    for (id key in doc[@"keys"]) {
+        NSDictionary *v = doc[@"keys"][key];
+        if (![key isKindOfClass:NSString.class] || !fields(v, @[@"scale", @"opacity", @"hidden"]) || !number(v[@"scale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) ||
+            !number(v[@"opacity"], 0.2, 1) || ![v[@"hidden"] isKindOfClass:NSNumber.class]) return NO;
+    }
+    return YES;
+}
 static BOOL identifier_ok(id value) {
     if (![value isKindOfClass:NSString.class] || ![value length] || [value length] > 64) return NO;
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz0123456789._-"];
@@ -55,7 +66,10 @@ static CGRect normalized_rect(NSDictionary *value) {
 + (instancetype)readData:(NSData *)data error:(NSError **)error {
     id doc = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
     if (!doc) return nil;
-    if (!fields(doc, @[@"schemaVersion", @"id", @"name", @"buttons", @"sticks"]) ||
+    // keyStyles 可选（#2303：导出带上按键大小 / 透明度 / 配色，导入照着恢复；没有它的旧文件照旧收）
+    BOOL styled = [doc isKindOfClass:NSDictionary.class] && doc[@"keyStyles"] != nil;
+    if (!fields(doc, styled ? @[@"schemaVersion", @"id", @"name", @"buttons", @"sticks", @"keyStyles"] : @[@"schemaVersion", @"id", @"name", @"buttons", @"sticks"]) ||
+        (styled && !key_style_doc_ok(doc[@"keyStyles"], @[@"theme", @"keys", @"globalScale", @"globalOpacity"])) ||
         !number(doc[@"schemaVersion"], 1, 1) || !identifier_ok(doc[@"id"]) ||
         ![doc[@"name"] isKindOfClass:NSString.class] || ![doc[@"name"] length] || [doc[@"name"] length] > 64 ||
         [doc[@"name"] rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound ||
@@ -95,7 +109,7 @@ static CGRect normalized_rect(NSDictionary *value) {
     }
     // 11-13 维护者「不许堵门」：两个摇杆激活区重叠不再拒收（照样能用，重叠处归谁按触点就近决定），文件大小也不设上限
     S2AVPadLayout *layout = [self new];
-    layout->_document = [doc copy]; layout->_identifier = [doc[@"id"] copy]; layout->_name = [doc[@"name"] copy];
+    layout->_document = [doc copy]; layout->_identifier = [doc[@"id"] copy]; layout->_name = [doc[@"name"] copy]; layout->_keyStyles = [doc[@"keyStyles"] copy];
     layout->_buttons = [buttons copy]; layout->_sticks = [sticks copy];
     return layout;
 }
@@ -513,14 +527,9 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
     NSData *data = [NSData dataWithContentsOfURL:self.keyStyleFile];
     id doc = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (!doc) return;
-    if (!fields(doc, @[@"schemaVersion", @"theme", @"keys", @"globalScale", @"globalOpacity"]) || !number(doc[@"schemaVersion"], 1, 1) || !number(doc[@"theme"], 0, kS2AVPadKeyThemeCount - 1) || !number(doc[@"globalScale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) || !number(doc[@"globalOpacity"], 0.2, 1) || ![doc[@"keys"] isKindOfClass:NSDictionary.class]) {
+    if (!number(doc[@"schemaVersion"], 1, 1) || !key_style_doc_ok(doc, @[@"schemaVersion", @"theme", @"keys", @"globalScale", @"globalOpacity"])) {
         _keyStyleProblem = [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.keyStyle", S2AL(@"vpad.layout.problem.keyStyle")]; return; }
-    for (NSString *key in doc[@"keys"]) {
-        NSDictionary *v = doc[@"keys"][key];
-        if (!fields(v, @[@"scale", @"opacity", @"hidden"]) || !number(v[@"scale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) || !number(v[@"opacity"], 0.2, 1) || ![v[@"hidden"] isKindOfClass:NSNumber.class]) {
-            _keyStyles = [NSMutableDictionary dictionary]; _keyStyleProblem = [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.keyStyle", S2AL(@"vpad.layout.problem.keyStyle")]; return; }
-        _keyStyles[key] = v;
-    }
+    _keyStyles = [doc[@"keys"] mutableCopy];
     _keyTheme = [doc[@"theme"] integerValue]; _globalScale = [doc[@"globalScale"] doubleValue]; _globalOpacity = [doc[@"globalOpacity"] doubleValue];
 }
 - (BOOL)saveKeyStyles:(NSError **)error {
@@ -555,6 +564,11 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
     return out;
 }
 - (NSDictionary *)keyStyleSnapshot { return @{@"theme": @(_keyTheme), @"globalScale": @(_globalScale), @"globalOpacity": @(_globalOpacity), @"keys": [[NSDictionary alloc] initWithDictionary:_keyStyles copyItems:YES]}; }
+// 导入的布局文件带来的外观（keyStyles，读入时已按范围校验）：照着换掉现有外观并存盘
+- (BOOL)applyKeyStyles:(NSDictionary *)styles error:(NSError **)error {
+    if (!key_style_doc_ok(styles, @[@"theme", @"keys", @"globalScale", @"globalOpacity"])) return fail(error, @"F01.keyStyle", S2AL(@"vpad.layout.err.keyStyle"));
+    return [self restoreKeyStyleSnapshot:styles error:error];
+}
 - (BOOL)restoreKeyStyleSnapshot:(NSDictionary *)snapshot error:(NSError **)error {
     _keyTheme = [snapshot[@"theme"] integerValue]; _globalScale = [snapshot[@"globalScale"] doubleValue]; _globalOpacity = [snapshot[@"globalOpacity"] doubleValue]; _keyStyles = [snapshot[@"keys"] mutableCopy]; return [self saveKeyStyles:error];
 }

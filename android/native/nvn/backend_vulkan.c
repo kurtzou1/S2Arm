@@ -43,6 +43,7 @@
 #include <unistd.h>
 #include "nvn_plat.h"   // 调试开关与一行日志（上屏段的调试色、GPU 时间读数）
 #include "nvn_vk_format.h"
+#include "nvn_vk_float_blend_nan.h"
 #include "nvn_pipe_flight.h"   // 配方级在途表（纯逻辑）：同配方合并成一份创建，不同配方不互相排队
 #include "nvn_vk_texview.h"
 #include "nvn_vk_bcdec.h"
@@ -182,8 +183,18 @@ struct nvn_gpu_view_s {
     struct nvn_gpu_view_s **all_pprev;   // 指向「指着我的那个指针」（链头 g.views，或前一个视图的 all_next）：摘链 O(1)，见 view_unlink_locked
 };
 
+struct nvn_vk_blend_shader {
+    pthread_mutex_t mu;   // only held while preparing this fragment's optional module
+    uint32_t *source;
+    size_t words;
+    VkShaderModule module;
+    uint32_t spec_id;
+    uint8_t slots;
+};
+
 struct nvn_gpu_shader_s {
     VkShaderModule mod;
+    struct nvn_vk_blend_shader *blend_guard;
     int missing_storage_format_feature;
     const char *missing_vertex_feature;   // #1072：顶点阶段写存储 / 写裁剪、剔除距离要的特性设备没启用（特性名）；NULL = 不缺
     nvn_gpu_stage stage;
@@ -509,6 +520,7 @@ struct nvn_gpu_vk {
     struct nvn_gpu_pool_table_s *pools;
     uint32_t border_live;          // 存活的自定义边框色 VkSampler 个数，对照 dev->custom_border_max（g_mu 下改）
     struct nvn_gpu_shader_s *shaders;
+    int float_blend_nan_guard;
     struct nvn_gpu_pipe_s *pipes;
     uint64_t stats[STAT_N];
     struct vk_land_slot land_slots[3];
@@ -546,6 +558,35 @@ static void pipe_creation_open(const struct s2a_vk_device *dev) {
 
 static struct nvn_gpu_vk g;
 static _Atomic int g_open;   // 跨线程：close 置 0 后其他线程据此拒收
+// 浮点混合 NaN 保护留存的片元 SPIR-V 副本账（会话级，跨装载 / 建管线 / 销毁线程原子更新；读数见 nvn_gpu_stats）
+static _Atomic uint64_t g_float_nan_src_live;
+static _Atomic uint64_t g_float_nan_src_bytes;
+static _Atomic uint64_t g_float_nan_src_alloc;
+static _Atomic uint64_t g_float_nan_src_freed;
+
+static void float_nan_src_stats_reset(void) {
+    atomic_store_explicit(&g_float_nan_src_live, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_float_nan_src_bytes, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_float_nan_src_alloc, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_float_nan_src_freed, 0, memory_order_relaxed);
+}
+
+static void float_nan_src_note_alloc(size_t bytes) {
+    atomic_fetch_add_explicit(&g_float_nan_src_live, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_float_nan_src_bytes, (uint64_t)bytes, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_float_nan_src_alloc, 1, memory_order_relaxed);
+}
+
+static void float_nan_src_free(struct nvn_vk_blend_shader *guard) {
+    if (!guard || !guard->source) return;
+    const uint64_t bytes = (uint64_t)guard->words * sizeof *guard->source;
+    free(guard->source);
+    guard->source = NULL;
+    guard->words = 0;
+    atomic_fetch_sub_explicit(&g_float_nan_src_live, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&g_float_nan_src_bytes, bytes, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_float_nan_src_freed, 1, memory_order_relaxed);
+}
 static uint64_t g_border_nearest;     // sampler_border_color_nearest 计数（samp_border_nearest_note）
 static int g_border_nearest_said;     // 本局已打过边框色就近那一行：开会话时清零
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -776,6 +817,7 @@ static void destroy_pipe_objects(struct nvn_gpu_pipe_s *p);
 static void dlay_close(void);
 static void destroy_tex_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_tex_s *t);
 static void destroy_view_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_view_s *v);
+static void destroy_shader_objects(VkDevice dev, struct nvn_gpu_shader_s *sh);
 static void destroy_samp_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_samp_s *s);
 static void unref_locked(struct nvn_gpu_vk *vk, void *obj, int type);
 
@@ -2522,6 +2564,8 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
     memset(&g, 0, sizeof g);
     g.dev = dev;
     pipe_creation_open(dev);
+    float_nan_src_stats_reset();
+    g.float_blend_nan_guard = nvn_plat_flag("nvk_float_blend_nan_guard", 1) != 0;
     const int land_setting = nvn_plat_flag("nvk_land_readback", 0);
     g.land_auto = land_setting == 2;
     if (land_setting == 1 || g.land_auto) {
@@ -2775,11 +2819,7 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     g.shaders = NULL;
     while (sh) {
         struct nvn_gpu_shader_s *sn = sh->all_next;
-        if (sh->mod) vkDestroyShaderModule(g.d, sh->mod, NULL);
-        free(sh->ents);
-        free(sh->tfmt);
-        free(sh->write_bounds);
-        free(sh);
+        destroy_shader_objects(g.d, sh);
         sh = sn;
     }
     struct nvn_gpu_samp_s *sp = g.samps;
@@ -3742,15 +3782,26 @@ static nvn_gpu_rc spv_texel_formats(const void *blob, size_t bytes,
     return r;
 }
 
-static void destroy_shader_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_shader_s *sh) {
-    struct nvn_gpu_shader_s **pp = &vk->shaders;
-    while (*pp && *pp != sh) pp = &(*pp)->all_next;
-    if (*pp) *pp = sh->all_next;
-    if (sh->mod) vkDestroyShaderModule(vk->d, sh->mod, NULL);
+static void destroy_shader_objects(VkDevice dev, struct nvn_gpu_shader_s *sh) {
+    if (sh->mod) vkDestroyShaderModule(dev, sh->mod, NULL);
+    if (sh->blend_guard) {
+        struct nvn_vk_blend_shader *guard = sh->blend_guard;
+        if (guard->module) vkDestroyShaderModule(dev, guard->module, NULL);
+        float_nan_src_free(guard);
+        pthread_mutex_destroy(&guard->mu);
+        free(guard);
+    }
     free(sh->ents);
     free(sh->tfmt);
     free(sh->write_bounds);
     free(sh);
+}
+
+static void destroy_shader_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_shader_s *sh) {
+    struct nvn_gpu_shader_s **pp = &vk->shaders;
+    while (*pp && *pp != sh) pp = &(*pp)->all_next;
+    if (*pp) *pp = sh->all_next;
+    destroy_shader_objects(vk->d, sh);
 }
 
 // #1072 第 1 项：顶点前的阶段（VS / TCS / TES / GS）写存储要 vertexPipelineStoresAndAtomics（VUID-RuntimeSpirv-NonWritable-06341），
@@ -4075,9 +4126,25 @@ nvn_gpu_rc nvn_gpu_shader_load(const nvn_gpu_shader_src *s, nvn_gpu_shader *out,
         }
         if (module_result == VK_SUCCESS && sh->stage == NVN_GPU_SH_CS && nvn_plat_flag("nvk_land_bound", 0))
             sh->write_bounds = s2a_spirv_write_bounds(ci.pCode, ci.codeSize, sh->entry, sh->ents, sh->nent);
+        if (module_result == VK_SUCCESS && s->stage == NVN_GPU_SH_FS && g.float_blend_nan_guard) {
+            struct nvn_vk_blend_shader *guard = calloc(1, sizeof *guard);
+            uint32_t *source = guard ? malloc(ci.codeSize) : NULL;
+            if (!guard || !source || pthread_mutex_init(&guard->mu, NULL)) {
+                free(source);
+                free(guard);
+                free(array_code);
+                destroy_shader_objects(g.d, sh);
+                return fail(err, NVN_GPU_E_OOM, "浮点混合：片元模块保留失败");
+            }
+            memcpy(source, ci.pCode, ci.codeSize);   // fp result/array_code can be freed after load
+            guard->source = source;
+            guard->words = ci.codeSize / sizeof *source;
+            sh->blend_guard = guard;
+            float_nan_src_note_alloc(guard->words * sizeof *guard->source);
+        }
         free(array_code);
         if (module_result != VK_SUCCESS) {
-            free(sh->tfmt); free(sh->ents); free(sh);
+            destroy_shader_objects(g.d, sh);
             return fail(err, NVN_GPU_E_COMPILE, "vkCreateShaderModule 失败（stage %d）", s->stage);
         }
     }
@@ -4335,6 +4402,14 @@ static void note_sync_pipeline(void) {
         atomic_fetch_add_explicit(&g_sync_pipelines, 1, memory_order_relaxed);
 }
 static uint64_t g_warm_hits, g_warm_created, g_pipe_dup;
+static uint64_t g_pipe_cache_probe_hit, g_pipe_cache_probe_miss, g_pipe_cache_probe_fail;
+static int pipe_cache_ctl_on(void) { return nvn_plat_flag("nvk_pipe_cache_ctl", 1) != 0; }
+void nvn_vk_pipe_cache_ctl_stats(uint64_t out[3]) {
+    if (!out) return;
+    out[0] = __atomic_load_n(&g_pipe_cache_probe_hit, __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_pipe_cache_probe_miss, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&g_pipe_cache_probe_fail, __ATOMIC_RELAXED);
+}
 // 在途表读数（见 pipe_inflight）：同配方需求合并等待的次数 / 表满（或停用）自己直接建的次数 /
 // 认领后复检命中的次数（省掉一次重复建）。
 // 在途表读数由 nvn_pipe_flight 内部计数（见 nvn_gpu_stats 的 pipe_inflight_* 项）
@@ -4527,7 +4602,8 @@ static void dlay_close(void) {
 //   · d->st[st].sh 指向的 struct nvn_gpu_shader_s：mod / entry / nent / ents / tfmt / push_off / push_bytes /
 //     missing_storage_format_feature 都是 nvn_gpu_shader_load 装载期写死的（ents / tfmt 就是「描述符布局缓存」
 //     本身，建管线只读它、往自己的 p->stage_* 里拷）。refs / released 是唯一会被并发写的字段，但只在 g_mu 下
-//     由 nvn_gpu_shader_release 与 install_link（装缓存时加引用）改，本函数不读写它们。
+//     由 nvn_gpu_shader_release 与 install_link（装缓存时加引用）改，本函数不读写它们；
+//     片元混合保护的变体由各 shader 自己的 blend_guard->mu 同步。
 //     生命期不在本函数内建立：调用方必须保证 desc 里各阶段的着色器在整个调用期间有效（核心 / 预热 owner 的
 //     程序借用合同）；安装成功后再由管线持有一份引用。
 //   · g.dev / g.caps / g_plc：会话打开后到 close 前不变（g_plc 由驱动内部同步，见 plc_open）；
@@ -4560,8 +4636,70 @@ static int pipe_vk_res_code(VkResult r, int fixed) {
     if (r == VK_ERROR_DEVICE_LOST) return NVN_GPU_E_DEVICE;
     return fixed;
 }
-static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s **out, nvn_gpu_err *err) {
+// This is the transparent-source case of Maxwell's zero-times-anything-is-zero
+// blend rule (#674). MIN/MAX ignore factors and other destination factors can
+// depend on source RGB. Keep the original Vulkan blend and all alpha state.
+static uint32_t float_blend_nan_slots(const nvn_gpu_pipe_desc *d) {
+    if (!d->color.blend_en || d->color.logic_op != NVN_LOGIC_OP_COPY || d->samples > 1 || d->ms.a2c) return 0;
+    uint32_t slots = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        if (!(d->color.blend_en & (1u << i))) continue;
+        const blend_st *b = &d->blend[i];
+        const uint32_t factors[] = {b->src_rgb, b->dst_rgb, b->src_a, b->dst_a};
+        for (unsigned j = 0; j < sizeof factors / sizeof *factors; j++)
+            if (factors[j] >= NVN_BLEND_FUNC_SRC1_COLOR && factors[j] <= NVN_BLEND_FUNC_ONE_MINUS_SRC1_ALPHA)
+                return 0;
+        if (d->cfmt[i] == NVN_FORMAT_RGBA16F && (d->chmask.mask >> (4 * i) & 7u) &&
+            !b->adv_mode && b->eq_rgb == NVN_BLEND_EQUATION_ADD && b->src_rgb == NVN_BLEND_FUNC_SRC_ALPHA &&
+            b->dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA)
+            slots |= 1u << i;
+    }
+    return slots;
+}
+
+static nvn_gpu_rc float_blend_nan_module(const struct nvn_gpu_shader_s *sh, uint32_t *slots,
+                                        VkShaderModule *module, VkSpecializationMapEntry *map, nvn_gpu_err *err) {
+    struct nvn_vk_blend_shader *guard = sh->blend_guard;
+    pthread_mutex_lock(&guard->mu);
+    if (guard->source) {
+        struct nvk_nan_spv patched;
+        int result = nvk_nan_rewrite(guard->source, guard->words, sh->entry, &patched);
+        if (result < 0) {
+            pthread_mutex_unlock(&guard->mu);
+            return fail(err, NVN_GPU_E_OOM, "浮点混合：片元出口改写分配失败");
+        }
+        if (result > 0) {
+            const VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .pCode = patched.words, .codeSize = patched.count * sizeof *patched.words};
+            VkShaderModule module = VK_NULL_HANDLE;
+            VkResult vr = vkCreateShaderModule(g.d, &ci, NULL, &module);
+            free(patched.words);
+            if (vr != VK_SUCCESS) {
+                pthread_mutex_unlock(&guard->mu);
+                return fail(err, pipe_vk_res_code(vr, NVN_GPU_E_COMPILE),
+                            "浮点混合：vkCreateShaderModule 失败（%s %d）", pipe_vk_res_name(vr), (int)vr);
+            }
+            guard->module = module;
+            guard->spec_id = patched.spec_id;
+            guard->slots = patched.slots;
+        }
+        float_nan_src_free(guard);
+    }
+    const uint32_t wanted = *slots;
+    *slots &= guard->slots;
+    if (*slots) {
+        *module = guard->module;
+        *map = (VkSpecializationMapEntry){.constantID = guard->spec_id, .size = sizeof *slots};
+    }
+    pthread_mutex_unlock(&guard->mu);
+    if (wanted != *slots) nvn_unimpl("gpu", "float_blend_nan_output_unproven", NULL);
+    return rc(NVN_GPU_OK);
+}
+
+static nvn_gpu_rc pipe_build_flagged(const nvn_gpu_pipe_desc *d, VkPipelineCreateFlags extra_flags,
+                                     struct nvn_gpu_pipe_s **out, nvn_gpu_err *err, int *compile_required) {
     *out = NULL;
+    if (compile_required) *compile_required = 0;
     const nvn_gpu_pipe_desc *requested = d;
     nvn_gpu_pipe_desc normalized;
     if (!pipe_msaa_normalize(d, &normalized)) return fail(err, NVN_GPU_E_UNSUPPORTED, "msaa_pipeline_samples: 附件格式没有共同支持的采样数");
@@ -4597,6 +4735,17 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
         if (d->patch_size > g.caps.max_patch_size)
             return fail(err, NVN_GPU_E_UNSUPPORTED, "细分管线 patch_size=%u 超出设备上限 %u", d->patch_size, g.caps.max_patch_size);
     }
+
+    struct nvn_gpu_shader_s *fs = d->st[NVN_GPU_SH_FS].sh;
+    uint32_t guard_slots = fs && fs->blend_guard ? float_blend_nan_slots(d) : 0;
+    VkShaderModule guarded_fs = VK_NULL_HANDLE;
+    VkSpecializationMapEntry blend_map = {0};
+    if (guard_slots) {
+        nvn_gpu_rc ready = float_blend_nan_module(fs, &guard_slots, &guarded_fs, &blend_map, err);
+        if (!nvn_gpu_ok(ready)) return ready;
+    }
+    const VkSpecializationInfo blend_spec = {.mapEntryCount = 1, .pMapEntries = &blend_map,
+        .dataSize = sizeof guard_slots, .pData = &guard_slots};
 
     struct merged { uint8_t set; uint16_t binding; uint8_t cls; uint16_t count; uint32_t stages; int16_t dbase; } m[64];   // dbase：动态 UBO 在所属组里的动态序号起点，-1 = 静态
     uint32_t nm = 0, maxset = 0;
@@ -4724,6 +4873,10 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
         stages[ns].stage = vk_shader_stage((nvn_gpu_stage)st);
         stages[ns].module = d->st[st].sh->mod;
         stages[ns].pName = d->st[st].sh->entry;
+        if (st == NVN_GPU_SH_FS && guard_slots) {
+            stages[ns].module = guarded_fs;
+            stages[ns].pSpecializationInfo = &blend_spec;
+        }
         ns++;
     }
 
@@ -4945,6 +5098,7 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
     VkGraphicsPipelineCreateInfo gp;
     memset(&gp, 0, sizeof gp);
     gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gp.flags = extra_flags;
     gp.stageCount = ns;
     gp.pStages = stages;
     gp.pVertexInputState = &vin;
@@ -4965,18 +5119,24 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
         .pNext = gp.pNext,
         .pPipelineCreationFeedback = &feedback,
     };
+    const int cache_probe = (extra_flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT) != 0;
     const int want_feedback = atomic_load_explicit(&g_pipe_feedback, memory_order_relaxed) == NVK_PIPE_FEEDBACK_ON;
     if (want_feedback) gp.pNext = &feedback_info;
     const uint64_t pl_t0 = now_ns();   // 驱动编译管线是同步的：超过 3 毫秒就打一行（走路/进新场景时会集中出现）
     const VkResult gvr = vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe);
     const uint64_t wall_ns = now_ns() - pl_t0;
+    if (cache_probe && gvr == VK_PIPELINE_COMPILE_REQUIRED) {
+        if (compile_required) *compile_required = 1;
+        destroy_pipe_objects(p);
+        return rc(NVN_GPU_E_COMPILE);
+    }
     pipe_creation_note(0, wall_ns, gvr == VK_SUCCESS && want_feedback ? &feedback : NULL);
     if (gvr != VK_SUCCESS) {
         nvn_gpu_rc bad = fail(err, pipe_vk_res_code(gvr, NVN_GPU_E_COMPILE), "vkCreateGraphicsPipelines 失败（%s %d）", pipe_vk_res_name(gvr), (int)gvr);
         destroy_pipe_objects(p);
         return bad;
     }
-    plc_created();
+    if (!cache_probe) plc_created();
     { // 原有长帧读数也含 plc_created 的局中补写；PSO feedback 的墙钟只量 vkCreate。
       static int slow = -1; if (slow < 0) slow = nvn_plat_flag("nvk_hitch_log", 0) != 0;
       const uint64_t dt = slow ? now_ns() - pl_t0 : 0;
@@ -5019,9 +5179,13 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
     }
     p->actual_samples = d->samples > 1 ? d->samples : 1;
     p->key = *requested;   // 以原请求查找：预热、在途表与缓存使用同一身份。
-    note_sync_pipeline();
+    if (!cache_probe) note_sync_pipeline();
     *out = p;
     return rc(NVN_GPU_OK);
+}
+
+static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s **out, nvn_gpu_err *err) {
+    return pipe_build_flagged(d, 0, out, err, NULL);
 }
 
 // ---- 装缓存：双检去重（并发建同一配方只留一份）----
@@ -5086,6 +5250,67 @@ int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) {
     pthread_mutex_unlock(&g_mu);
     if (!hit) return 0;
     *out = hit;   // 后端缓存持有，核心不 release
+    return 1;
+}
+
+// 非阻塞驱动缓存探测（VK_EXT_pipeline_creation_cache_control）：内存管线表未命中时，以
+// VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT 探测盘上/驱动 VkPipelineCache。
+// 命中 → 零编译装入缓存并返回 1（前台零跳笔/零唤醒后台）；未命中 → 驱动在编译前立即回 VK_PIPELINE_COMPILE_REQUIRED，返回 0 交后台。
+int nvn_vk_pipe_try_cached(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) {
+    if (out) *out = NULL;
+    if (!out || !d) return 0;
+    if (!pipe_call_enter(NULL)) return 0;
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *hit = pipe_find_locked(d);
+    if (hit) {
+        pipe_hit_note_locked(hit);
+        pthread_mutex_unlock(&g_mu);
+        *out = hit;
+        pipe_call_leave();
+        return 1;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (!g.dev || !g.dev->pipeline_creation_cache_control_enabled || !g_plc || !pipe_cache_ctl_on()) {
+        pipe_call_leave();
+        return 0;
+    }
+    struct nvn_gpu_pipe_s *fresh = NULL;
+    int compile_required = 0;
+    nvn_gpu_rc br;
+    const VkPipelineCreateFlags probe = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_EXT;
+    if (pipe_serial_on()) {
+        // 串行模式兜底（debug.s2a.nvk_pipe_serial=1）零阻塞：后台正持 g_create_mu 编译时
+        // trylock 立即返回，视作未命中交给后台队列，绝不在前台等编译锁。
+        if (pthread_mutex_trylock(&g_create_mu) != 0) {
+            pipe_call_leave();
+            return 0;
+        }
+        br = pipe_build_flagged(d, probe, &fresh, NULL, &compile_required);
+        pthread_mutex_unlock(&g_create_mu);
+    } else {
+        br = pipe_build_flagged(d, probe, &fresh, NULL, &compile_required);
+    }
+    if (compile_required) {
+        __atomic_fetch_add(&g_pipe_cache_probe_miss, 1, __ATOMIC_RELAXED);
+        pipe_call_leave();
+        return 0;
+    }
+    if (!nvn_gpu_ok(br) || !fresh) {
+        __atomic_fetch_add(&g_pipe_cache_probe_fail, 1, __ATOMIC_RELAXED);
+        pipe_call_leave();
+        return 0;
+    }
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *p = pipe_install_locked(fresh);
+    pthread_mutex_unlock(&g_mu);
+    if (!p) {
+        __atomic_fetch_add(&g_pipe_cache_probe_fail, 1, __ATOMIC_RELAXED);
+        pipe_call_leave();
+        return 0;
+    }
+    __atomic_fetch_add(&g_pipe_cache_probe_hit, 1, __ATOMIC_RELAXED);
+    *out = p;
+    pipe_call_leave();
     return 1;
 }
 
@@ -9354,6 +9579,9 @@ void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) {
     fn(user, "pipe_cache_save_trigger_ns", __atomic_load_n(&g_plcw_get_ns, __ATOMIC_RELAXED));
     fn(user, "pipe_warm_created", __atomic_load_n(&g_warm_created, __ATOMIC_RELAXED));   // 预建出来的管线对象数
     fn(user, "pipe_warm_hits", __atomic_load_n(&g_warm_hits, __ATOMIC_RELAXED));         // 真实 draw 第一次拿到预建对象的次数
+    fn(user, "pipe_cache_probe_hit", __atomic_load_n(&g_pipe_cache_probe_hit, __ATOMIC_RELAXED));
+    fn(user, "pipe_cache_probe_miss", __atomic_load_n(&g_pipe_cache_probe_miss, __ATOMIC_RELAXED));
+    fn(user, "pipe_cache_probe_fail", __atomic_load_n(&g_pipe_cache_probe_fail, __ATOMIC_RELAXED));
     fn(user, "pipe_install_dup", __atomic_load_n(&g_pipe_dup, __ATOMIC_RELAXED));
     fn(user, "occl_cont_used", __atomic_load_n(&g_occl_cont_used, __ATOMIC_RELAXED));   // 遮挡查询续段开出次数（进程累计，不随会话清零）        // 双检抓到「别人已经装过同配方」的次数（新建那份已销毁）
     fn(user, "query_host_resets", __atomic_load_n(&g_hqr_host_resets, __ATOMIC_RELAXED));
@@ -9397,6 +9625,10 @@ void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) {
     fn(user, "spv_unlisted_extension", __atomic_load_n(&g_spv_unlisted_ext, __ATOMIC_RELAXED));
     fn(user, "spv_device_limit_rejected", __atomic_load_n(&g_spv_devlimit_reject, __ATOMIC_RELAXED));   // 本机上限（特性 / 限值 / apiVersion / 启用扩展）核对拒收次数
     fn(user, "sampler_border_color_nearest", __atomic_load_n(&g_border_nearest, __ATOMIC_RELAXED));   // 没有自定义边框色扩展、边框色就近取内置档建成的采样器数（进程累计）
+    fn(user, "float_nan_src_live", atomic_load_explicit(&g_float_nan_src_live, memory_order_relaxed));
+    fn(user, "float_nan_src_bytes", atomic_load_explicit(&g_float_nan_src_bytes, memory_order_relaxed));
+    fn(user, "float_nan_src_alloc", atomic_load_explicit(&g_float_nan_src_alloc, memory_order_relaxed));
+    fn(user, "float_nan_src_freed", atomic_load_explicit(&g_float_nan_src_freed, memory_order_relaxed));
 }
 
 // 用例读：视图全局链与帧缓冲缓存的当前账。0 现存视图数；1 旧路径（nvk_ulist=0）摘链累计走过的节点数（缺省路径恒为 0）；
@@ -9590,11 +9822,7 @@ void nvn_gpu_vk_test_close_pipe_only(void) {
     while (p) { struct nvn_gpu_pipe_s *pn = p->all_next; destroy_pipe_objects(p); p = pn; }
     while (sh) {
         struct nvn_gpu_shader_s *sn = sh->all_next;
-        if (sh->mod) vkDestroyShaderModule(g.d, sh->mod, NULL);
-        free(sh->ents);
-        free(sh->tfmt);
-        free(sh->write_bounds);
-        free(sh);
+        destroy_shader_objects(g.d, sh);
         sh = sn;
     }
     pthread_mutex_lock(&g_plc_mu);

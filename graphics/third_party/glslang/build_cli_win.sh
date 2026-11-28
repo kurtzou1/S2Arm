@@ -12,7 +12,10 @@ VER=$(sed -n 's/^VER=\([^;]*\);.*/\1/p' "$H/build.sh"); SHA=$(sed -n 's/^VER=[^;
 [ -n "$VER" ] && [ ${#SHA} = 64 ] || { echo "🔴 glslang：$H/build.sh 里读不出 VER / SHA" >&2; exit 1; }
 for t in cmake ninja clang clang++; do command -v $t > /dev/null || { echo "🔴 glslang：PATH 上没有 ${t}（Windows 出包机先 call R:\\s2a\\bin\\tianyan_env.cmd）" >&2; exit 1; }; done
 source "$ROOT/android/tools/fetch_source.sh"
-C=${S2A_GLSLANG_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/glslang}; mkdir -p "$C"
+C=${S2A_GLSLANG_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/glslang}
+# 缓存根可能是 Windows 写法（S2A_RUN_ROOT=D:\s2a\run）：GNU tar 把「D:」当远程主机名，解压报 Cannot open（Windows 出包机首编时撞上；
+#   原先那台出包机的缓存 11-05 手工编过、一直命中，没走到解压）。在 Git Bash 里统一转成 /d/s2a/… 写法；tar 再加 --force-local 兜底
+command -v cygpath > /dev/null && C=$(cygpath -u "$C"); mkdir -p "$C"
 ID=$( { cat "$0"; echo "$VER $SHA"; clang++ --version | head -1; } | sha256sum | cut -c1-12)
 OUT=$C/win-cli-$VER-$ID; EXE=$OUT/glslangValidator.exe
 [ -s "$EXE" ] && { cygpath -m "$EXE"; exit 0; }
@@ -22,7 +25,8 @@ echo $$ > "$C/.lock-win/pid"; trap 'rm -rf "$C/.lock-win"' EXIT
 if [ ! -s "$EXE" ]; then
   TGZ=$(s2a_source_fetch "glslang-$VER.tar.gz" "https://github.com/KhronosGroup/glslang/archive/refs/tags/$VER.tar.gz" "$SHA") || { echo "🔴 glslang：取不到源码包" >&2; exit 1; }
   W=$OUT.tmp; rm -rf "$W"; mkdir -p "$W/src"
-  tar xzf "$TGZ" -C "$W/src" --strip-components 1
+  command -v cygpath > /dev/null && TGZ=$(cygpath -u "$TGZ")
+  tar --force-local -xzf "$TGZ" -C "$W/src" --strip-components 1
   WM=$(cygpath -m "$W")
   cmake -S "$WM/src" -B "$WM/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_SHARED_LIBS=OFF \
       -DENABLE_HLSL=OFF -DENABLE_OPT=OFF -DENABLE_GLSLANG_BINARIES=ON -DGLSLANG_TESTS=OFF -DBUILD_EXTERNAL=OFF -DENABLE_PCH=OFF -DGLSLANG_ENABLE_INSTALL=OFF \
