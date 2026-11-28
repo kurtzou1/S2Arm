@@ -40,7 +40,7 @@ static int run(int enter_at) {   // in a child: 0 = everything as expected
     printf("  enter_at=%d：返回 %d、原因 %d、调用 %ld 次、开始 (%ld, %ld)、(N, N) %ld 次、用时 %.2f s\n", enter_at, all, atomic_load(&g_wp_why), calls,
            atomic_load(&g_tick_first_done), atomic_load(&g_tick_first_total), full, (bp_now() - t0) / 1e9);
     int ok = atomic_load(&g_tick_first_done) == 0 && atomic_load(&g_tick_first_total) == N && full == 1;
-    if (enter_at) ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_PLAYER && calls >= 3;
+    if (enter_at) ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_FRONT && calls >= 3;   // 前端放行（11-28 起与「玩家点了」分开记）
     else if (g_tick_first_ret == 1) { printf("  之后的启动：返回 %d、原因 %d、返回时问过前端 %ld 次、%.0f ms 后放行、放行时 (N, N) %ld 次\n", all, atomic_load(&g_wp_why), calls_at_back, back / 1e6, full_at_back);
         ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_LATER && calls_at_back == 1 && full_at_back == 0; }
     else if (getenv("T_WARM_CAP") && g_tick_absent) { printf("  没有前端、上限：返回 %d、原因 %d、%.0f ms 后放行、后台接着编 %ld 行\n", all, atomic_load(&g_wp_why), back / 1e6, atomic_load(&g_warm_bg_after_cap));

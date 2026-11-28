@@ -184,6 +184,51 @@ final class NS2LauncherControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testSyncHintWhenJoyConWakesAnotherHost() {
+        // #2318：连接程序扫到唤醒别的主机的 Joy-Con 2、没去连，状态行带 syncHint → 搜索中 / 扫完都提示长按导轨侧 SYNC 再连；不带就是原来的文案
+        let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                              systemControllers: { [] }, notifications: NotificationCenter())
+        controller.apply(status: 1, ["status": 1])
+        XCTAssertFalse(controller.detail.contains("滑轨"), "反证：没带 syncHint 照旧")
+        controller.apply(status: 1, ["status": 1, "syncHint": true])
+        XCTAssertTrue(controller.detail.contains("SL / SR 之间的小 SYNC") && controller.detail.contains("再点「连接」"))
+        controller.apply(status: 9, ["status": 9, "syncHint": true])
+        XCTAssertEqual(controller.detail, NS2LauncherController.syncHintDetail, "扫完没连上：提示留着")
+        XCTAssertEqual(controller.status, .notConnected, "不是出错：灰点")
+        controller.apply(status: 9, ["status": 9])
+        XCTAssertFalse(controller.detail.contains("滑轨"), "反证：下一轮没带就换回原文案")
+        // #2318 真因是 Switch 2 主机开着把手柄抢回去：没找到 / 唤醒别的主机 / 断开 三处都提示先关主机或拿远
+        XCTAssertTrue(controller.detail.contains("先彻底关机或拿远"), "没找到")
+        controller.apply(status: 9, ["status": 9, "syncHint": true])
+        XCTAssertTrue(controller.detail.contains("先彻底关机或拿远"), "唤醒别的主机")
+        controller.apply(status: 5, ["status": 5])
+        XCTAssertTrue(controller.detail.contains("先彻底关机或拿远"), "断开 / 没连上")
+    }
+
+    @MainActor
+    func testHelperPlainLinesGoToLogFile() throws {
+        // #2318 / D-6338：连接程序不是 JSON 的行（[NS2Transport] 扫到广播、BLE 超时…）写进 <私有目录>/logs/ns2-connection.log；JSON 状态行不写
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-ns2-log-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let log = NS2HelperLog(socketURL: dir.appendingPathComponent("ns2-relay.sock"))
+        XCTAssertEqual(log.url.path, dir.appendingPathComponent("logs/ns2-connection.log").path, "和 Xbox 中继日志同一个 logs/（诊断导出收这里的 .log）")
+        let helper = NS2SecondHelper(executable: URL(fileURLWithPath: "/usr/bin/true"), upstream: dir.appendingPathComponent("side.sock"), rememberDevice: true, group: 2, log: log)
+        helper.consume(Data("[NS2Transport] NS2 扫到手柄广播 id=X kind=3 RSSI=-50 accepts=1 wake=唤醒其他主机\n{\"status\":1,\"message\":\"\"}\n[NS2Transport] 半行".utf8))
+        let text = try String(contentsOf: log.url, encoding: .utf8)
+        XCTAssertTrue(text.contains("[组 3] [NS2Transport] NS2 扫到手柄广播 id=X kind=3 RSSI=-50 accepts=1 wake=唤醒其他主机\n"), text)
+        XCTAssertFalse(text.contains("\"status\""), "反证：JSON 状态行不进日志")
+        XCTAssertFalse(text.contains("半行"), "没收到换行的半行等下一块再写")
+        helper.consume(Data("后半\n".utf8))
+        XCTAssertTrue(try String(contentsOf: log.url, encoding: .utf8).contains("[NS2Transport] 半行后半\n"))
+        // 超过上限从头重写：不无限长
+        try Data(count: NS2HelperLog.maxBytes + 1).write(to: log.url)
+        log.append([Data("重写后第一行".utf8)], group: 0)
+        let after = try String(contentsOf: log.url, encoding: .utf8)
+        XCTAssertTrue(after.hasSuffix("[组 1] 重写后第一行\n") && after.utf8.count < 200, "超上限重写（实长 \(after.utf8.count)）")
+    }
+
+    @MainActor
     func testPressFlashesThatPlayerRow() {
         // 认手柄：连接程序报某只按了键（{"press": {"id"}}）→ 那位玩家那一行亮；一对 Joy-Con 任一只都算那一位；认不出的 id 不亮
         let suite = "s2arm-press-test-" + UUID().uuidString

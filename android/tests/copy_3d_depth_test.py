@@ -50,9 +50,12 @@ preamble = r'''
 #define REF_BUF 2
 struct nvn_gpu_tex_s { uint32_t w,h,depth,levels,target,layers,format,nvn_format,aspect; VkImage image; int bc_decoded; };   /* bc_decoded：压缩贴图现解；本测试的贴图都不是 */
 struct nvn_gpu_buf_s { VkBuffer buffer; uint64_t size; };
-struct nvn_gpu_cmd_s { int sticky,in_pass,xfer_dirty; VkCommandBuffer cb; };
+struct nvn_gpu_cmd_s { int sticky,in_pass,xfer_dirty,tb_active; VkCommandBuffer cb; };
 static const struct { VkPipeline pipe; } g_d24_readback = {.pipe = VK_NULL_HANDLE};
-static int copies, bc_calls, bc_upload_calls; static VkBufferImageCopy last;
+static const struct { int tex_upload_pool; } g = {0};
+enum { TP_UPLOADS = 0, TP_FULL_BAR = 1, TP_IMG_BAR = 2, TP_COPY_CMD = 3, TP_STAT_N = 4 };
+static uint64_t g_tp_stat[TP_STAT_N];
+static int copies, bc_calls, bc_upload_calls, tex_batch_flushes, tex_batch_records; static VkBufferImageCopy last;
 static unsigned cold_writes;
 static struct {
     nvn_gpu_cmd cmd;
@@ -70,6 +73,8 @@ static int buf_range(struct nvn_gpu_buf_s *b, uint64_t off, uint64_t n) { return
 static void full_barrier(struct nvn_gpu_cmd_s *c) { (void)c; }
 static void image_barrier(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, int l) { (void)c; (void)t; (void)l; }
 static void cmd_ref(struct nvn_gpu_cmd_s *c, void *p, int type) { (void)c; (void)p; (void)type; }
+static void tex_batch_flush(struct nvn_gpu_cmd_s *c) { (void)c; tex_batch_flushes++; }
+static void tex_batch_record(struct nvn_gpu_cmd_s *c, struct nvn_gpu_buf_s *b, struct nvn_gpu_tex_s *t, const VkBufferImageCopy *bc) { (void)c; (void)b; (void)t; (void)bc; tex_batch_records++; }
 VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b, VkImage i, VkImageLayout layout, uint32_t n, const VkBufferImageCopy *r) { (void)cb; (void)b; (void)i; (void)layout; (void)n; copies++; last=*r; }
 VKAPI_ATTR void VKAPI_CALL vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage i, VkImageLayout layout, VkBuffer b, uint32_t n, const VkBufferImageCopy *r) { (void)cb; (void)i; (void)layout; (void)b; (void)n; copies++; last=*r; }
 '''
@@ -103,12 +108,16 @@ cold_write_stub = cold_write_signature + r'''
     last_cold_write.exact = exact;
 }
 '''
-# #1581 K：一个拷贝区域只取一个面——面选择（copy_face_aspect）与 copy_buf_tex_impl 的 face 取值（COPY_FACE_*）在函数外，一起切出来
+# #1581 K：一个拷贝区域只取一个面——面选择（copy_face_aspect）与 copy_buf_tex_impl 的 face / source_ready 取值在函数外，一起切出来
 match = re.search(r'enum \{ COPY_FACE_DEFAULT[^}]*\};', src)
 if not match:
     raise RuntimeError('production COPY_FACE_* enum not found')
 face_enum = match.group(0)
-production = face_enum + '\n' + '\n'.join(function(x) for x in (
+match = re.search(r'enum \{ COPY_SRC_GPU[^}]*\};', src)
+if not match:
+    raise RuntimeError('production COPY_SRC_* enum not found')
+src_enum = match.group(0)
+production = face_enum + '\n' + src_enum + '\n' + '\n'.join(function(x) for x in (
     'static VkImageAspectFlags copy_face_aspect(',
     'static const char *readback_refusal(',   # copy_tex_buf 先问它拒不拒收（展开格式 / 替换存储，#1715）；与 NVN_GPU_FMT_READBACK 同一个判断
     'static void copy_region_block_clamp(', 'static int copy_region(', 'static int check_copy_params(',   # block_clamp：#697 小 mip 整块区域裁边，copy_region 调它
@@ -117,9 +126,12 @@ main = r'''
 static int check_case(int direction, unsigned layer, const NVNcopyRegion *region, int expected, const char *name) {
     struct nvn_gpu_tex_s t = {.w=4,.h=4,.depth=4,.levels=3,.target=NVN_TEXTURE_TARGET_3D,.layers=1};
     struct nvn_gpu_buf_s b = {.size=128}; struct nvn_gpu_cmd_s c = {0};
-    copies = 0; cold_writes = 0; memset(&last, 0, sizeof last);
+    copies = 0; cold_writes = 0; tex_batch_flushes = 0; tex_batch_records = 0; memset(&last, 0, sizeof last);
     if (direction == 0) nvn_gpu_copy_buf_tex(&c, &b, 4, 8, 32, &t, 1, layer, region);
     else nvn_gpu_copy_tex_buf(&c, &t, 1, layer, region, &b, 4, 8, 32);
+    if (tex_batch_flushes != 0 || tex_batch_records != 0) {
+        fprintf(stderr, "%s direction=%d: unexpected tex batch activity flushes=%d records=%d\n", name, direction, tex_batch_flushes, tex_batch_records); return 1;
+    }
     if (expected) {
         if (c.sticky != NVN_GPU_OK || copies != 1 || last.imageOffset.z != (int)layer ||
             last.imageExtent.width != 2 || last.imageExtent.height != 2 ||

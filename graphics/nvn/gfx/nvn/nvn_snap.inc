@@ -366,7 +366,7 @@ static int snap_alias_restore(const char *path) {
         id<MTLTexture> t = nil; if (has) { t = snap_al_load(f); if (!t && errno == EIO) { ok = 0; break; } }
         [objs addObject:t ? (id)t : (id)[NSNull null]];
         if (!t) { miss++; continue; }
-        pthread_mutex_lock(&g_smu); hm_put_id(&g_alias, &ak, t); CFSetAddValue(g_alias_set, (__bridge const void *)t); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
+        pthread_mutex_lock(&g_smu); alias_put_locked(&ak, t); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
         put++;
     }
     uint32_t ng = 0, gp = 0, gm = 0, gw = 0, gz = 0; ok = ok && fr_r(f, &ng, 4);

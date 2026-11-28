@@ -94,6 +94,11 @@ struct S2ArmAppleApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
+        // 启动时一定开主窗口，不按上次退出时的窗口状态恢复：AppKit 的窗口状态恢复按签名身份记，记着「上次没有窗口」（测试 / 验收按 pid 收掉进程就会留下）时，
+        //   下次启动 WindowGroup 不建主窗口、激活也不补；控制口挂在窗口出现后的 startup() 上，control.json 就一直不出
+        //   （11-28 发版冷跑验收卡住，v0.6.10 同样；只对这个 bundle id 设 ApplePersistenceIgnoreState 后两次都出窗口）。窗口大小位置照旧（NSWindow Frame）
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.presented)
         .defaultWindowPlacement { _, context in
             WindowPlacement(size: AppSetup.defaultWindowSize(displaySize: context.defaultDisplay.bounds.size,
                                                              visibleSize: context.defaultDisplay.visibleRect.size))

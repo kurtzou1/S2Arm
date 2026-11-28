@@ -2,10 +2,10 @@
 """Collect a relocatable runtime on an Apple Silicon release builder.
 
 Adapted from LumaDock (MIT; README.md).
-Requires Homebrew bash on the builder; Python and the SPIRV tools come from runtime_sources.py so their minimum macOS matches the app's.
+Python, the SPIRV tools, zstd and bash come from runtime_sources.py (pinned sources, built for the app's minimum macOS); the builder's Homebrew is not copied.
 bash 5 ships in Runtime/bin and comes first on the jobs' PATH: engine scripts are written and gated on bash 5; macOS /bin/bash 3.2 lacks BASHPID etc.
 (10-25 launcher Hades run: EXIT traps failed with 'BASHPID: unbound variable').
-bash is an aggregated GPL-3.0 program (separate process, not linked). Its COPYING and the source offer are copied into Runtime/licenses.
+bash is an aggregated GPL-3.0 program (separate process, not linked). Its COPYING (from the pinned source) and the source offer are copied into Runtime/licenses.
 timeout is the repository's own perl tools/bin/timeout (Apache-2.0; macOS ships perl), not GNU coreutils — the same one tools/toolchain.sh puts first on PATH.
 spirv-cross / glslangValidator build the direct shader library of Vulkan / OpenGL games (graphics/tools/direct/direct_lib.py; Hades is Vulkan).
 The bundled C rewriter (Runtime/bin/s2a-rewrite) also needs CMake 3.18+, a C compiler and
@@ -35,16 +35,29 @@ from pack import rewriter
 TOOLS = [('spirv-tools','spirv-as'),('spirv-tools','spirv-val'),('s2a-timeout','timeout'),('zstd','zstd'),('bash','bash'),('spirv-cross','spirv-cross'),('glslang','glslangValidator')]
 
 
+def toolchain_identity():
+    """编随包程序的工具链：SDK 版本与 clang 版本。SDK 决定哪些系统函数被弱引用（11-28 bash 的 strchrnul），换 Xcode 要重编。"""
+    sdk = output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'])
+    clang = output(['xcrun', 'clang', '--version']).splitlines()[0]
+    return f'sdk {sdk}; {clang}'
+
+
 def runtime_deps_fingerprint():
     """What this tree puts in Runtime. build_app refuses to reuse a directory whose copy differs.
 
-    this file itself (what is copied and how), requirements-runtime.txt (no oead), the TOOLS providers (timeout is tools/bin/timeout, not coreutils),
-    the timeout source, and the bash source-offer text.
+    Every input counts (11-28: Homebrew-copied bash was not in here, so a years-old copy kept being reused and a cold cache picked up
+    a macOS 26 bottle): this file itself (what is copied and how), every pinned download (sha256 from runtime_sources.downloads()),
+    the deployment target, the toolchain (SDK / clang), requirements-runtime.txt (no oead), the TOOLS providers
+    (timeout is tools/bin/timeout, not coreutils), the timeout source, and the bash source-offer text.
+    Nothing is copied from the builder outside these: a Mach-O linking Homebrew / MacPorts / /usr/local is refused in build().
     """
     h = hashlib.sha256()
-    h.update(b'runtime-deps-v1\n')
+    h.update(b'runtime-deps-v2\n')
     h.update((ROOT / 'launchers/macos/runtime_sources.py').read_bytes())
+    for url, sha, path in runtime_sources.downloads():
+        h.update(f'{path.name} {sha}\n'.encode())
     h.update(runtime_sources.deployment_target().encode())
+    h.update(toolchain_identity().encode())
     h.update((ROOT / 'launchers/macos/bundle_runtime.py').read_bytes())   # 收什么、怎么收也算：11-02 只改拷贝规则补 Pillow，旧 Runtime 指纹不变照旧复用、玩家仍缺
     h.update((ROOT / 'launchers/shared/pil_prune.py').read_bytes())   # 瘦身规则也算（#1570：只改它不换指纹，旧 Runtime 照旧缺画字）
     h.update((ROOT / 'launchers/macos/requirements-runtime.txt').read_bytes())
@@ -99,22 +112,9 @@ def build(out):
     python = runtime_sources.python()
     python_bin = python/'bin/python3.12'
     tool_prefix, tool_sources = runtime_sources.tools()
-    brew = shutil.which('brew')
-    # 解析 @rpath 时按插入顺序找 prefix：钉版工具必须排在 bash（Homebrew / MacPorts）前面，
-    # 否则 zstd 会链到系统那套 libzstd，跑起来报 `_POOL_add` 找不到。
-    prefixes = {name: tool_prefix for name in ('spirv-tools', 'spirv-cross', 'glslang', 'zstd')}
-    if brew:
-        prefixes['bash'] = pathlib.Path(output([brew, '--prefix', 'bash'])).resolve()
-        bash_bin = prefixes['bash']/'bin/bash'
-    else:
-        # Intel Mac 本机没有 Homebrew 时按 PATH 上已装的 bash 5 收包（MacPorts / mise 等都可以），不为了出包强装 Homebrew
-        found = shutil.which('bash')
-        if not found:
-            raise RuntimeError('Release builder needs bash 5 on PATH (or Homebrew).')
-        bash_bin = pathlib.Path(found).resolve()
-        if int(output([bash_bin, '-c', 'echo ${BASH_VERSINFO[0]}']) or 0) < 5:
-            raise RuntimeError(f'bash 5 required, got {output([bash_bin, "--version"])}')
-        prefixes['bash'] = bash_bin.parent.parent if bash_bin.parent.name == 'bin' else bash_bin.parent
+    # 随包命令行工具全部来自钉版源码的同一个安装前缀（11-28 起 bash 也是：原先拷出包机 Homebrew 的 bash，冷缓存时拿到 macOS 26 瓶子）
+    prefixes = {name: tool_prefix for name in ('spirv-tools', 'spirv-cross', 'glslang', 'zstd', 'bash')}
+    bash_bin = tool_prefix/'bin/bash'
     venv = ROOT/'build/macos/python'
     if (venv/'pyvenv.cfg').is_file() and str(python) not in (venv/'pyvenv.cfg').read_text():
         shutil.rmtree(venv)   # 旧的 venv 是 Homebrew Python 建的，原生扩展要按新解释器重装
@@ -185,15 +185,9 @@ def build(out):
             dep = line.strip().split(' (')[0]
             target = None
             if dep.startswith(('/opt/homebrew/', '/usr/local/', '/opt/local/')):
-                if dep.endswith('/Python'):
-                    target = out/'python/Python'
-                else:
-                    source = pathlib.Path(dep).resolve()
-                    target = libs/source.name
-                    if not target.exists():
-                        shutil.copy2(source, target)
-                        todo.append(target)
-            elif dep.startswith('@rpath/'):
+                # 11-28 起不再把出包机包管理器里的库拷进包：那些件不在指纹里（版本 / 最低系统随出包机漂），原先 bash 就是这样带进 macOS 26 的 readline / ncurses
+                raise RuntimeError(f'【红】{p.relative_to(out)} 链到出包机的 {dep}：随包程序只许链系统库和 runtime_sources.py 的钉版件')
+            if dep.startswith('@rpath/'):
                 source = next((prefix/'lib'/pathlib.Path(dep).name for prefix in prefixes.values()
                                if (prefix/'lib'/pathlib.Path(dep).name).is_file()), None)
                 if source:
@@ -223,14 +217,11 @@ def build(out):
     run([out/'python/bin/python3', '-B', '-I', '-c', f'import ctypes; ctypes.CDLL({str(out / "lib/libzstd.1.dylib")!r}).ZSTD_versionNumber; print("Runtime libzstd OK")'], env=env)
     licenses = out/'licenses'
     licenses.mkdir()
-    bash_license = next((p for p in (prefixes["bash"]/"COPYING", prefixes["bash"]/"share/doc/bash/COPYING",
-                                     prefixes["bash"]/"share/licenses/bash/COPYING", prefixes["bash"]/"share/doc/bash/LICENSE")
-                         if p.is_file()), None)
     copies = [
         (python / "lib/python3.12/LICENSE.txt", "Python-LICENSE.txt"),
         (tool_sources["spirv-tools"] / "LICENSE", "SPIRV-Tools-LICENSE.txt"),
         (tool_sources["zstd"] / "LICENSE", "Zstandard-LICENSE.txt"),
-        (bash_license or runtime_cache.fetch_file("GPL-3.0.txt"), "bash-COPYING.txt"),
+        (tool_sources["bash"] / "COPYING", "bash-COPYING.txt"),
         (ROOT / "launchers/macos/runtime_source_offer.txt", "S2Arm-runtime-source-offer.txt"),
         (tool_sources["spirv-cross"] / "LICENSE", "SPIRV-Cross-LICENSE.txt"),
         (tool_sources["glslang"] / "LICENSE.txt", "glslang-LICENSE.txt"),
@@ -239,13 +230,6 @@ def build(out):
     ]
     for src, name in copies:
         shutil.copy2(src, licenses / name)
-    if brew:
-        dependencies = output([brew, "deps", "--installed", "bash"]).splitlines()
-        for name in set(dependencies):
-            prefix = pathlib.Path(output([brew, "--prefix", name]))
-            for p in prefix.glob("*"):
-                if p.is_file() and any(x in p.name.upper() for x in ("LICENSE", "COPYING", "NOTICE")):
-                    shutil.copy2(p, licenses / (name + "-" + p.name))
     # 版本记录要覆盖 requirements-runtime.txt 的每一行：漏记 Pillow / zstandard 会让 build_app 每次都判 Runtime 过期重收。
     names = [pin.split('==')[0] for pin in pins]
     probe = installed_versions_probe(names)
@@ -266,7 +250,7 @@ def build(out):
         timeout="tools/bin/timeout",
         spirvTools="spirv-tools " + runtime_sources.SPIRV_TOOLS_VERSION,
         zstd="zstd " + runtime_sources.ZSTD_VERSION,
-        bash=output([brew, "list", "--versions", "bash"]) if brew else output([bash_bin, "-c", 'echo "bash ${BASH_VERSION}"']),
+        bash=output([bash_bin, "-c", 'echo "bash ${BASH_VERSION}"']),
         spirvCross="spirv-cross " + runtime_sources.SPIRV_CROSS_VERSION,
         glslang="glslang " + runtime_sources.GLSLANG_VERSION,
         rewriter=rewriter.source_digest(),

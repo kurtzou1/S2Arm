@@ -455,8 +455,16 @@ struct nvn_gpu_cmd_s {
     struct cold_event *cold_events;
     unsigned cold_nevents, cold_cap;
     int cold_events_lost;
+    // 连续宿主 tex_upload 合并（开关 debug.s2a.nvk_tex_upload_pool，缺省 0，见 backend_vulkan_tex_pool.inc）
+    VkBuffer tb_src;
+    struct nvn_gpu_tex_s *tb_dst;
+    VkBufferImageCopy tb_reg[64];
+    struct { uint32_t aspect, level, layer; int32_t x0, y0, z0, x1, y1, z1; } tb_ranges[64];
+    uint32_t tb_n, tb_nranges;
+    uint8_t tb_active;
     struct nvn_gpu_cmd_s *live_next;
 };
+enum { TB_REG_MAX = 64, TB_RANGE_MAX = 64 };
 
 // 冗余状态消除：影子整份作废（之后每一项第一次用到都照发）
 static void es_reset(struct nvn_gpu_cmd_s *c) { memset(&c->es, 0, sizeof c->es); }
@@ -529,6 +537,7 @@ struct nvn_gpu_vk {
     unsigned land_prior_live, land_live_count;
     struct la_trial land_trial;
     int vbuf_batch;                 // 会话内固定；debug.s2a.nvk_replay_cpu_cuts 缺省开启
+    int tex_upload_pool;            // 会话内固定；debug.s2a.nvk_tex_upload_pool 缺省 0
     int fault_inject;
     uint64_t test_fail_signal;    // 测试钩子：让指定 signal 的段表现为 fence 失败
     uint64_t test_delay_signal;   // 测试钩子：让指定 signal 的段先睡 ms
@@ -990,12 +999,20 @@ static void seg_give_q(VkQueryPool q, uint32_t n) {
     }
     if (!kept) vkDestroyQueryPool(g.d, q, NULL);
 }
+static uint64_t tex_stg_round_cap(uint64_t cap);
+static struct nvn_gpu_buf_s *tex_stg_take(uint64_t bytes);
+static int tex_stg_give(struct nvn_gpu_buf_s *b);
+static void tex_stg_note_miss(void);
+static void tex_stg_open(void);
+static void tex_stg_drain_locked(void);
+static void tex_batch_flush(struct nvn_gpu_cmd_s *c);
 static void seg_drain(void) {
     pthread_mutex_lock(&g_seg_mu);
     for (uint32_t i = 0; i < g_seg_ncmd; i++) vkDestroyCommandPool(g.d, g_seg_cmd[i].pool, NULL);
     for (uint32_t i = 0; i < g_seg_ndesc; i++) vkDestroyDescriptorPool(g.d, g_seg_desc[i], NULL);
     for (uint32_t i = 0; i < g_seg_nq; i++) vkDestroyQueryPool(g.d, g_seg_q[i].q, NULL);
     g_seg_ncmd = g_seg_ndesc = 0; g_seg_nq = 0; g_seg_nstg = 0; g_seg_closed = 1;   // 暂存缓冲在 g.bufs 链里，由收尾遍历销毁
+    tex_stg_drain_locked();
     pthread_mutex_unlock(&g_seg_mu);
 }
 
@@ -1968,6 +1985,7 @@ static void finish_cmd(struct nvn_gpu_cmd_s *c, int executed) {
     for (uint32_t i = 0; i < c->nstaging; i++) {
         struct nvn_gpu_buf_s *b = c->staging[i].buf;
         if (!b) continue;
+        if (tex_stg_give(b)) continue;
         if (seg_give_stg(b)) continue;
         pthread_mutex_lock(&g_mu);
         unlink_buf_locked(&g, b);
@@ -2579,6 +2597,8 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
     const int cold_mode = nvn_plat_flag("nvk_cold_guard", 0);
     g.cold_enabled = cold_mode == 1 || cold_mode == 2 ? cold_mode : 0;
     g.vbuf_batch = nvn_plat_flag("nvk_replay_cpu_cuts", 1) != 0;
+    g.tex_upload_pool = nvn_plat_flag("nvk_tex_upload_pool", 0) != 0;
+    tex_stg_open();
     {   // 诊断（nvk_mem_types，缺省 0）：打印显存类型表，判「有没有 HOST_CACHED 的可见类型」——
         // CPU 写映射内存与显卡抢带宽的那条路（见坑记录续 21）要不要改走 cached 暂存，取决于这张表。
         static int mt_on = -1; if (mt_on < 0) mt_on = nvn_plat_flag("nvk_mem_types", 0) != 0;
@@ -3078,9 +3098,14 @@ void nvn_gpu_buf_use(nvn_gpu_cmd ch, nvn_gpu_buf bh) {
 
 static struct nvn_gpu_buf_s *new_staging(struct nvn_gpu_cmd_s *c, uint64_t cap) {
     nvn_gpu_err e;
-    nvn_gpu_buf b = seg_reuse_on() ? seg_take_stg(cap) : NULL;
+    nvn_gpu_buf b = NULL;
+    if (seg_reuse_on()) {
+        if (g.tex_upload_pool && cap > VK_ARENA_MIN) b = tex_stg_take(cap);
+        else b = seg_take_stg(cap);
+    }
     static int cached_on = -1; if (cached_on < 0) cached_on = nvn_plat_flag("nvk_stage_cached", 1) != 0;
     if (!b) {
+        if (!g.tex_upload_pool && cap > VK_ARENA_MIN) tex_stg_note_miss();
         if (!rc_is(buf_create_impl(cap, NVN_GPU_MEM_SHARED, NULL, cached_on, &b, &e), NVN_GPU_OK)) return NULL;
         __atomic_add_fetch(&g_stg_wr[4], 1, __ATOMIC_RELAXED); __atomic_add_fetch(&g_stg_wr[5], cap, __ATOMIC_RELAXED);   // 新建的暂存块（表里没取到）
     }
@@ -3112,6 +3137,7 @@ nvn_gpu_rc nvn_gpu_arena_alloc(nvn_gpu_cmd ch, uint64_t bytes, uint32_t align, n
     if (!c->arena || off + bytes > c->arena_cap) {
         uint64_t cap = bytes + align;
         if (cap < VK_ARENA_MIN) cap = VK_ARENA_MIN;
+        else if (g.tex_upload_pool) cap = tex_stg_round_cap(cap);
         struct nvn_gpu_buf_s *b = new_staging(c, cap);
         if (!b) return fail(err, NVN_GPU_E_OOM, "arena %llu 字节分配失败", (unsigned long long)cap);
         c->arena = b;
@@ -3143,6 +3169,7 @@ int nvn_gpu_arena_fill_take(uint64_t ticket) { return vk_dq_fill_take(ticket); }
 // 保守的全局内存屏障：传输操作前后与段末各来一次（先保证正确，后面再按访问类型收窄）。
 static void mem_barrier(struct nvn_gpu_cmd_s *c, VkPipelineStageFlags src_stage, VkAccessFlags src_access,
                         VkPipelineStageFlags dst_stage, VkAccessFlags dst_access) {
+    if (c->tb_active) tex_batch_flush(c);
     VkMemoryBarrier b;
     memset(&b, 0, sizeof b);
     b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -6220,6 +6247,7 @@ void nvn_gpu_pass_begin(nvn_gpu_cmd ch, const nvn_gpu_pass_desc *d) {
                                   c->feedback_read_mask, d->area_w && d->area_h ? &granularity : NULL);
     PBP_STEP(0);
     if (!pass) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "渲染通道创建失败（附件格式 / 采样数）"); return; }
+    if (c->tb_active) tex_batch_flush(c);
     // 附件先从现在的布局迁到这一段要用的布局：必须在 vkCmdBeginRenderPass 之前，通道内不许再迁
     for (uint32_t i = 0; i < natt; i++) {
         image_barrier(c, att_tex[i], att_lay[i]);
@@ -7294,6 +7322,7 @@ void nvn_gpu_dispatch(nvn_gpu_cmd ch, nvn_gpu_pipe ph, uint32_t x, uint32_t y, u
     if (!c || !rc_is(c->sticky, NVN_GPU_OK)) return;
     if (!ind && (!x || !y || !z)) return;   // 0 组：空操作，不录、不置错（对齐 Ryujinx）
     if (c->in_pass) { set_sticky(c, NVN_GPU_E_ORDER, "dispatch 在通道内"); return; }
+    if (c->tb_active) tex_batch_flush(c);
     es_reset(c);   // push 常量的范围按管线布局、不分绑定点：保守起见计算派发之后图形这边全部重发（#708）
     if (ph && c->pipe && ph != c->pipe) { set_sticky(c, NVN_GPU_E_ARG, "dispatch 管线与 bind 时的管线不一致"); return; }
     struct nvn_gpu_pipe_s *p = c->pipe;
@@ -7407,6 +7436,7 @@ static VkAccessFlags layout_src_access(VkImageLayout l) {
 
 // 录一次布局迁移：本段内跟踪，段首一律按 GENERAL 算（见「图像布局」）
 static void image_barrier_from(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, VkImageLayout from, VkImageLayout to) {
+    if (c->tb_active) tex_batch_flush(c);
     VkImageMemoryBarrier b;
     memset(&b, 0, sizeof b);
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -8269,12 +8299,15 @@ static VkImageAspectFlags copy_face_aspect(const struct nvn_gpu_tex_s *t) {
 //   COPY_FACE_DEPTH_F32 = #398 D24 换 D32 存储的贴图，缓冲里已是换算好的 D32 深度面（每纹素 4 字节 float），只拷深度面；
 //   COPY_FACE_STENCIL = 只拷模板面，缓冲每纹素 1 字节。
 enum { COPY_FACE_DEFAULT = 0, COPY_FACE_DEPTH_F32 = 1, COPY_FACE_STENCIL = 2 };
+enum { COPY_SRC_GPU = 0, COPY_SRC_DESWIZZLE = 1, COPY_SRC_HOST_UPLOAD = 2 };
+#include "backend_vulkan_tex_pool.inc"
 static void copy_buf_tex_impl(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint64_t row_bytes, uint64_t image_bytes,
                               nvn_gpu_tex th, uint32_t level, uint32_t layer, const NVNcopyRegion *r, int face, int source_ready) {
     const int depth_f32 = face == COPY_FACE_DEPTH_F32, stencil = face == COPY_FACE_STENCIL;
     { struct nvn_gpu_cmd_s *cc = ch; if (cc && cc->in_pass && rc_is(cc->sticky, NVN_GPU_OK)) { set_sticky(cc, NVN_GPU_E_ORDER, "传输操作在通道内"); return; } }
     struct nvn_gpu_cmd_s *c = ch;
     if (!c || !rc_is(c->sticky, NVN_GPU_OK)) return;
+    if (source_ready != COPY_SRC_HOST_UPLOAD && c->tb_active) tex_batch_flush(c);
     struct nvn_gpu_tex_s *t = th;
     struct nvn_gpu_buf_s *b = bh;
     if (t && t->bc_decoded) {   // 压缩字节进现解贴图：在段里解码（#697），不直拷
@@ -8324,8 +8357,6 @@ static void copy_buf_tex_impl(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint
                    (unsigned long long)row_bytes, (unsigned long long)image_bytes, (unsigned long long)off);
         return;
     }
-    if (!source_ready) full_barrier(c);
-    image_barrier(c, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy bc;
     memset(&bc, 0, sizeof bc);
     bc.bufferOffset = off;
@@ -8335,8 +8366,20 @@ static void copy_buf_tex_impl(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint
                                                      t->target == NVN_TEXTURE_TARGET_3D ? 0 : layer, 1};
     bc.imageOffset = o;
     bc.imageExtent = e;
+    if (source_ready == COPY_SRC_HOST_UPLOAD && g.tex_upload_pool) {
+        tex_batch_record(c, b, t, &bc);
+        return;
+    }
+    if (source_ready != COPY_SRC_DESWIZZLE) full_barrier(c);
+    image_barrier(c, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkCmdCopyBufferToImage(c->cb, b->buffer, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
     image_barrier(c, t, VK_IMAGE_LAYOUT_GENERAL);   // 之后按采样 / 存储使用；本段统一用 GENERAL
+    if (source_ready == COPY_SRC_HOST_UPLOAD) {
+        __atomic_fetch_add(&g_tp_stat[TP_UPLOADS], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_tp_stat[TP_FULL_BAR], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_tp_stat[TP_IMG_BAR], 2, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_tp_stat[TP_COPY_CMD], 1, __ATOMIC_RELAXED);
+    }
     cmd_ref(c, b, REF_BUF);
     cmd_ref(c, t, REF_TEX);
 }
@@ -8353,6 +8396,7 @@ void nvn_gpu_copy_tex_buf(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32
     { struct nvn_gpu_cmd_s *cc = ch; if (cc && cc->in_pass && rc_is(cc->sticky, NVN_GPU_OK)) { set_sticky(cc, NVN_GPU_E_ORDER, "传输操作在通道内"); return; } }
     struct nvn_gpu_cmd_s *c = ch;
     if (!c || !rc_is(c->sticky, NVN_GPU_OK)) return;
+    if (c->tb_active) tex_batch_flush(c);
     struct nvn_gpu_tex_s *t = th;
     struct nvn_gpu_buf_s *b = bh;
     if (t && t->bc_decoded) { bc_readback(c, t, level, layer, r, b, off, row_bytes, image_bytes); return; }   // 按上传时留下的压缩原字节回读
@@ -8856,7 +8900,7 @@ static void upload_d24s8_stencil(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level,
         const uint8_t *row = src + (uint64_t)y * row_bytes;
         for (uint32_t x = 0; x < ew; x++) dst[(uint64_t)y * ew + x] = row[(uint64_t)x * 4 + 3];
     }
-    copy_buf_tex_impl(ch, sl.buf, sl.off, ew, (uint64_t)ew * eh, th, level, layer, r, COPY_FACE_STENCIL, 0);
+    copy_buf_tex_impl(ch, sl.buf, sl.off, ew, (uint64_t)ew * eh, th, level, layer, r, COPY_FACE_STENCIL, COPY_SRC_HOST_UPLOAD);
 }
 
 void nvn_gpu_tex_upload(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32_t layer, const NVNcopyRegion *r,
@@ -8867,7 +8911,7 @@ void nvn_gpu_tex_upload(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32_t
     if (!src) { set_sticky(c, NVN_GPU_E_ARG, "tex_upload src 为空"); return; }
     struct nvn_gpu_tex_s *t = th;
     if (!t) { set_sticky(c, NVN_GPU_E_ARG, "tex_upload 贴图为空"); return; }
-    if (t->bc_decoded) { bc_upload(c, t, level, layer, r, src, row_bytes, image_bytes); return; }
+    if (t->bc_decoded) { if (c->tb_active) tex_batch_flush(c); bc_upload(c, t, level, layer, r, src, row_bytes, image_bytes); return; }
     int ebpp = 0;
     int expand = nvn_fmt_expand_target(t->nvn_format, NULL, &ebpp);
     uint32_t ew = r ? (uint32_t)r->width : (t->w >> level);
@@ -8906,17 +8950,17 @@ void nvn_gpu_tex_upload(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32_t
             set_sticky(c, NVN_GPU_E_ARG, "tex_upload 展开失败（格式 0x%x）", t->nvn_format);
             return;
         }
-        nvn_gpu_copy_buf_tex(ch, sl.buf, sl.off, out_row, out_bytes, th, level, layer, r);
+        copy_buf_tex_impl(ch, sl.buf, sl.off, out_row, out_bytes, th, level, layer, r, COPY_FACE_DEFAULT, COPY_SRC_HOST_UPLOAD);
     } else if (nvn_vk_format_substituted(t->nvn_format)) {
         // #398：D24 换成 D32 存储。按原 D24 深度面口径（每纹素 4 字节，低 24 位 UNORM）换成 float 再传深度面。
         if (row_bytes & 3) { set_sticky(c, NVN_GPU_E_ARG, "tex_upload D24 行宽未 4 对齐"); return; }
         memcpy(sl.cpu, src, (size_t)image_bytes);
         nvn_vk_depth24_to_f32(sl.cpu, (size_t)image_bytes / 4);
-        copy_buf_tex_impl(ch, sl.buf, sl.off, row_bytes, image_bytes, th, level, layer, r, COPY_FACE_DEPTH_F32, 0);
+        copy_buf_tex_impl(ch, sl.buf, sl.off, row_bytes, image_bytes, th, level, layer, r, COPY_FACE_DEPTH_F32, COPY_SRC_HOST_UPLOAD);
         if (t->nvn_format == NVN_FORMAT_DEPTH24_STENCIL8) upload_d24s8_stencil(ch, th, level, layer, r, src, row_bytes, image_bytes, ew, eh);   // 换存储后模板面照样要传
     } else {
         memcpy(sl.cpu, src, (size_t)image_bytes);
-        nvn_gpu_copy_buf_tex(ch, sl.buf, sl.off, row_bytes, image_bytes, th, level, layer, r);   // 深度模板贴图：这一区只有深度面（copy_face_aspect）
+        copy_buf_tex_impl(ch, sl.buf, sl.off, row_bytes, image_bytes, th, level, layer, r, COPY_FACE_DEFAULT, COPY_SRC_HOST_UPLOAD);   // 深度模板贴图：这一区只有深度面（copy_face_aspect）
         if (t->nvn_format == NVN_FORMAT_DEPTH24_STENCIL8 && (t->aspect & VK_IMAGE_ASPECT_STENCIL_BIT))
             upload_d24s8_stencil(ch, th, level, layer, r, src, row_bytes, image_bytes, ew, eh);
     }
@@ -9129,6 +9173,7 @@ void nvn_gpu_timestamp(nvn_gpu_cmd ch, uint32_t slot, uint32_t type) {
         }
         c->report_begin_ns = now_ns();
     }
+    if (c->tb_active) tex_batch_flush(c);
     vkCmdWriteTimestamp(c->cb, type == NVN_COUNTER_TYPE_TIMESTAMP_TOP ?
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, c->report_ts, slot);
     c->report_used |= UINT64_C(1) << slot;
@@ -9400,6 +9445,8 @@ static nvn_gpu_rc commit_impl(nvn_gpu_cmd ch, uint64_t signal, nvn_gpu_done_fn d
         return code;
     }
 
+    // 段末：先刷新仍在批中的连续宿主 tex_upload，再转图像回 GENERAL 与主机可见性屏障。
+    if (c->tb_active) tex_batch_flush(c);
     // 段末：本段动过的图一律转回 GENERAL（段与段之间的静止布局约定，见「图像布局」）。
     lay_rest_at_commit(c);
     // 段末：让本段的所有 GPU 写对主机可见（fence 只保证执行完，不保证主机可见）。

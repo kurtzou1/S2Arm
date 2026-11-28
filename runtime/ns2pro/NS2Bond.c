@@ -19,6 +19,12 @@ ns2_wake ns2_advert_wake(const uint8_t *m, size_t length, const uint8_t *our_hos
     return our_host && !memcmp(host, our_host, 6) ? NS2_WAKE_US : NS2_WAKE_OTHER;
 }
 
+// 扫到的广播去不去连（#2318）：Joy-Con 2 按键唤醒时广播的是它记着的那台主机，不是这台就不接受这里的连接请求——连了只会等满 30 秒链路期限。
+//   只在本机地址已知时判（our_host 为空时 ns2_advert_wake 把「唤醒本机」也报成 OTHER，分不清就照连）；Pro 2 不在此列，行为同改前。
+int ns2_advert_connect(ns2_kind found, ns2_wake wake, int host_known) {
+    return !(host_known && wake == NS2_WAKE_OTHER && (found == NS2_KIND_JOYCON_L || found == NS2_KIND_JOYCON_R));
+}
+
 size_t ns2_bond_command(unsigned step, const uint8_t host[6], const uint8_t key1[16], const uint8_t key2[16], uint8_t out[NS2_BOND_COMMAND_MAX]) {
     static const uint8_t sub[NS2_BOND_STEPS] = {0x01, 0x04, 0x02, 0x03};
     if (!out || step >= NS2_BOND_STEPS) return 0;

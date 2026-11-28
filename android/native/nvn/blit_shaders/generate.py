@@ -56,3 +56,9 @@ with tempfile.TemporaryDirectory(prefix='s2a-drawtex-shaders-') as directory:
     emit(directory, 'draw_tex.vert', 'vs', dtxl, 'k_dtx_')
     emit(directory, 'draw_tex.frag', 'fs', dtxl, 'k_dtx_')
 (here.parent/'backend_vulkan_draw_tex_spv.h').write_text('\n'.join(dtxl)+'\n')
+
+wsi = lines[:5]
+wsi[2] = '// Generated from blit_shaders/wsi_rotate.frag by blit_shaders/generate.py.'
+with tempfile.TemporaryDirectory(prefix='s2a-wsi-shader-') as directory:
+    emit(directory, 'wsi_rotate.frag', 'fs', wsi, 'k_wsi_rotate_')
+(here.parent/'nvn_vk_wsi_rotate_spv.h').write_text('\n'.join(wsi)+'\n')

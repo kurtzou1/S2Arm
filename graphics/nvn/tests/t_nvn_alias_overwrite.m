@@ -57,6 +57,50 @@ int main(void) {
         for (int i = 0; i <= ALIAS_IDLE; i++) { use(&tg, 1); submit(); }
         use(&ti, 0); submit();
         CHECK(tex_get(tg.serial) == g0, "③ G 每次提交都在写：留着");
+        // ④ 逆序与按池索引在 20,000 个无关存活序号下的接管与一致性压力验证
+        static tex_t U0, U1; make(&U0, 24 << 20, 512); make(&U1, 24 << 20, 520);
+        id<MTLTexture> u0 = use(&U0, 1); submit();
+        MTLTextureDescriptor *ud = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        id<MTLTexture> dummy_live = [g_dev newTextureWithDescriptor:ud]; REQUIRE(dummy_live);
+        for (int i = 0; i < 20000; i++) {
+            uint64_t ext = (1ull << 62) + (uint64_t)i + 1;
+            tex_put(ext, dummy_live);   // 把 g_by_serial 填到 20k+ 无关存活项（O(N) 扫描会直接暴露耗时）
+        }
+        uint64_t extra_u0 = (1ull << 62) + 99999ull;
+        tex_put(extra_u0, u0);   // 并额外验证多序号同指 u0 的逆向索引一致性
+        use(&U0, 1); submit(); idle();
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dead1 = g_alias_dead;
+        use(&U1, 0); submit();
+        uint64_t dt_us = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000;
+        CHECK(tex_get(U0.serial) != nil, "④ U0 没被他人写过：20k 无关存活序号下建 U1 保留（耗时 %llu us，只打不判：共享机负载下耗时不稳）", (unsigned long long)dt_us);
+        use(&U1, 1); submit(); idle();
+        static tex_t U2; make(&U2, 24 << 20, 528);
+        dead1 = g_alias_dead; t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        use(&U2, 0); submit();
+        dt_us = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000;
+        CHECK(tex_get(U0.serial) == nil && tex_get(extra_u0) == nil && tex_get((1ull << 62) + 1) == dummy_live && g_alias_dead == dead1 + 2,
+              "④ U0+同纹理 extra 序号被覆写放掉 (+%llu)、20k 无关序号保留（耗时 %llu us，只打不判）", (unsigned long long)(g_alias_dead - dead1), (unsigned long long)dt_us);
+        // ⑤ 打包贴图（NvPkg）同一序号同时挂在活表与幽灵表（定稿后一序号）：换存储（tex_swap_storage，放宽 / 内部分辨率用）后，
+        //   按新贴图查两张表都持有、按旧贴图查都不持有（期望手写：表里存的是同一个 NvPkg，它的 tex 换成新贴图，持有关系跟着贴图走）。
+        //   负对照：关掉 g_pkg_rebind_on（原先只挪活表的反向项）→ 幽灵表按新贴图查不到、按旧贴图仍查得到
+        for (int on = 1; on >= 0; on--) {
+            g_pkg_rebind_on = on;
+            id<MTLTexture> b5 = [g_dev newTextureWithDescriptor:ud], w5 = [g_dev newTextureWithDescriptor:ud]; REQUIRE(b5 && w5);
+            NvPkg *pk = [NvPkg new]; pk->tex = b5;
+            uint64_t s5 = (1ull << 61) + 5 + (uint64_t)on;
+            pthread_mutex_lock(&g_smu); ser_map_put_locked(SR_LIVE, &g_by_serial, s5, pk); ser_map_put_locked(SR_GHOST, &g_ghost, s5, pk); pthread_mutex_unlock(&g_smu);
+            int n5 = tex_swap_storage(b5, w5);
+            pthread_mutex_lock(&g_smu);
+            int lw = serial_holds(&g_by_serial, w5), gw = serial_holds(&g_ghost, w5), lb = serial_holds(&g_by_serial, b5), gb = serial_holds(&g_ghost, b5);
+            ser_map_del_locked(SR_GHOST, &g_ghost, s5); ser_map_del_locked(SR_LIVE, &g_by_serial, s5);
+            int gb_after = serial_holds(&g_ghost, b5);
+            pthread_mutex_unlock(&g_smu);
+            if (on) CHECK(n5 >= 1 && pk->tex == w5 && lw && gw && !lb && !gb && !gb_after,
+                          "⑤ 打包贴图换存储：活表 / 幽灵表按新贴图都持有（%d / %d）、按旧贴图都不持有（%d / %d），删表后不留旧项（%d）", lw, gw, lb, gb, gb_after);
+            else CHECK(lw && !gw && gb && gb_after,
+                       "⑤ 负对照（不挪幽灵表反向项）：幽灵表按新贴图查不到（%d）、按旧贴图仍查得到（%d），删表后旧项残留（%d）", gw, gb, gb_after);
+        }
+        g_pkg_rebind_on = 1;
         nvn_be_drain();
         printf("%s t_nvn_alias_overwrite: %u checks %u failures; backend Metal%d\n", failures ? "✗" : "✓", checks, failures, g_m3 ? 3 : 4);
         return failures != 0;

@@ -26,7 +26,19 @@ import runtime_cache   # noqa: E402
 PY_VER = "3.12.10"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VER}/python-{PY_VER}-embed-amd64.zip"
 GIT = Path(os.environ.get("S2A_RT_GIT", r"C:\Program Files\Git"))
-ZSTD = Path(os.environ.get("S2A_RT_ZSTD", r"R:\s2a\deps\zstd\zstd-v1.5.7-win64"))
+ZSTD_DIR = "zstd-v1.5.7-win64"   # 钉版官方命令行 + libzstd 的目录名
+
+
+def zstd_dir():
+    """钉版 zstd 目录：S2A_RT_ZSTD 给了就用它；否则在 PATH 上找 zstd.exe、取所在目录，目录名须是钉版 ZSTD_DIR。
+    原先缺省写死某一台出包机的盘符路径，换机后整段红（FileNotFoundError），这里不再写死任何机器路径"""
+    given = os.environ.get("S2A_RT_ZSTD")
+    if given:
+        return Path(given)
+    exe = shutil.which("zstd")
+    if exe and Path(exe).parent.name == ZSTD_DIR:
+        return Path(exe).parent
+    raise SystemExit(f"【红】找不到钉版 {ZSTD_DIR}：设 S2A_RT_ZSTD=<目录>，或把该目录放进 PATH（PATH 上的 zstd：{exe or '没有'}）")
 GPL_OFFER = """S2Arm 的 Windows 运行时把 Git for Windows 的 usr/bin（GNU bash、coreutils、gawk、sed、grep 等 MSYS2 程序与 msys-2.0.dll 运行库）
 作为独立程序放在 Runtime/git/usr/bin。它们由出包作业经 PATH 单独拉起，不与 S2Arm 的代码静态链接，也不作为 S2Arm 的动态库加载。
 
@@ -150,7 +162,7 @@ def vc_runtime(rt, versions):
 
 
 def zstd(rt, versions):
-    shutil.copytree(ZSTD, rt / "zstd")
+    shutil.copytree(zstd_dir(), rt / "zstd")
     if not (rt / "zstd/LICENSE").is_file(): runtime_cache.copy_file("zstd-v1.5.7-LICENSE", rt / "zstd/LICENSE")
     versions["zstd"] = subprocess.run([str(rt / "zstd/zstd.exe"), "--version"], capture_output=True, text=True).stdout.strip()
 

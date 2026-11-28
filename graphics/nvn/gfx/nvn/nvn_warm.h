@@ -18,7 +18,7 @@ typedef struct {
     double elapsed;  // 预热开始以来的秒数
 } s2a_warm_state;
 enum { WARM_NONE, WARM_FRONT, WARM_BG, WARM_DONE };
-enum { WARM_WHY_NONE, WARM_WHY_PLAYER, WARM_WHY_STALL, WARM_WHY_LIMIT, WARM_WHY_CONFIG, WARM_WHY_TAIL, WARM_WHY_LATER };   // LATER（11-27）：之后的启动、前端说本包已完整预热过，首帧前不等（nvn_mtl.m warm_prepare）；TAIL（11-06）：清单都已领走、只剩在编的几条，不再挡首帧（nvn_mtl.m warm_prepare）；CONFIG：DM_PSO_PREPARE=0（11-05 起缺省开、上限 15 s；11-02–11-05 曾缺省不开）一开始就在后台
+enum { WARM_WHY_NONE, WARM_WHY_PLAYER, WARM_WHY_STALL, WARM_WHY_LIMIT, WARM_WHY_CONFIG, WARM_WHY_TAIL, WARM_WHY_LATER, WARM_WHY_FRONT };   // FRONT（11-28）：加载页前端放行（原因在它自己的「加载页：不再等预热（…）」行：首装开局那一段到点 / 长时间没进展等），原先一律记成 PLAYER   // LATER（11-27）：之后的启动、前端说本包已完整预热过，首帧前不等（nvn_mtl.m warm_prepare）；TAIL（11-06）：清单都已领走、只剩在编的几条，不再挡首帧（nvn_mtl.m warm_prepare）；CONFIG：DM_PSO_PREPARE=0（11-05 起缺省开、上限 15 s；11-02–11-05 曾缺省不开）一开始就在后台
 
 int s2a_warm_progress(s2a_warm_state *out);   // 1 = 填好；out 为空返回 0
 void s2a_warm_play_now(void);                // 玩家点了「先开始玩」：加载页结束，剩下的转后台

@@ -282,6 +282,8 @@ namespace S2A.Services
             if (n.Contains("IHidServer") && (c == 201 || c == 206)) return true;                          // 发震动（单 / 多）：只输出
             // 取握持方式 GetNpadJoyHoldType（121）：纯查询，只往回复写值。有的游戏每帧都查（D-3F4A：一款动作游戏 110002 条、32 MB，占请求日志 99%）；设握持方式（120）照常记
             if (n.Contains("IHidServer") && c == 121) return true;
+            // 取振动许可 IsVibrationPermitted（205）：纯查询，只往回复写值（许可由 PermitVibration 204 设，照常记）。有的游戏持续轮询（D-GETC：一款动作 RPG 2 小时 38.9 万条、113 MB，占请求日志八成）
+            if (n.Contains("IHidServer") && c == 205) return true;
             if (n.EndsWith("HardwareOpusDecoder") && c != 1 && c != 3 && c <= 9) return true;            // Opus 解码：只解这一段，留下的只有解码器内部预测（下一段自愈）；建 / 设上下文（1 / 3）照常
             //   ↑ 只认解码器对象本身：原先按「名字含」判，把解码器管理器（HardwareOpusDecoderManager，4 / 8 号建解码器）也丢了，恢复后游戏解码时对象找不到、自己中止（一款 Switch 2 游戏）
             // 网络套接字的等待 / 读取（Select 5、Poll 6、Recv 8、RecvFrom 9、Read 25）：不改服务状态，网络连接也没法跨进程接上；进了日志，恢复时在全新的

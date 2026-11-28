@@ -508,6 +508,7 @@ static id<MTLRenderPipelineState> par_mesh_(MTLMeshRenderPipelineDescriptor *m, 
         par_drop(key);
     }
     if (key && g_par_on) par_count(0);
+    atomic_fetch_add(&g_par_compiled, 1);   // 真编也计（同 par_render_ / par_compute_）：原先漏了，时之笛首装前缀全是 task / mesh 管线时报「0 really compiled」、③ 先建基础的门槛（≥ 32）永远不到
     id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:e];
     if (ps && key && g_par_on) { if (g_par_harvest) par_write(key, m); else par_note(key, m); }
     return ps;

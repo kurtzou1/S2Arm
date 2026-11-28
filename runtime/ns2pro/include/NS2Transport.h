@@ -86,6 +86,10 @@ ns2_kind ns2_get_output_kind(void);
 //   广播里手柄要唤醒的主机：PAIRING = 长按 SYNC 的配对广播（主机全 0）、US = 唤醒 our_host、OTHER = 唤醒别的主机、UNKNOWN = 厂商数据不够 18 字节或不是认得出的手柄型号
 typedef enum { NS2_WAKE_UNKNOWN, NS2_WAKE_PAIRING, NS2_WAKE_US, NS2_WAKE_OTHER } ns2_wake;
 ns2_wake ns2_advert_wake(const uint8_t *manufacturer, size_t length, const uint8_t *our_host);
+//   扫到的广播该不该连：本机地址已知（host_known）时，唤醒别的主机的 Joy-Con 2 广播 → 0（不连，提示长按 SYNC）；其余 → 1（NS2Bond.c）
+int ns2_advert_connect(ns2_kind found, ns2_wake wake, int host_known);
+//   这次扫描里有没有因此没连的 Joy-Con 2（连接程序据此在状态行带 syncHint，启动器改提示；每次开扫清零）
+int ns2_scan_saw_other_host(void);
 int ns2_pro_take_pairing(ns2_kind waiting, int waiting_ready, int waiting_linked, ns2_kind found, ns2_wake wake);   // 挂着直连的 Pro 被扫到的配对广播接管（NS2JoyCon.c）
 enum { NS2_BOND_STEPS = 4, NS2_BOND_COMMAND_MAX = 25 };
 //   第 step（0..3）条绑定指令：01 主机地址、04 钥匙一、02 钥匙二、03 结束；返回帧长，参数不对返回 0

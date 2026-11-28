@@ -121,6 +121,8 @@ static int nvn_be_shutdown_session_body(void) {
     nvn_hm_clear(&g_by_serial, session_resource_release);
     nvn_hm_clear(&g_alias, session_resource_release);
     nvn_hm_clear(&g_ghost, session_resource_release);   // 同 g_snap_ghost_pend：只剩这张表持有、进过常驻集的贴图（恢复放回的、已销毁序号的）也要出集
+    alias_pool_clear_locked();
+    for (int i = 0; i < SR_N; i++) rev_clear_locked(i);
     nvn_hm_clear(&g_alias_seen, NULL); nvn_hm_clear(&g_tex_live, NULL);
     // 与上面几张同键的两张也清：共享存储「最后一次 GPU 写在几号栅栏」（号倒回后旧的大号让活着的渲染目标被判成「之后被覆盖」）、幽灵贴图的淘汰环（旧序号会把新局同序号的幽灵淘汰掉）
     nvn_hm_clear(&g_alias_wrote, NULL); memset(g_ghost_ring, 0, sizeof g_ghost_ring); g_ghost_next = 0;
@@ -141,6 +143,7 @@ static int nvn_be_shutdown_session_body(void) {
     if (g_tbuf_view_set) CFSetRemoveAllValues(g_tbuf_view_set);
     ptba_session_reset();
     nvn_hm_clear(&g_cpu_tex, NULL);
+    ph_session_reset();
     // Atomic texture upgrades use the same serial/alias owners above. Their
     // weak usage registry and queued descriptor ids belong to this session.
     pthread_mutex_lock(&g_atomic_mu); g_atomic_images = nil; pthread_mutex_unlock(&g_atomic_mu);

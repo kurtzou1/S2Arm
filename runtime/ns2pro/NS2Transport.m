@@ -77,6 +77,8 @@ static NSString *const lastReadyJoyConKeys[2] = {@"S2ArmNS2ProLastReadyJoyConLef
 // 主机绑定（「记住这台设备」，#521；ns2_set_bond_host）：只在 BLE 队列读写。bondedKey 记写入绑定成功的外设标识 → 当时写的主机地址（十六进制），
 //   只有记录里的地址等于本机地址的手柄才按「等按键唤醒」直连不设期限；没绑定过的照旧 30 秒期限，免得等一台根本不会来找本机的手柄
 static BOOL bondEnabled;
+static _Atomic int sawOtherHost;   // 这次扫描里有没有唤醒别的主机、因此没连的 Joy-Con 2（ns2_scan_saw_other_host；开扫清零）
+int ns2_scan_saw_other_host(void) { return sawOtherHost; }
 static uint8_t bondHost[6];
 static NSString *const bondedKey = @"S2ArmNS2BondedHosts";
 static NSString *bond_host_text(void) { return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x", bondHost[0], bondHost[1], bondHost[2], bondHost[3], bondHost[4], bondHost[5]]; }
@@ -1179,6 +1181,7 @@ static NS2Bridge *bridge;
         // 配对广播不保证包含服务 UUID，因此前台保留无过滤扫描，但禁止重复广播且只扫描十秒。
         // Pairing advertisements may omit service UUIDs; keep an unfiltered foreground scan without duplicates for ten seconds.
         scanDeadline = now_ns() + (uint64_t)NS2_SCAN_SECONDS * NSEC_PER_SEC;
+        sawOtherHost = 0;
         [central scanForPeripheralsWithServices:nil options:nil];
         [self report:NS2_STATUS_SCANNING message:NS2Localized(@"Searching for a Switch 2 Pro in pairing mode") from:nil];
         [self scheduleTimer];
@@ -1349,6 +1352,16 @@ static NS2Bridge *bridge;
         LOG("NS2 Pro BLE 扫到 Pro 的配对广播：撤掉挂着的直连，改连扫到的 id=%s", peripheral.identifier.UUIDString.UTF8String);
         [self dropLink:w];
         if (self != bridge) return;
+    }
+    // 唤醒别的主机的 Joy-Con 2（#2318）：它只接受记着的那台主机，连了只会等满 30 秒链路期限。不连，状态行带 syncHint 让启动器提示长按 SYNC。
+    //   扫描不收重复广播，同一只这一轮不会再报：玩家长按 SYNC 后要再点一次连接（提示里说了）
+    if (!ns2_advert_connect(found, wake, bondEnabled)) {
+        if (!sawOtherHost) {
+            sawOtherHost = 1;
+            LOG("NS2 Joy-Con 2 广播在唤醒别的主机（它记着的不是这台 Mac）：不连，提示长按导轨侧 SYNC 再连 id=%s", peripheral.identifier.UUIDString.UTF8String);
+            [self report:NS2_STATUS_SCANNING message:NS2Localized(@"This Joy-Con 2 is looking for the console it was paired with. Hold the SYNC button on its rail until the player lights sweep, then connect again.") from:nil];
+        }
+        return;
     }
     if (![self accepts:found peripheral:peripheral]) return;   // 已有一只 Joy-Con 时只接另一侧
     NSNumber *connectable = advertisement[CBAdvertisementDataIsConnectable];

@@ -650,7 +650,7 @@ class ScanTests(unittest.TestCase):
     def test_windows_illegal_path_blocks_new_files_only(self):
         # 11-05 天眼：误提交的 'R:\\s2a\\work\\lane/me.need' 让 Windows 端整仓检出报 invalid path。
         # 期望（按 Windows 命名规则手写）：每段含 < > : " | ? * \\ 或控制字符、是设备保留名（不论扩展名）、以空格或点结尾即非法
-        bad = ['R:\\s2a\\work\\lane/me.need', 'docs/a?b.md', 'docs/a*b.md', 'docs/a<b.md', 'docs/a>b.md',
+        bad = ['R:\\s2a\\work\\lane/me.need', 'docs/a?b.md', 'docs/a*b.md', 'docs/a<b.md', 'docs/a>b.md',   # hardcoded-path-ok：扫描器自己的坏样例
                'docs/a|b.md', 'docs/a"b.md', 'docs/a:b.md', 'docs/a\x01b.md', 'aux/x.md', 'docs/CON',
                'docs/nul.txt', 'docs/Com1.md', 'docs/lpt9.md', 'docs/dot.', 'docs/sp ', 'trail. /x.md']
         good = ['docs/常见问题.md', 'docs/console.md', 'docs/com0.md', 'docs/conx.md', 'docs/.hidden.md',

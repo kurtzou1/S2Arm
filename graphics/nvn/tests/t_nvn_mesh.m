@@ -399,8 +399,11 @@ int main(void) {
             MTLMeshRenderPipelineDescriptor *d15a = mtk_desc(&pk15, nil, md, fs, nil, 0, nil);
             NSError *e15 = nil;
             uint64_t h0 = atomic_load(&g_par_hits), m0 = atomic_load(&g_par_misses), sf0 = atomic_load(&g_par_ser_failed), wf0 = atomic_load(&g_par_write_failed);
+            par_drop(k15);   // 先删掉上次留在档里的这一份：首次一定查不中、真编（不删的话 had = 1，下面两条都是空判）
             int had = g_par_have && [g_par_have containsObject:k15];
+            uint64_t c0 = atomic_load(&g_par_compiled);
             id<MTLRenderPipelineState> ps15a = par_mesh(d15a, k15, &e15);
+            VERIFY(!had && atomic_load(&g_par_compiled) == c0 + 1, "⑮ 网格管线档里查不中、真编：真编计数 +%llu（期望 +1；原先漏计，首装前缀全是网格管线时报 0 真编）", (unsigned long long)(atomic_load(&g_par_compiled) - c0));
             VERIFY(ps15a != nil && (had || atomic_load(&g_par_misses) == m0 + 1), "⑮ par_mesh 首次建管线成功（archive had=%d, misses +%llu）", had, (unsigned long long)(atomic_load(&g_par_misses) - m0));
             par_write(k15, mtk_desc(&pk15, nil, md, fs, nil, 0, nil));
             VERIFY(atomic_load(&g_par_ser_failed) == sf0 && atomic_load(&g_par_write_failed) == wf0 && [g_par_have containsObject:k15],
@@ -408,8 +411,9 @@ int main(void) {
                    (unsigned long long)(atomic_load(&g_par_ser_failed) - sf0), (unsigned long long)(atomic_load(&g_par_write_failed) - wf0));
 
             MTLMeshRenderPipelineDescriptor *d15b = mtk_desc(&pk15, nil, md, fs, nil, 0, nil);
-            uint64_t h1 = atomic_load(&g_par_hits);
+            uint64_t h1 = atomic_load(&g_par_hits), c1 = atomic_load(&g_par_compiled);
             id<MTLRenderPipelineState> ps15b = par_mesh(d15b, k15, &e15);
+            VERIFY(atomic_load(&g_par_compiled) == c1, "⑮ 网格管线从档里命中：真编计数不变（+%llu）", (unsigned long long)(atomic_load(&g_par_compiled) - c1));
             VERIFY(ps15b != nil && atomic_load(&g_par_hits) == h1 + 1, "⑮ par_mesh 二次经 MTLBinaryArchive 直接命中（hits +%llu, before_first=%llu）",
                    (unsigned long long)(atomic_load(&g_par_hits) - h1), (unsigned long long)h0);
 

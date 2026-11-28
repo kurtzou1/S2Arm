@@ -28,10 +28,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # 按文件加载本脚本时（单测 importlib）同目录也找得到
 import runtime_sources   # noqa: E402  同目录：构建 venv 的基准解释器跟着随包 Python 的钉版走
 REQS = ["tools/rewriter-requirements.txt", "pack/fonts/requirements.txt", "launchers/macos/requirements-runtime.txt"]
-# 公式 → 谁要：bundle_runtime.py 的 prefixes 全部 + C 改写器（runtime/rewriter，CMake 3.18+）+ dav1d 软解兜底（AV1；S2A_DAV1D 缺省 auto 探测本机，
+# 公式 → 谁要：出包脚本本身要的 bash 5（随包 Runtime/bin/bash 11-28 起由 runtime_sources.py 钉版源码编，不拷这份）+ C 改写器（runtime/rewriter，CMake 3.18+）+ dav1d 软解兜底（AV1；S2A_DAV1D 缺省 auto 探测本机，
 #   有 AV1 硬解时整条不进构建，见 dav1d_wanted；只有它要 meson / ninja）
 FORMULAS = {"python@3.12": "构建 venv",
-            "bash": "运行环境（bash 5）", "cmake": "C 改写器"}
+            "bash": "出包脚本（bash 5）", "cmake": "C 改写器"}
 DAV1D_FORMULAS = {"meson": "dav1d 静态库（AV1 软解兜底）", "ninja": "dav1d 静态库（AV1 软解兜底）"}
 IMPORTS = "import capstone, lz4, numpy, PIL, fontTools, pathops"
 GMAKE_VERSION = "4.4.1"

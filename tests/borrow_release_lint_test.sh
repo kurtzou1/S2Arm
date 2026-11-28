@@ -5,7 +5,7 @@
 #   管线缓存 g_pso（perf/replay-borrow）。借用安全的前提：持有者放手时走延迟释放（defer_obj_unref / defer_obj_release：记 g_fence + 1，本次提交做完才真放）。
 #   有人改成直接 CFRelease 不经延迟，正在编码的这次提交就会拿着已释放的对象（释放后使用）。期望（按规则手写）：
 #   ① nvn_mtl.m 里 CFRelease 这些持有字段的每一行，同一行在它之前先有 defer_obj_unref(
-#   ② 从 g_by_serial 删条目（hm_del_id(&g_by_serial）的每一行，同一行有 defer_obj_ 或写明「borrow-safe:」与谁持有
+#   ② 从 g_by_serial 删条目（hm_del_id(&g_by_serial，或带反向索引的 ser_map_del_locked(SR_LIVE, &g_by_serial，#2299）的每一行，同一行有 defer_obj_ 或写明「borrow-safe:」与谁持有
 #   ③ 整表清空 g_by_serial / g_pso、从 g_pso 删条目只出现在会话重置 nvn_session.inc（会话重置时没有在编码的提交）
 #   ④ 正对照：规则对手写的坏行都报、好行都不报（规则真能红）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); cd "$H" || exit 1
@@ -14,8 +14,9 @@ import re, glob, sys
 HOLD = re.compile(r'CFRelease\(\s*(?:\(__bridge [^)]*\)\s*)?(?:r|rp|s)->(?:view|ar|im|alt)(?:\[[^\]]*\])?\s*\)')
 def bad_release(line):   # ①：持有字段的 CFRelease 前面同一行没有 defer_obj_unref(
     m = HOLD.search(line); return bool(m) and 'defer_obj_unref(' not in line[:m.start()]
+SDEL = re.compile(r'hm_del_id\(\s*&g_by_serial\b|ser_map_del_locked\(\s*SR_LIVE\s*,\s*&g_by_serial\b')   # ② 两种删法：裸表、带反向索引（ser_map_del_locked 里 CFRelease 表的那份引用）
 def bad_serial_del(line):   # ②
-    return 'hm_del_id(&g_by_serial' in line and 'defer_obj_' not in line and 'borrow-safe:' not in line
+    return bool(SDEL.search(line)) and 'defer_obj_' not in line and 'borrow-safe:' not in line
 CLR = re.compile(r'nvn_hm_clear\(\s*&g_(?:by_serial|pso)\b|nvn_hm_del\(\s*&g_pso\b|hm_del_id\(\s*&g_pso\b')
 def bad_clear(path, line): return bool(CLR.search(line)) and not path.endswith('nvn_session.inc')   # ③
 fails = []
@@ -26,7 +27,7 @@ hits = {1: [], 2: [], 3: []}; n1 = n2 = 0
 for p in files:
     for i, l in enumerate(open(p, encoding='utf-8', errors='replace'), 1):
         if HOLD.search(l): n1 += 1
-        if 'hm_del_id(&g_by_serial' in l: n2 += 1
+        if SDEL.search(l): n2 += 1
         if bad_release(l): hits[1].append(f'{p}:{i}')
         if bad_serial_del(l): hits[2].append(f'{p}:{i}')
         if bad_clear(p, l): hits[3].append(f'{p}:{i}')
@@ -38,6 +39,7 @@ good = ['    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->
 ck('④ 正对照：手写坏行（直接释放、先释放后延迟、带桥接）都报，好行不报',
    all(bad_release(b) for b in bad) and not any(bad_release(g) for g in good)
    and bad_serial_del('hm_del_id(&g_by_serial, &k);') and not bad_serial_del('defer_obj_unref(old); hm_del_id(&g_by_serial, &k);')
+   and bad_serial_del('ser_map_del_locked(SR_LIVE, &g_by_serial, k);') and not bad_serial_del('defer_obj_release(old); ser_map_del_locked(SR_LIVE, &g_by_serial, k);')
    and bad_clear('x/nvn_mtl.m', 'nvn_hm_clear(&g_pso, hm_rel);') and not bad_clear('x/nvn_session.inc', 'nvn_hm_clear(&g_pso, hm_rel);'))
 print('回放借用守卫单测：' + ('全过' if not fails else f'不通 {len(fails)} 项'))
 sys.exit(1 if fails else 0)

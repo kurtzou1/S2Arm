@@ -31,7 +31,7 @@
 #define PB_LOW_PCT 85        // 超额时放到额度的这个比例
 #define PB_WARM_PCT 70       // 预热到额度的这个比例就停
 #define PB_VA_PER (256ull << 10)        // 每条活着的管线占的宿主低区地址（实测 240–316 KB，iPad 一局 6.2 GB ÷ 2.5 万条 ≈ 248 KB）
-#define PB_VA_RESERVE (1024ull << 20)   // 低区空洞留给管线以外的（线程栈、Metal ≤256 MB 缓冲、视频解码、C#）：崩溃那局分配失败出现在空洞 865–448 MB
+#define PB_VA_RESERVE PB_LOW_KEEP   // 低区空洞留给管线以外的（线程栈、Metal ≤256 MB 缓冲、视频解码、C#）：崩溃那局分配失败出现在空洞 865–448 MB
 // 机型 → 额度（条）。按机型实测（真机逐级实验：额度跟常驻条数 / 装过的总量 / 归档体积哪个有关、各机型阈值、淘汰后首遇长帧按 #2044 口径），
 //   实测后在这里加行，前缀匹配（hw.machine / Mac hw.model），先列的先匹配。实测前缺省 0 = 不设额度（行为同改前）：拍一个数会让预热清单大的游戏
 //   （0100F2C0115B6000 2.6 万行）提前停预热、首遇变多，没有读数撑不能上；实验用 DM_PSO_BUDGET=<条数> 指定
@@ -50,6 +50,9 @@ static void (*g_pb_holes_fn)(uint64_t *total, uint64_t *largest);   // 原生层
 static int g_pb_holes_tried;   // 取过了（取不到 = 不设地址额度；单测直接置位、自己给桩）
 // 地址额度（⑤）：由一次扫描的空洞 T 与此刻活着的条数算
 static void pb_peak_note(uint64_t alive) { uint32_t a = alive > UINT32_MAX ? UINT32_MAX : (uint32_t)alive, p = atomic_load(&g_pb_peak); while (a > p && !atomic_compare_exchange_weak(&g_pb_peak, &p, a)) {} }
+// 别处从低区拿地址的大块（#2306 热贴图预建）按同一口径让路：最近一次扫到的空洞 T 扣掉 PB_VA_RESERVE 放不下 sz 就不建；T = 0（没扫到：Mac / 单测不链原生层）= 不拦
+static uint64_t pb_low_holes(void) { return atomic_load(&g_pb_va_holes); }
+static int pb_low_room(uint64_t sz) { uint64_t t = pb_low_holes(); return !t || (t > PB_VA_RESERVE && t - PB_VA_RESERVE >= sz); }
 static uint32_t pb_va_from(uint64_t holes, uint64_t alive) {
     pb_peak_note(alive);
     int64_t room = (int64_t)holes - (int64_t)PB_VA_RESERVE, b = (int64_t)atomic_load(&g_pb_peak) + (room > 0 ? room / (int64_t)PB_VA_PER : 0);

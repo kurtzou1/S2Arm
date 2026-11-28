@@ -151,6 +151,27 @@ class RuntimeEnv(unittest.TestCase):
             brw.env_cmd(Path(d)); raw = Path(d, "s2arm_env.cmd").read_bytes()
         self.assertEqual([b for b in raw if b > 0x7F], [])
 
+    def test_zstd_dir_not_hardcoded(self):
+        # 钉版 zstd 目录：S2A_RT_ZSTD 优先；否则 PATH 上 zstd 所在目录、目录名须是钉版；都不成立报红（原先缺省写死一台出包机的盘符，换机后整段红）
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("brw", ROOT / "launchers/windows/bundle_runtime_win.py")
+        brw = importlib.util.module_from_spec(spec); spec.loader.exec_module(brw)
+        with tempfile.TemporaryDirectory() as d:
+            good = Path(d, brw.ZSTD_DIR); good.mkdir(); bad = Path(d, "zstd-other"); bad.mkdir()
+            with patch.dict(os.environ, {"S2A_RT_ZSTD": str(bad)}):
+                self.assertEqual(brw.zstd_dir(), bad)                                   # 显式给了就用它
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("S2A_RT_ZSTD", None)
+                with patch.object(brw.shutil, "which", return_value=str(good / "zstd.exe")):
+                    self.assertEqual(brw.zstd_dir(), good)                              # PATH 上、目录名对
+                with patch.object(brw.shutil, "which", return_value=str(bad / "zstd.exe")):
+                    with self.assertRaises(SystemExit):
+                        brw.zstd_dir()                                                  # PATH 上但不是钉版目录
+                with patch.object(brw.shutil, "which", return_value=None):
+                    with self.assertRaises(SystemExit):
+                        brw.zstd_dir()                                                  # PATH 上没有
+        # 「不写死出包机盘符」由全仓检查 tools/hardcoded_path_lint.py（tests/hardcoded_path_lint_test.sh）管，这里不再单独断言
+
     def test_same_path_as_bundled_env_cmd(self):
         # 作业环境与随包 s2arm_env.cmd（启动器 / 手工起出包用）同一份 PATH：两处各写一遍，这里核一致
         import importlib.util, ntpath

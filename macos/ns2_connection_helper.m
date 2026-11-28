@@ -150,6 +150,7 @@ static void emit_status(ns2_status status, const char *message, void *context) {
             @"devices": device_list(),   // 已就绪的 NS2 手柄（id、型号、链路），分配玩家按 id 认（#520 E）
         } mutableCopy];
         if (info.battery_level_known) payload[@"battery"] = @(info.battery_level);
+        if ((status == NS2_STATUS_SCANNING || status == NS2_STATUS_SCAN_FINISHED) && ns2_scan_saw_other_host()) payload[@"syncHint"] = @YES;   // 扫到唤醒别的主机的 Joy-Con 2、没连（#2318）：启动器提示长按 SYNC
         emit_line(payload);   // 与分配回报同一把锁写，一行一条 JSON 不交错
     }
 }

@@ -20,6 +20,18 @@ int main(void) {
     CK(ns2_advert_wake(pairing, 17, us) == NS2_WAKE_UNKNOWN && ns2_advert_wake(apple, 18, us) == NS2_WAKE_UNKNOWN && ns2_advert_wake(NULL, 18, us) == NS2_WAKE_UNKNOWN,
        "⑤ 负对照：不够 18 字节 / 公司号不对 / 空 → 未知（不当成配对，不写绑定）");
 
+    // 扫到的广播去不去连（#2318）：期望按「手柄只接受它记着的主机」手写
+    CK(!ns2_advert_connect(NS2_KIND_JOYCON_L, NS2_WAKE_OTHER, 1) && !ns2_advert_connect(NS2_KIND_JOYCON_R, NS2_WAKE_OTHER, 1),
+       "⑤a 本机地址已知、Joy-Con 2（左 / 右）在唤醒别的主机 → 不连");
+    CK(ns2_advert_connect(NS2_KIND_JOYCON_R, NS2_WAKE_PAIRING, 1) && ns2_advert_connect(NS2_KIND_JOYCON_L, NS2_WAKE_US, 1) && ns2_advert_connect(NS2_KIND_JOYCON_R, NS2_WAKE_UNKNOWN, 1),
+       "⑤b 反证：配对广播（长按 SYNC）/ 唤醒本机 / 认不出唤醒对象 → 照连");
+    CK(ns2_advert_connect(NS2_KIND_JOYCON_R, NS2_WAKE_OTHER, 0), "⑤c 反证：本机地址不知道（ns2_advert_wake 把唤醒本机也报成 OTHER）→ 照连，不误拒");
+    CK(ns2_advert_connect(NS2_KIND_PRO, NS2_WAKE_OTHER, 1), "⑤d 反证：Pro 2 不在此列，行为同改前");
+    // 端到端走一遍真实广播字节：右只唤醒别的主机 → 不连；同一只长按 SYNC 的配对广播 → 连
+    uint8_t jc_other[18]; memcpy(jc_other, wake_other, 18); jc_other[7] = 0x66;
+    CK(!ns2_advert_connect(ns2_kind_from_manufacturer(jc_other, 18), ns2_advert_wake(jc_other, 18, us), 1)
+       && ns2_advert_connect(ns2_kind_from_manufacturer(joycon, 18), ns2_advert_wake(joycon, 18, us), 1), "⑤e 真实广播字节：右只唤醒别的主机不连、配对广播照连");
+
     uint8_t k1[16], k2[16], out[NS2_BOND_COMMAND_MAX];
     for (int i = 0; i < 16; i++) { k1[i] = (uint8_t)(0xa0 + i); k2[i] = (uint8_t)(0xb0 + i); }
     size_t n = ns2_bond_command(0, us, k1, k2, out);

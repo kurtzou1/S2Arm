@@ -42,6 +42,15 @@ be read or the controller does not answer a bonding command, the helper logs it
 and the controller works as before for this session. Changing the setting
 restarts the helper unless a game is using the controller. iOS has no API for the
 device's own Bluetooth address, so this is Mac only.
+A Joy-Con 2 woken by a normal button press advertises for the host it remembers.
+When this Mac's address is known and that host is a different one, the helper does
+not connect (the controller would not accept it and the link would time out after
+30 seconds); the panel asks the player to hold the SYNC button on the inner rail (between SL and SR) until the
+player lights sweep, then connect again. The Pro controller is unchanged.
+
+The helper's log lines (scan results, link timeouts, handshake steps) are appended
+to `<private folder>/logs/ns2-connection.log`, which the diagnostic export collects.
+
 Manual **连接手柄** and **断开连接** controls are always available in the
 popover. Play remains available without a controller. With no relay socket, the
 launch request tells the game not to run its own background controller check.

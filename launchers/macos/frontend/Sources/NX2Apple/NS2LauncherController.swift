@@ -112,6 +112,7 @@ final class NS2LauncherController: ObservableObject {
     private var input: Pipe?   // 运行中改设定（两只怎么用）经 stdin 一行命令交给连接程序，不用重连
     private var buffer = Data()
     private var intentionalStop = false
+    let helperLog: NS2HelperLog
 
     private let orderFileURL: URL
     /// defaults / orderFile 单测换成临时的（不碰本机真的分配与顺序表）
@@ -120,6 +121,7 @@ final class NS2LauncherController: ObservableObject {
          bluetoothAuthorization: @escaping () -> CBManagerAuthorization = { CBManager.authorization }) {
         self.bluetoothAuthorization = bluetoothAuthorization
         self.socketURL = socketURL
+        helperLog = NS2HelperLog(socketURL: socketURL)
         faceMaps = ControllerFaceMapStore(fileURL: orderFile.deletingPathExtension().appendingPathExtension("face.json"))
         self.systemControllers = systemControllers
         self.notifications = notifications
@@ -562,10 +564,12 @@ final class NS2LauncherController: ObservableObject {
 
     private func consume(_ data: Data) {
         buffer.append(data)
+        var plain: [Data] = []
+        defer { helperLog.append(plain, group: 0) }
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer[..<newline]
             buffer.removeSubrange(...newline)
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { plain.append(Data(line)); continue }
             if let event = object["assign"] as? [String: Any] { receiveAssign(event); continue }
             if let event = object["press"] as? [String: Any] { receivePress(event); continue }
             guard let code = (object["status"] as? NSNumber)?.intValue else { continue }
@@ -649,7 +653,7 @@ final class NS2LauncherController: ObservableObject {
         if spare.count > 1 { for extra in spare.dropFirst() { extra.stop() }; extras.removeAll { e in spare.dropFirst().contains { $0 === e } } }
         if extras.allSatisfy({ !$0.devices.isEmpty }), extras.count + 1 < Self.maxGroups, allDevices.count < PlayerAssignment.maxPlayers, let helper = helperURL {
             let group = (1..<Self.maxGroups).first { g in !extras.contains { $0.group == g } } ?? extras.count + 1
-            let extra = NS2SecondHelper(executable: helper, upstream: sideSocketURL, rememberDevice: rememberDevice, group: group)
+            let extra = NS2SecondHelper(executable: helper, upstream: sideSocketURL, rememberDevice: rememberDevice, group: group, log: helperLog)
             extra.onChange = { [weak self] in self?.reconcile() }
             extra.onAssign = { [weak self] event in self?.receiveAssign(event) }
             extra.onPress = { [weak self] event in self?.receivePress(event) }
@@ -890,6 +894,9 @@ final class NS2LauncherController: ObservableObject {
         if let data = line.data(using: .utf8) { try? input?.fileHandleForWriting.write(contentsOf: data) }
     }
 
+    /// 扫到的 Joy-Con 2 在唤醒它记着的别的主机（状态行 syncHint，#2318）：它不接受这台 Mac 的连接，连接程序没去连。
+    ///   这一轮扫描不会再报同一只，所以要玩家长按 SYNC 后再点一次连接
+    static let syncHintDetail = "这只 Joy-Con 2 在找它配对过的主机（Switch 2 等），连不上这台 Mac。把它从主机上拆下，长按内侧滑轨 SL / SR 之间的小 SYNC 键直到玩家灯来回闪，再点「连接」。Switch 2 主机开着或休眠时会把手柄抢回去，先彻底关机或拿远。"
     func apply(status code: Int, _ object: [String: Any]) {   // 单测（@testable）直接喂连接程序的状态行
         if let seconds = (object["scanSeconds"] as? NSNumber)?.doubleValue, seconds > 0 { scanSeconds = seconds }
         if let name = object["name"] as? String, !name.isEmpty { deviceName = name }
@@ -910,7 +917,7 @@ final class NS2LauncherController: ObservableObject {
         case 1:
             phase = .scanning
             startScanWindow()
-            helperDetail = "正在搜索手柄。请按一下手柄；未出现时长按顶部 SYNC。"
+            helperDetail = object["syncHint"] as? Bool == true ? Self.syncHintDetail : "正在搜索手柄。请按一下手柄；未出现时长按顶部 SYNC。"
         case 2:
             phase = .connecting
             helperDetail = Self.connectingDetail(rememberDevice: rememberDevice)
@@ -927,10 +934,10 @@ final class NS2LauncherController: ObservableObject {
             }
         case 9:   // 扫描时间（scanSeconds）结束、没找到：不是错误
             idleAfterScan = true
-            helperDetail = "没找到手柄。按手柄任一键或长按 SYNC，再点「连接」搜一次。"
+            helperDetail = object["syncHint"] as? Bool == true ? Self.syncHintDetail : "没找到手柄。按手柄任一键或长按 SYNC，再点「连接」搜一次。Switch 2 主机开着或休眠时会把手柄抢回去，先彻底关机或拿远。"
         case 5:
             phase = .failed
-            helperDetail = "手柄未连接。请唤醒手柄后按 SYNC，再点「重新连接」。"
+            helperDetail = "手柄未连接。请唤醒手柄后按 SYNC，再点「重新连接」。Switch 2 主机开着或休眠时会把手柄抢回去，先彻底关机或拿远。"
         case 6:
             phase = .failed
             helperDetail = "蓝牙不可用，请检查 macOS 蓝牙权限。"
@@ -960,6 +967,35 @@ final class NS2LauncherController: ObservableObject {
     }
 }
 
+/// 连接程序（S2ArmNS2Connection）输出里不是 JSON 状态的行：[NS2Transport] 扫到广播、BLE 链路超时、握手各步等。原先读完就丢，
+///   玩家报 Joy-Con 2 连不上（#2318、D-6338）时没有任何可查的。逐行加时间戳和组号追加到 <私有目录>/logs/ns2-connection.log，
+///   诊断导出收 logs/ 下的 .log（pack/jobs/library.py diagnostics）；超过 maxBytes 从头重写（同 Xbox GIP 中继日志）
+struct NS2HelperLog {
+    static let maxBytes = 2 << 20
+    let url: URL
+    /// 中继 socket 在 <私有目录>/ns2-relay.sock：日志放同一私有目录的 logs/
+    init(socketURL: URL) { url = socketURL.deletingLastPathComponent().appendingPathComponent("logs", isDirectory: true).appendingPathComponent("ns2-connection.log") }
+    init(url: URL) { self.url = url }
+
+    func append(_ lines: [Data], group: Int, now: Date = Date()) {
+        let text = lines.compactMap { String(data: $0, encoding: .utf8) }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !text.isEmpty else { return }
+        let stamp = Self.stamp.string(from: now)
+        let data = Data(text.map { "[\(stamp)] [组 \(group + 1)] \($0)\n" }.joined().utf8)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+        if size > Self.maxBytes || !fm.fileExists(atPath: url.path) { try? data.write(to: url); return }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"; return f
+    }()
+}
+
 /// 第二个连接程序（最多 4 只时的第二组；macos/ns2_connection_helper.m 的 S2A_NS2_UPSTREAM 模式）：不收游戏、连到第一个的旁路 socket；
 ///   重连记忆用自己的偏好域（不抢第一个记住的手柄）。状态行只取设备 / 型号 / 玩家数；分配手势照样报
 @MainActor
@@ -976,8 +1012,9 @@ final class NS2SecondHelper {
     private var input: Pipe?
     private var buffer = Data()
 
-    init(executable: URL, upstream: URL, rememberDevice: Bool, group: Int = 1) {
-        self.executable = executable; self.upstream = upstream; self.rememberDevice = rememberDevice; self.group = group
+    private let log: NS2HelperLog?
+    init(executable: URL, upstream: URL, rememberDevice: Bool, group: Int = 1, log: NS2HelperLog? = nil) {
+        self.executable = executable; self.upstream = upstream; self.rememberDevice = rememberDevice; self.group = group; self.log = log
     }
 
     nonisolated static func environment(base: [String: String], upstream: String, rememberDevice: Bool, group: Int = 1) -> [String: String] {
@@ -1015,9 +1052,11 @@ final class NS2SecondHelper {
     /// 一行状态 / 分配手势（单测直接喂）
     func consume(_ data: Data) {
         buffer.append(data)
+        var plain: [Data] = []
+        defer { log?.append(plain, group: group) }
         while let nl = buffer.firstIndex(of: 10) {
             let line = buffer[..<nl]; buffer.removeSubrange(...nl)
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { plain.append(Data(line)); continue }
             if let event = object["assign"] as? [String: Any] { onAssign?(event); continue }
             if let event = object["press"] as? [String: Any] { onPress?(event); continue }
             guard let code = (object["status"] as? NSNumber)?.intValue else { continue }

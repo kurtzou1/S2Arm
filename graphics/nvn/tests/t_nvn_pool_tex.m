@@ -29,7 +29,7 @@ static unsigned checks, fails;
 #define VERIFY(c, ...) do { checks++; int ok_ = !!(c); if (!ok_) fails++; printf("%s ", ok_ ? "PASS" : "FAIL"); printf(__VA_ARGS__); putchar('\n'); fflush(stdout); } while (0)
 enum { MEM = 256 << 20, IO_OFF = 0x1000 };   // ⑲ 再要约 67 MB
 static uint8_t *memory; static pool_t *pool; static size_t mem_next = 0x100000;
-static tex_t texs[400];
+static tex_t texs[410];
 
 static tex_t *texture_ex(int id, uint32_t w, uint32_t h, int flags, float val) {   // 每个纹素 = val
     tex_t *t = &texs[id]; memset(t, 0, sizeof *t); t->magic = MAGIC('T', 'E', 'X', 0); t->serial = nvn_new_serial();
@@ -563,6 +563,91 @@ int main(void) { @autoreleasepool {
             texture(390, 4, 4, 0);
             pthread_mutex_lock(&g_smu); int held2 = nvn_hm_get(&g_pool_held, &ser) != NULL, in_tab2 = hm_get_id(&g_by_serial, &ser) != nil; pthread_mutex_unlock(&g_smu);
             VERIFY(!held2 && !in_tab2, "㉒ 登记换掉后旧序号真正放了：池持有 %d、在序号表 %d（期望 0、0）", held2, in_tab2);
+        }
+        // ㉓ 热贴图指纹预建（pool_hot.tsv）：冷贴图建表不预建，被着色器读过一次之后记录指纹；下一轮建表只预建命中的热贴图、冷贴图仍不建，且受内存余量门槛保护
+        if (cs) {
+            const char *tmp = "/tmp/t_nvn_pool_hot_test.tsv";
+            unlink(tmp);
+            g_ph_path_test = tmp;
+            ph_session_reset();
+            os_unfair_lock_lock(&g_rmu);
+            for (int k = 0; k < POOL_TABS; k++) pool_tab_drop(k);
+            pool_dset_clear(&g_pdirty[0]); pool_dset_clear(&g_pleft); atomic_store(&g_ptab_any, 0);
+            os_unfair_lock_unlock(&g_rmu);
+            atomic_fetch_add(&g_cur_frame, 1); pool_walk_frame(); g_walk_spent = 0; g_live_spent = 0;
+            texture(400, 32, 32, 0);
+            texture(401, 32, 32, 0);
+            // 已释放/悬空 pool_t* 的登记项（r->gone == 1 且 pool 指向未映射地址）：首轮与次轮建表均不得解引用
+            texture(405, 32, 32, 0);
+            g_treg[405].gone = 1;
+            g_treg[405].t.pool = (pool_t *)(uintptr_t)0x1000;
+            os_unfair_lock_lock(&g_rmu);
+            __unsafe_unretained id<MTLBuffer> btmp = nil;
+            pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &btmp);
+            uint64_t hdum = g_ptab[0].dummy;
+            os_unfair_lock_unlock(&g_rmu);
+            uint64_t e400_1 = table_entry(400, 0, NULL);
+            int m400_1 = made(400), m401_1 = made(401);
+            // 着色器仅读 400（不读 401）
+            read4(cs, 400u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20);
+            read4(cs, 400u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20);
+            ph_save_maybe(1, 1);
+            // 新一轮加载 pool_hot.tsv：建表前先登记一对冷贴图 402（同 400 热内容）、403（同 401 冷内容），建表时应仅预建 402
+            ph_session_reset();
+            os_unfair_lock_lock(&g_rmu);
+            for (int k = 0; k < POOL_TABS; k++) pool_tab_drop(k);
+            pool_dset_clear(&g_pdirty[0]); pool_dset_clear(&g_pleft); atomic_store(&g_ptab_any, 0);
+            os_unfair_lock_unlock(&g_rmu);
+            atomic_fetch_add(&g_cur_frame, 1); pool_walk_frame(); g_walk_spent = 0; g_live_spent = 0;
+            texture(402, 32, 32, 0);
+            texture(403, 32, 32, 0);
+            memcpy(texs[402].mem, texs[400].mem, texs[402].L.size);
+            memcpy(texs[403].mem, texs[401].mem, texs[403].L.size);
+            os_unfair_lock_lock(&g_rmu);
+            pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &btmp);
+            os_unfair_lock_unlock(&g_rmu);
+            uint64_t e402 = table_entry(402, 0, NULL);
+            int m402 = made(402), m403 = made(403);
+            // 内存余量不足门槛：哪怕命中热贴图也不预建（保护 iPhone 内存）
+            ph_session_reset();
+            os_unfair_lock_lock(&g_rmu);
+            for (int k = 0; k < POOL_TABS; k++) pool_tab_drop(k);
+            pool_dset_clear(&g_pdirty[0]); pool_dset_clear(&g_pleft); atomic_store(&g_ptab_any, 0);
+            os_unfair_lock_unlock(&g_rmu);
+            uint64_t flr = pool_avail_floor(mem_margin(), tex_reclaim_low());
+            atomic_store(&g_mem_avail_fake, (int64_t)flr);
+            atomic_fetch_add(&g_cur_frame, 1); pool_walk_frame(); g_walk_spent = 0; g_live_spent = 0;
+            texture(404, 32, 32, 0);
+            memcpy(texs[404].mem, texs[400].mem, texs[404].L.size);
+            os_unfair_lock_lock(&g_rmu);
+            pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &btmp);
+            os_unfair_lock_unlock(&g_rmu);
+            int m404_lo = made(404);
+            atomic_store(&g_mem_avail_fake, -1);
+            // 低区门槛（#2306 接手，#2020 一族）：扫到的宿主低区空洞扣掉 1 GB 保留放不下这张热贴图 → 不预建；放得下 → 照建（期望手写：同管线地址额度 ⑤ 的口径）
+            int mlow[2];
+            for (int q = 0; q < 2; q++) {
+                ph_session_reset();
+                os_unfair_lock_lock(&g_rmu);
+                for (int k = 0; k < POOL_TABS; k++) pool_tab_drop(k);
+                pool_dset_clear(&g_pdirty[0]); pool_dset_clear(&g_pleft); atomic_store(&g_ptab_any, 0);
+                os_unfair_lock_unlock(&g_rmu);
+                for (int o = 400; o < 408; o++) if (o != 405) g_treg[o].ok = 0;   // 前几轮登记的热贴图（402 / 404 / 上一格）不留：热记录只有 1 张的份，先走到的会把它用掉
+                atomic_store(&g_pb_va_holes, q == 0 ? PB_LOW_KEEP + 2048 : PB_LOW_KEEP + (64ull << 20));   // 32x32 RGBA8 一张 4 KB：扣掉保留只剩 2 KB 放不下 / 余 64 MB
+                atomic_fetch_add(&g_cur_frame, 1); pool_walk_frame(); g_walk_spent = 0; g_live_spent = 0;
+                int id = 406 + q; texture(id, 32, 32, 0); memcpy(texs[id].mem, texs[400].mem, texs[id].L.size);
+                os_unfair_lock_lock(&g_rmu); pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &btmp); os_unfair_lock_unlock(&g_rmu);
+                mlow[q] = made(id);
+            }
+            atomic_store(&g_pb_va_holes, 0);
+            g_treg[405].ok = 0; g_treg[405].gone = 0; g_treg[405].t.pool = NULL;
+            ph_session_reset();
+            g_ph_path_test = NULL;
+            unlink(tmp);
+            VERIFY(!mlow[0] && mlow[1], "㉓ 低区门槛：空洞扣掉 1 GB 保留后放不下 → 热贴图 406 不预建（%d，期望 0）；余 64 MB → 407 照建（%d，期望 1）", mlow[0], mlow[1]);
+            VERIFY(e400_1 == hdum && !m400_1 && !m401_1 && m402 && e402 != hdum && !m403 && !m404_lo,
+                   "㉓ 热贴图指纹预建：首轮冷图 %d/%d（期望 0/0）；次轮仅预建命中热图 402=%d（非哑 %d）、冷图 403=%d（期望 1、1、0）；余量低于门槛跳过 404=%d（期望 0）",
+                   m400_1, m401_1, m402, e402 != hdum, m403, m404_lo);
         }
     printf("%s t_nvn_pool_tex：%u 项，%u 项失败（追不到槽的句柄按编号读池：池表 + 已读位图 + 未写渲染目标不建 + 小贴图预建 + 表复用）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;
